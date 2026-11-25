@@ -413,7 +413,6 @@ func TestFabricSQLDAO_Update(t *testing.T) {
 		paramStatus *string
 
 		expectedIpID   *uuid.UUID
-		expectedSiteID *uuid.UUID
 		expectedStatus *string
 
 		expectError        bool
@@ -426,7 +425,6 @@ func TestFabricSQLDAO_Update(t *testing.T) {
 			paramIpID:   cutil.GetPtr(ip2.ID),
 			paramStatus: cutil.GetPtr(FabricStatusError),
 
-			expectedSiteID: cutil.GetPtr(site2.ID),
 			expectedIpID:   cutil.GetPtr(ip2.ID),
 			expectedStatus: cutil.GetPtr(FabricStatusError),
 
@@ -452,7 +450,7 @@ func TestFabricSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
 				assert.Equal(t, tc.id, got.ID)
-				assert.Equal(t, tc.expectedIpID.String(), got.InfrastructureProviderID.String())
+				assert.Equal(t, *tc.expectedIpID, got.InfrastructureProviderID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, true, got.IsMissingOnSite)
 			}

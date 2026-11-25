@@ -25,9 +25,11 @@ use carbide_uuid::switch::SwitchId;
 use db::db_read::DbReader;
 use db::{ObjectColumnFilter, switch as db_switch};
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
+use model::site_explorer::EndpointExplorationReport;
 use model::switch::{Switch, SwitchControllerState};
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
@@ -135,13 +137,30 @@ fn populate_switch_nvos_info(
     }
 }
 
-/// Loads cached BMC serials for a switch response without querying devices.
+fn populate_switch_inventory(
+    status: &mut rpc::SwitchStatus,
+    report: Option<&EndpointExplorationReport>,
+) {
+    status.serial_number = report
+        .and_then(|report| report.switch_chassis())
+        .and_then(|chassis| chassis.inventory_serial_number())
+        .map(str::to_owned);
+    status.power_state = report
+        .and_then(|report| report.systems.first())
+        .map(|system| {
+            ::rpc::site_explorer::PowerState::from(system.power_state)
+                .as_str_name()
+                .to_lowercase()
+        });
+}
+
+/// Loads last-observed BMC serials and power states without querying devices.
 ///
-/// Cache lookup failures are logged and omit serials from the response.
-async fn load_switch_serial_numbers(
+/// Missing inventory and cache lookup failures leave those response fields unset.
+async fn load_switch_inventory(
     db: impl DbReader<'_>,
     switches: &[Switch],
-) -> HashMap<IpAddr, String> {
+) -> HashMap<IpAddr, EndpointExplorationReport> {
     let addresses: Vec<_> = switches
         .iter()
         .filter_map(|switch| switch.bmc_info.as_ref()?.ip)
@@ -154,24 +173,14 @@ async fn load_switch_serial_numbers(
     let endpoints = match db::explored_endpoints::find_by_ips(db, addresses).await {
         Ok(endpoints) => endpoints,
         Err(error) => {
-            tracing::warn!(%error, "Failed to load cached switch chassis serials");
+            tracing::warn!(%error, "Failed to load cached switch inventory");
             return HashMap::new();
         }
     };
 
     endpoints
         .into_iter()
-        .filter_map(|endpoint| {
-            let serial = endpoint
-                .report
-                .switch_chassis()?
-                .serial_number
-                .as_deref()?
-                .trim()
-                .to_string();
-
-            Some((endpoint.address, serial))
-        })
+        .map(|endpoint| (endpoint.address, endpoint.report))
         .collect()
 }
 
@@ -180,18 +189,11 @@ pub(crate) async fn find_switch(
     request: Request<rpc::SwitchQuery>,
 ) -> Result<Response<rpc::SwitchList>, Status> {
     let query = request.into_inner();
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
 
     // Handle ID search (takes precedence)
     let switch_list = if let Some(id) = query.switch_id {
         db_switch::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_switch::IdColumn, &id),
         )
         .await
@@ -201,7 +203,7 @@ pub(crate) async fn find_switch(
     } else if let Some(name) = query.name {
         // Handle name search
         db_switch::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_switch::NameColumn, &name),
         )
         .await
@@ -210,31 +212,28 @@ pub(crate) async fn find_switch(
         })?
     } else {
         // No filter - return all
-        db_switch::find_by(&mut txn, db::ObjectColumnFilter::<db_switch::IdColumn>::All)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to find switch: {}", e),
-            })?
+        db_switch::find_by(
+            api.pg_pool(),
+            db::ObjectColumnFilter::<db_switch::IdColumn>::All,
+        )
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("Failed to find switch: {}", e),
+        })?
     };
 
     let switch_ids: Vec<_> = switch_list.iter().map(|switch| switch.id).collect();
     let mut nvos_info_by_switch = if switch_ids.is_empty() {
         HashMap::new()
     } else {
-        load_switch_nvos_info(&mut *txn, &switch_ids)
+        load_switch_nvos_info(api.pg_pool(), &switch_ids)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("Failed to get switch NVOS endpoint info: {}", e),
             })?
     };
 
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
-
-    // Optional cache reads use the pool so a failure cannot abort the switch transaction.
-    let serials_by_address =
-        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+    let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
@@ -242,14 +241,14 @@ pub(crate) async fn find_switch(
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            let serial_number = s
+            let inventory = s
                 .bmc_info
                 .as_ref()
                 .and_then(|bmc| bmc.ip)
-                .and_then(|ip| serials_by_address.get(&ip).cloned());
+                .and_then(|ip| inventory_by_address.get(&ip));
 
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
+                populate_switch_inventory(rpc_switch.status.get_or_insert_default(), inventory);
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
@@ -295,25 +294,19 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let switch_list = db_switch::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
     )
     .await?;
 
-    let mut nvos_info_by_switch = load_switch_nvos_info(txn.as_pgconn(), &switch_ids)
+    let mut nvos_info_by_switch = load_switch_nvos_info(api.pg_pool(), &switch_ids)
         .await
         .map_err(|e| CarbideError::Internal {
             message: format!("Failed to get switch NVOS endpoint info: {}", e),
         })?;
 
-    txn.rollback_or_log("read-only load of switches by id")
-        .await;
-
-    let serials_by_address =
-        load_switch_serial_numbers(&api.database_connection, &switch_list).await;
+    let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
     let switches: Vec<rpc::Switch> = switch_list
         .into_iter()
@@ -321,14 +314,14 @@ pub(crate) async fn find_by_ids(
             let id = s.id;
             let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            let serial_number = s
+            let inventory = s
                 .bmc_info
                 .as_ref()
                 .and_then(|bmc| bmc.ip)
-                .and_then(|ip| serials_by_address.get(&ip).cloned());
+                .and_then(|ip| inventory_by_address.get(&ip));
 
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.status.get_or_insert_default().serial_number = serial_number;
+                populate_switch_inventory(rpc_switch.status.get_or_insert_default(), inventory);
                 populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
@@ -361,10 +354,8 @@ pub(crate) async fn find_switch_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Switch,
         &switch_ids,
     )
@@ -380,8 +371,6 @@ pub(crate) async fn find_switch_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -430,9 +419,9 @@ pub(crate) async fn decommission_switch(
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
-                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(machine_id, instance_id), f| {
+                    f(&format_args!("{machine_id} ({instance_id})"))
+                });
             return Err(CarbideError::FailedPrecondition(format!(
                 "switch {switch_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
             ))
@@ -477,13 +466,9 @@ pub(crate) async fn delete_switch(
         }
     };
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let mut switch_list = db_switch::find_by(
         &mut txn,
@@ -662,15 +647,7 @@ pub(crate) async fn list_switch_health_reports(
         .switch_id
         .ok_or_else(|| CarbideError::MissingArgument("switch_id"))?;
 
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+    let switch = db_switch::find_by_id(&api.database_connection, &switch_id)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
@@ -793,6 +770,44 @@ async fn remove_switch_health_report_by_source(
     db_switch::remove_health_report(&mut *txn, &switch.id, mode, &source).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod switch_inventory_tests {
+    use carbide_test_support::value_scenarios;
+    use model::site_explorer::{ComputerSystem, PowerState};
+
+    use super::{EndpointExplorationReport, populate_switch_inventory, rpc};
+
+    #[test]
+    fn cached_power_preserves_the_first_system_state() {
+        value_scenarios!(run = |states: Vec<PowerState>| {
+            let report = EndpointExplorationReport {
+                systems: states.into_iter().map(|power_state| ComputerSystem {
+                    power_state,
+                    ..Default::default()
+                }).collect(),
+                ..Default::default()
+            };
+            let mut status = rpc::SwitchStatus::default();
+            populate_switch_inventory(&mut status, Some(&report));
+            assert_eq!(status.serial_number, None);
+            status.power_state
+        };
+            "no system leaves power unset" {
+                vec![] => None,
+            }
+            "only the first system supplies power" {
+                vec![PowerState::On, PowerState::Off] => Some("on".to_string()),
+            }
+            "transitional states are preserved" {
+                vec![PowerState::PoweringOn] => Some("poweringon".to_string()),
+            }
+            "paused is preserved" {
+                vec![PowerState::Paused] => Some("paused".to_string()),
+            }
+        );
+    }
 }
 
 #[cfg(test)]

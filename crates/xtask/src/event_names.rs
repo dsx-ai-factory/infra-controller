@@ -16,6 +16,7 @@
  */
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs};
 
@@ -185,19 +186,13 @@ impl EventScope {
     }
 
     fn is_event_path(&self, path: &syn::Path) -> bool {
-        let segments = path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
-        match segments.as_slice() {
-            [name] => self.direct_names.contains(name),
-            [crate_name, event]
-                if event == "Event"
-                    && (crate_name == "carbide_instrument"
-                        || self.crate_aliases.contains(crate_name)) =>
-            {
-                true
+        let segments = &path.segments;
+        match segments.len() {
+            1 => self.direct_names.contains(&segments[0].ident.to_string()),
+            2 => {
+                segments[1].ident == "Event"
+                    && (segments[0].ident == "carbide_instrument"
+                        || self.crate_aliases.contains(&segments[0].ident.to_string()))
             }
             _ => false,
         }
@@ -533,14 +528,19 @@ impl Scanner {
             if declarations.len() < 2 {
                 continue;
             }
-            let locations = declarations
-                .iter()
-                .map(|declaration| format!("{} ({})", declaration.location, declaration.event_type))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.diagnostics.push(Diagnostic::without_location(format!(
-                "duplicate production Event event_name `{name}`: {locations}"
-            )));
+            let mut message = format!("duplicate production Event event_name `{name}`: ");
+            for (index, declaration) in declarations.iter().enumerate() {
+                if index != 0 {
+                    message.push_str(", ");
+                }
+                write!(
+                    message,
+                    "{} ({})",
+                    declaration.location, declaration.event_type
+                )
+                .expect("writing to a String cannot fail");
+            }
+            self.diagnostics.push(Diagnostic::without_location(message));
         }
         self.diagnostics.sort();
         self.diagnostics.dedup();

@@ -34,7 +34,7 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::allocation_type::AllocationType;
 use model::switch::{ConfigureCertificateState, ConfiguringState, SwitchControllerState};
 use model::test_support::rms_rack_profiles;
@@ -87,7 +87,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");
@@ -111,7 +111,11 @@ impl ControllerEnv {
             .await;
         let api = harness.api_arc();
         let switch_controller = StateController::builder()
-            .database(pool.clone(), api.work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                api.work_lock_manager_handle(),
+                api.instrumentation(),
+            )
             .meter("carbide_switches", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
@@ -122,9 +126,7 @@ impl ControllerEnv {
                     credential_manager: test_credential_manager.clone(),
                     switch_mtls_services: default_switch_mtls_services(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
-                    redfish_client_pool: redfish_sim.clone(),
                     bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
-                    bmc_credential_ops: redfish_sim.clone(),
                     bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::Bmc,
                     ),
@@ -200,7 +202,8 @@ pub(super) async fn new_switch(
             bmc_mac_address: bmc_mac.to_string(),
             bmc_username: "ADMIN".to_string(),
             bmc_password: "Pwd2023x0x0x0x7".to_string(),
-            switch_serial_number: format!("SW-{}", &fixture_id.simple().to_string()[..24]),
+            // Keep the first 24 lowercase hex digits of the UUID.
+            switch_serial_number: format!("SW-{:024x}", fixture_id.as_u128() >> 32),
             metadata: Some(rpc::forge::Metadata {
                 name,
                 ..Default::default()
@@ -219,7 +222,7 @@ pub(super) async fn new_switch(
         .create_switch(0, 0)
         .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segment_id: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version, network_segment_type) \
          VALUES ($1, 'V1-T0', 'underlay') RETURNING id",
@@ -302,7 +305,7 @@ pub(super) async fn transition_switch_controller_state(
     switch_id: &SwitchId,
     new_state: SwitchControllerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let switch = db_switch::find_by_id(txn, switch_id)
+    let switch = db_switch::find_by_id(&mut *txn, switch_id)
         .await?
         .expect("switch should exist");
     let updated = db_switch::try_update_controller_state(

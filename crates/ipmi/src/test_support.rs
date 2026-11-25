@@ -20,12 +20,28 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 use carbide_secrets::credentials::CredentialKey;
 
-use crate::IPMITool;
+use crate::{IPMITool, RestartError};
 
 pub(super) struct IPMIToolTestImpl {}
 
 #[async_trait]
 impl IPMITool for IPMIToolTestImpl {
+    async fn restart_with_credentials(
+        &self,
+        _bmc_address: SocketAddr,
+        _credentials: &carbide_secrets::credentials::Credentials,
+    ) -> Result<(), eyre::Report> {
+        Ok(())
+    }
+
+    async fn restart_once(
+        &self,
+        _bmc_address: SocketAddr,
+        _credential_key: &CredentialKey,
+    ) -> Result<(), RestartError> {
+        Ok(())
+    }
+
     async fn restart(
         &self,
         _bmc_address: SocketAddr,

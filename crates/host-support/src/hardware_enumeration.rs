@@ -312,9 +312,7 @@ pub fn discovery_ibs() -> HardwareEnumerationResult<Vec<rpc_discovery::Infiniban
         //   - because ports for VPI device can be configured in IB(1) or ETH(2) types
         if properties_ext.mlnx_ib_capable() {
             ibs.push(rpc_discovery::InfinibandInterface {
-                guid: convert_sysattr_to_string("node_guid", &device)?
-                    .to_string()
-                    .replace(':', ""),
+                guid: convert_sysattr_to_string("node_guid", &device)?.replace(':', ""),
                 pci_properties: Some(properties_ext.pci_properties),
             });
         }
@@ -743,7 +741,7 @@ fn enumerate_hardware_inner(
         // e.g. 'DRAM'. We will use this later if smbios fails.
         backup_ram_type = device
             .property_value(MEMORY_TYPE)
-            .map(|v| v.to_string_lossy().to_string());
+            .map(|v| v.to_string_lossy().into_owned());
 
         if device
             .property_value(PCI_DEV_PATH)

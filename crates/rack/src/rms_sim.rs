@@ -46,7 +46,7 @@ pub struct RmsSim {
         Arc<Mutex<Vec<rms::ApplyStoredFirmwareObjectRequest>>>,
     queued_firmware_object_apply_responses: Arc<Mutex<VecDeque<rms::ApplyFirmwareObjectResponse>>>,
     submitted_apply_firmware_object_requests: Arc<Mutex<Vec<rms::ApplyFirmwareObjectRequest>>>,
-    firmware_job_statuses: Arc<Mutex<HashMap<String, rms::GetFirmwareJobStatusResponse>>>,
+    firmware_job_statuses: Arc<Mutex<HashMap<String, rms::JobStatus>>>,
     firmware_job_errors: Arc<Mutex<HashMap<String, String>>>,
     submitted_apply_switch_system_image_requests:
         Arc<Mutex<Vec<rms::ApplySwitchSystemImageRequest>>>,
@@ -291,7 +291,8 @@ impl RmsSim {
             .push_back(response);
     }
 
-    pub async fn set_firmware_job_status(&self, response: rms::GetFirmwareJobStatusResponse) {
+    /// Sets the job record returned by generic firmware status polling.
+    pub async fn set_firmware_job_status(&self, response: rms::JobStatus) {
         self.firmware_job_statuses
             .lock()
             .await
@@ -493,8 +494,10 @@ impl RmsSim {
 
     /// Queues one generic RMS job-status response for FIFO consumption.
     ///
-    /// The fake returns `Ok(Default::default())` after the queue is
-    /// exhausted.
+    /// After the queue is exhausted, a configured firmware-job error returns
+    /// `Unavailable`; otherwise, the stored record for the requested job is
+    /// returned. If neither an error nor a record is configured for that job,
+    /// the fake returns `NotFound`.
     pub async fn queue_get_job_status_response(
         &self,
         response: Result<rms::GetJobStatusResponse, RackManagerError>,
@@ -666,7 +669,7 @@ pub struct MockRmsClient {
         Arc<Mutex<Vec<rms::ApplyStoredFirmwareObjectRequest>>>,
     queued_firmware_object_apply_responses: Arc<Mutex<VecDeque<rms::ApplyFirmwareObjectResponse>>>,
     submitted_apply_firmware_object_requests: Arc<Mutex<Vec<rms::ApplyFirmwareObjectRequest>>>,
-    firmware_job_statuses: Arc<Mutex<HashMap<String, rms::GetFirmwareJobStatusResponse>>>,
+    firmware_job_statuses: Arc<Mutex<HashMap<String, rms::JobStatus>>>,
     firmware_job_errors: Arc<Mutex<HashMap<String, String>>>,
     submitted_apply_switch_system_image_requests:
         Arc<Mutex<Vec<rms::ApplySwitchSystemImageRequest>>>,
@@ -800,13 +803,40 @@ impl RmsApi for MockRmsClient {
         self.submitted_get_job_status_requests
             .lock()
             .await
-            .push(cmd);
+            .push(cmd.clone());
 
-        self.queued_get_job_status_responses
+        if let Some(response) = self
+            .queued_get_job_status_responses
             .lock()
             .await
             .pop_front()
-            .unwrap_or(Ok(rms::GetJobStatusResponse::default()))
+        {
+            return response;
+        }
+
+        if let Some(message) = self
+            .firmware_job_errors
+            .lock()
+            .await
+            .get(&cmd.job_id)
+            .cloned()
+        {
+            return Err(tonic::Status::unavailable(message).into());
+        }
+
+        let job = self
+            .firmware_job_statuses
+            .lock()
+            .await
+            .get(&cmd.job_id)
+            .cloned()
+            .ok_or_else(|| {
+                RackManagerError::from(tonic::Status::not_found("mock firmware job not found"))
+            })?;
+
+        Ok(rms::GetJobStatusResponse {
+            job_states: vec![job],
+        })
     }
 
     async fn get_scale_up_fabric_status(
@@ -1276,11 +1306,13 @@ impl RmsApi for MockRmsClient {
             .lock()
             .await
             .pop_front()
-            .unwrap_or(Ok(rms::GetConfigureSwitchCertificateJobStatusResponse {
-                status: rms::ReturnCode::Success as i32,
-                state: "running".to_string(),
-                ..Default::default()
-            }))
+            .unwrap_or_else(|| {
+                Ok(rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    state: "running".to_string(),
+                    ..Default::default()
+                })
+            })
     }
 
     async fn batch_set_scale_up_fabric_state(
@@ -1369,31 +1401,11 @@ impl RmsApi for MockRmsClient {
         &self,
         cmd: rms::GetFirmwareJobStatusRequest,
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
-        if let Some(message) = self
-            .firmware_job_errors
-            .lock()
-            .await
-            .get(&cmd.job_id)
-            .cloned()
-        {
-            return Err(RackManagerError::ApiInvocationError(
-                tonic::Status::unavailable(message),
-            ));
-        }
-
-        Ok(self
-            .firmware_job_statuses
-            .lock()
-            .await
-            .get(&cmd.job_id)
-            .cloned()
-            .unwrap_or(rms::GetFirmwareJobStatusResponse {
-                status: rms::ReturnCode::Failure as i32,
-                job_id: cmd.job_id,
-                state_description: "mock firmware job not found".to_string(),
-                error_message: "mock firmware job not found".to_string(),
-                ..Default::default()
-            }))
+        Err(tonic::Status::unimplemented(format!(
+            "legacy firmware status polling is unsupported: {}",
+            cmd.job_id
+        ))
+        .into())
     }
 }
 
@@ -1418,7 +1430,7 @@ impl MockRmsClient {
             .await
             .get(&cmd.job_id)
             .cloned()
-            .unwrap_or(rms::GetSwitchSystemImageJobStatusResponse {
+            .unwrap_or_else(|| rms::GetSwitchSystemImageJobStatusResponse {
                 status: rms::ReturnCode::Failure as i32,
                 job_id: cmd.job_id,
                 message: "mock switch system image job not found".to_string(),

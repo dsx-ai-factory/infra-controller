@@ -10,11 +10,9 @@
 <table class="sortable overview">
 	<thead>
 		<tr>
-			<th>IP Address</th>
-			<th>MAC Address</th>
-			<th>Machine ID</th>
+			<th>Address</th>
+			<th>Machine</th>
 			<th>Hostname</th>
-			<th>Created</th>
 			<th>Last DHCP Renew</th>
 			<th>Time Remaining</th>
 		</tr>
@@ -22,17 +20,19 @@
 	<tbody>
 		{% for entry in entries %}
 			<tr>
-				<td><a href="/admin/search?q={{ entry.ip_address }}">{{ entry.ip_address }}</a></td>
-				<td>{{ entry.mac_address }}</td>
-				<td>{% if !entry.machine_id.is_empty() %}<a href="/admin/machine/{{ entry.machine_id }}">{{ entry.machine_id }}</a>{% endif %}</td>
-				<td>{{ entry.hostname }}</td>
-				<td><span onmouseover="setTitleToLocalizedTime(this)">{{ entry.created }}</span></td>
 				<td>
+					<a href="/admin/search?q={{ entry.ip_address }}">{{ entry.ip_address }}</a>
+					{% if !entry.mac_address.is_empty() %}<code class="cell-chip">{{ entry.mac_address }}</code>{% endif %}
+				</td>
+				<td>{% if entry.machine_id.is_empty() %}<span class="text-muted">None</span>{% else %}{{ entry.machine_id|machine_id_link|safe }}{% endif %}</td>
+				<td>{% if entry.hostname.is_empty() %}<span class="text-muted">—</span>{% else %}{{ entry.hostname }}{% endif %}</td>
+				<td class="cell-nowrap">
 					{% if !entry.last_dhcp.is_empty() %}
 						<span onmouseover="setTitleToLocalizedTime(this)">{{ entry.last_dhcp }}</span>
 					{% else %}
-						<span class="muted">Never</span>
+						<span class="text-muted">Never</span>
 					{% endif %}
+					<span class="cell-sub">Created <span onmouseover="setTitleToLocalizedTime(this)">{{ entry.created }}</span></span>
 				</td>
 				<td class="time-remaining" data-last-dhcp="{{ entry.last_dhcp_rfc3339 }}" data-lease-secs="{{ lease_duration_secs }}">
 					{% if entry.last_dhcp.is_empty() %}

@@ -29,6 +29,7 @@ use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials,
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::Utc;
+use db::TransactionVending as _;
 use libredfish::SystemPowerControl;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
@@ -132,7 +133,7 @@ async fn queued(env: &TestEnv, host_id: HostMachineId) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM machine_state_controller_queued_objects WHERE object_id = $1)",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await
     .expect("read machine queue")
@@ -151,7 +152,11 @@ async fn operation(env: &TestEnv, host_id: HostMachineId) -> NicFirmwareOperatio
 // The real controller and RPC handlers perform every subsequent transition.
 async fn seed(env: &TestEnv, host_id: HostMachineId, operation: NicFirmwareOperation) {
     operation.validate().expect("valid admitted fixture");
-    let mut txn = env.pool.begin().await.expect("begin fixture transaction");
+    let mut txn = env
+        .pool
+        .txn_begin()
+        .await
+        .expect("begin fixture transaction");
     db::machine::update_state(
         &mut txn,
         &host_id,
@@ -614,7 +619,7 @@ async fn generic_delivery_freezes_helper_before_submission_and_never_replaces_it
     };
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -961,7 +966,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
     admitted.targets[0].supervisor_instance_id = Some("observed-helper".into());
     seed(&env, host_id, admitted.clone()).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .expect("clear this host's queued work");
@@ -981,7 +986,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
     let mut newer = admitted.clone();
     newer.targets[0].diagnostic = Some("newer controller diagnostic".into());
     let winner_version = before.state.version.increment();
-    let mut winner = env.pool.begin().await.unwrap();
+    let mut winner = env.pool.txn_begin().await.unwrap();
     let winner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(winner.as_mut())
         .await
@@ -1023,7 +1028,7 @@ async fn retried_firmware_report_commits_before_queueing(pool: sqlx::PgPool) {
 
     // This fixture has its own database. Pause only its queue insert so an
     // independent connection can prove the retry's receipt already committed.
-    let mut queue_gate = env.pool.begin().await.unwrap();
+    let mut queue_gate = env.pool.txn_begin().await.unwrap();
     let queue_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(queue_gate.as_mut())
         .await
@@ -1127,7 +1132,7 @@ async fn generic_reports_reject_foreign_or_contradictory_evidence_without_state_
     ];
     let before = machine(&env, host_id).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -1249,7 +1254,7 @@ async fn cards_converge_sequentially_after_inventory_retry_and_lockdown_readback
     // may have changed hardware, so the next committed step is another read.
     // A mixed batch has two independent destinations: generic progress stays
     // on the machine, while the legacy profile observation stays on its DPA.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let legacy = db::dpa_interface::persist(
         NewDpaInterface {
             machine_id: host_id,
@@ -1647,9 +1652,7 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
 
     // A newer state version revokes this snapshot's reboot authorization even
     // when its operation is unchanged. Reject it before issuing a power action.
-    let mut txn = env.db_txn().await;
-    let mut stale_snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut stale_snapshot = host.snapshot(&mut env.db_reader()).await;
     let stale_state = stale_snapshot.host_snapshot.state.value.clone();
     seed(&env, host_id, ready_to_reboot.clone()).await;
     let winner = machine(&env, host_id).await;
@@ -1661,6 +1664,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut metrics = MachineMetrics::default();
     let mut pending_db_writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -1728,9 +1737,7 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     // Missing DPU snapshots must not strand already-authorized firmware work.
     // Keep the association, omit its snapshot, and reach the actual reboot
     // attempt so the persisted marker proves recovery passed that guard.
-    let mut txn = env.db_txn().await;
-    let mut recovery_snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut recovery_snapshot = host.snapshot(&mut env.db_reader()).await;
     assert!(
         !recovery_snapshot
             .host_snapshot
@@ -1743,6 +1750,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut recovery_metrics = MachineMetrics::default();
     let mut recovery_writes = DbWriteBatch::new();
     let mut recovery_ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + recovery_services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut recovery_services,
         metrics: &mut recovery_metrics,
         pending_db_writes: &mut recovery_writes,
@@ -1886,6 +1899,12 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     let mut metrics = MachineMetrics::default();
     let mut writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,
@@ -2473,7 +2492,7 @@ async fn scout_submission_rechecks_failure_after_contact_write_waits(pool: sqlx:
         fac::mlx_device_action::Command::UpdateFirmware(_)
     ));
 
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(writer.as_mut())
         .await
@@ -2570,7 +2589,7 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
         .await
         .unwrap();
     seed(&env, host_id, before_submission.clone()).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::instance::mark_as_deleted(owner.id(), txn.as_mut())
         .await
         .unwrap();
@@ -2686,7 +2705,7 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
     ));
     // Explicitly clearing the recorded failure permits the retained ordinary
     // release proof to continue with the same deleted owner and firmware state.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::clear_failure_details(&dpu_id.into(), txn.as_mut())
         .await
         .unwrap();
@@ -2740,13 +2759,11 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
         env.redfish_sim.actions_since(&handoff_power).all_hosts(),
         vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
     );
-    let mut txn = env.pool.begin().await.unwrap();
-    let retained_owner = db::instance::find_by_id(txn.as_mut(), owner.id())
+    let retained_owner = db::instance::find_by_id(&env.pool, owner.id())
         .await
         .unwrap()
         .unwrap();
     assert!(retained_owner.deleted.is_some());
-    txn.commit().await.unwrap();
 
     // Completed burns still require their committed activation despite a new
     // recorded failure. Neither that failure nor owner loss permits success.
@@ -2874,7 +2891,7 @@ async fn safe_completion_resumes_the_frozen_lifecycle_owner(pool: sqlx::PgPool) 
                         },
                     )
                 } else {
-                    let mut txn = env.pool.begin().await.unwrap();
+                    let mut txn = env.pool.txn_begin().await.unwrap();
                     db::instance::mark_as_deleted(owner.id(), txn.as_mut())
                         .await
                         .unwrap();
@@ -2981,16 +2998,18 @@ async fn activation_timeout_keeps_the_committed_attempt_without_accepting_a_rebo
         SystemPowerControl::ForceRestart,
         std::time::Duration::from_secs(240),
     );
-    let mut txn = env.db_txn().await;
-    let mut snapshot = host.snapshot(&mut txn).await;
-    txn.commit()
-        .await
-        .expect("commit the activation snapshot read");
+    let mut snapshot = host.snapshot(&mut env.db_reader()).await;
     let state = snapshot.host_snapshot.state.value.clone();
     let mut services = env.machine_state_handler_services();
     let mut metrics = MachineMetrics::default();
     let mut pending_db_writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -3236,7 +3255,7 @@ async fn firmware_report_deadline_rolls_back_before_retry(pool: sqlx::PgPool) {
     admitted.targets[0].supervisor_instance_id = Some("helper".into());
     seed(&env, host_id, admitted.clone()).await;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -3250,7 +3269,7 @@ async fn firmware_report_deadline_rolls_back_before_retry(pool: sqlx::PgPool) {
             FirmwareResult::Receipt(receipt.clone().into()),
         ),
     );
-    let mut gate = env.pool.begin().await.unwrap();
+    let mut gate = env.pool.txn_begin().await.unwrap();
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(gate.as_mut())
         .await
@@ -3460,9 +3479,7 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
         .execute(&env.pool)
         .await
         .unwrap();
-    let mut txn = env.db_txn().await;
-    let mut snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut snapshot = host.snapshot(&mut env.db_reader()).await;
     let bmc_mac = snapshot.host_snapshot.status.bmc_info.mac.unwrap();
     let state = snapshot.host_snapshot.state.value.clone();
     let ipmi = Arc::new(RecordingIpmi::default());
@@ -3471,6 +3488,12 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
     let mut metrics = MachineMetrics::default();
     let mut writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,
@@ -3536,7 +3559,7 @@ async fn hardware_dispatch_blocks_saved_nic_work_until_exact_settlement(pool: sq
         command: MlxAdminCommand::ConfigSet,
     };
     let token = uuid::Uuid::new_v4();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::hardware_dispatch::begin(&mut txn, token, &owner)
         .await
         .unwrap();
@@ -3570,7 +3593,7 @@ async fn hardware_dispatch_blocks_saved_nic_work_until_exact_settlement(pool: sq
 
     // Exact settlement permits saved work to resume. No
     // baseline selection or automatic admission is enabled by this test.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
         db::hardware_dispatch::settle(&mut txn, host_id, token, &owner)
             .await

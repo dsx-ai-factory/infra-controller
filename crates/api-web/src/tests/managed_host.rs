@@ -41,16 +41,11 @@ async fn load_machine_interfaces(
     env: &TestEnv,
     machine_id: MachineId,
 ) -> Vec<model::machine::MachineInterfaceSnapshot> {
-    let mut txn = env.test_harness.db_txn().await;
-    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[machine_id])
+    db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[machine_id])
         .await
         .expect("machine interfaces should load")
         .remove(&machine_id)
-        .expect("managed host should have interface rows");
-    txn.commit()
-        .await
-        .expect("interface lookup transaction should commit");
-    interfaces
+        .expect("managed host should have interface rows")
 }
 
 /// Submits the exact managed interface UUID used by both the operator
@@ -78,13 +73,13 @@ async fn post_desired_boot_interface(
 /// Isolates the desired boot-interface section so assertions cannot be
 /// satisfied by the older interface or SKU tables elsewhere on the page.
 fn desired_boot_interface_section(body: &str) -> &str {
-    const HEADING: &str = "<h3 id=\"desired_boot_interface\">";
+    const HEADING: &str = "<h2 id=\"desired_boot_interface\">";
     let start = body
         .find(HEADING)
         .expect("desired boot-interface section should render");
     let content_start = start + HEADING.len();
     let end = body[content_start..]
-        .find("<h3")
+        .find("<h2")
         .map_or(body.len(), |offset| content_start + offset);
     &body[start..end]
 }
@@ -191,20 +186,14 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
     assert!(boot_interface_section.contains("Desired Boot Interface"));
     assert!(boot_interface_section.contains("Converged"));
     assert!(boot_interface_section.contains("Redfish verified"));
-    assert!(boot_interface_section.contains("<th>Selection Source</th>"));
-    assert!(boot_interface_section.contains("<th>Selection Updated At</th>"));
-    assert!(
-        boot_interface_section.contains("<tr><th>Selection Source</th><td>LegacyUnknown</td></tr>")
-    );
-    assert!(boot_interface_section.contains("<tr><th>Selection Updated At</th><td>-</td></tr>"));
+    assert!(boot_interface_section.contains("<dt>Source</dt><dd>LegacyUnknown</dd>"));
+    assert!(boot_interface_section.contains("<dt>Updated At</dt><dd>-</dd>"));
     assert!(boot_interface_section.contains(&host.host.primary_mac().to_string()));
-    assert!(boot_interface_section.contains("<strong>Current</strong>"));
-    assert!(boot_interface_section.contains("Matches system default"));
-    assert!(boot_interface_section.contains("Set desired interface"));
+    assert!(boot_interface_section.contains("<span class=\"bubble success\">Current</span>"));
+    assert!(boot_interface_section.contains("<span class=\"bubble\">System default</span>"));
+    assert!(boot_interface_section.contains("Set as desired"));
     assert!(boot_interface_section.contains("Request reconciliation"));
-    assert!(
-        boot_interface_section.contains("<input type=\"submit\" value=\"Use system default\">")
-    );
+    assert!(boot_interface_section.contains("<input type=\"submit\" value=\"Use system default\""));
     assert!(boot_interface_section.contains(&format!(
         "name=\"machine_interface_id\" value=\"{}\"",
         default_interface.id
@@ -286,9 +275,9 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
         .to_bytes();
     let body = std::str::from_utf8(&body).expect("machine detail should be UTF-8");
     let boot_interface_section = desired_boot_interface_section(body);
-    assert!(boot_interface_section.contains("<tr><th>Selection Source</th><td>Operator</td></tr>"));
+    assert!(boot_interface_section.contains("<dt>Source</dt><dd>Operator</dd>"));
     assert!(boot_interface_section.contains(&format!(
-        "<tr><th>Selection Updated At</th><td>{selection_updated_at}</td></tr>"
+        "<dt>Updated At</dt><dd>{selection_updated_at}</dd>"
     )));
 
     // `Use system default` is the same exact-row write with the server's
@@ -385,7 +374,9 @@ async fn machine_detail_shows_an_uninitialized_desired_boot_interface(pool: sqlx
     let boot_interface_section = desired_boot_interface_section(body);
     assert!(boot_interface_section.contains("Desired Boot Interface"));
     assert!(boot_interface_section.contains("Not yet initialized"));
-    assert!(boot_interface_section.contains("Set desired interface"));
+    assert!(boot_interface_section.contains(&format!(
+        "action=\"/admin/machine/{machine_id}/boot-interface\""
+    )));
     assert!(!boot_interface_section.contains("/boot-interface/reconcile"));
 
     // The button is hidden, and a direct POST also refuses to turn a
@@ -453,14 +444,10 @@ async fn test_multi_dpu(pool: sqlx::PgPool) {
         !hosts.is_empty(),
         "At least one host should have been returned"
     );
+    let expected_host_machine_id = host_machine_id.to_string();
     let host = hosts
         .into_iter()
-        .find(|h| {
-            h.machine_id
-                .as_ref()
-                .map(|m| m == &host_machine_id.to_string())
-                .unwrap_or(false)
-        })
+        .find(|h| h.machine_id.as_deref() == Some(expected_host_machine_id.as_str()))
         .unwrap_or_else(|| {
             panic!("Could not find expected host {host_machine_id} in managed_hosts output")
         });

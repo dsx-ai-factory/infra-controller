@@ -270,7 +270,11 @@ mod tests {
             ("authorization_layer", "request_acl"),
             ("method", method_label.as_str()),
         ];
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let state = BmcProxyState {
+            instrumentation: metrics.instrumentation().clone(),
+            ..state.clone()
+        };
         let mut result = false;
         let logs = capture_logs(|| result = state.authorized_caller(&request).is_some());
 
@@ -292,9 +296,13 @@ mod tests {
             ("authorization_layer", "principal_allow_list"),
             ("method", method_label.as_str()),
         ];
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let state = BmcProxyState {
+            instrumentation: metrics.instrumentation().clone(),
+            ..state.clone()
+        };
         let mut result = Ok(());
-        let logs = capture_logs(|| result = authorize_principal_allow_list(state, &request));
+        let logs = capture_logs(|| result = authorize_principal_allow_list(&state, &request));
 
         AuthorizationObservation {
             result,
@@ -350,7 +358,10 @@ mod tests {
     /// still rejects the request but moves only the middleware-error counter.
     #[test]
     fn request_acl_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
+        let state = test_state_with_config(
+            AUTHORIZATION_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 
@@ -408,7 +419,10 @@ mod tests {
     /// response and is counted as an authorization wiring error instead.
     #[test]
     fn principal_allow_list_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
+        let state = test_state_with_config(
+            AUTHORIZATION_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 

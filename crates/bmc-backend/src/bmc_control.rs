@@ -18,10 +18,19 @@
 use std::time::SystemTime;
 
 use bmc_drivers::CatalogError;
-use bmc_platform::{BmcControl, DriverOutcome, PlatformError, TimeStatus};
+use bmc_platform::{
+    BmcControl, DriverOutcome, ManagerSettings, ManagerSettingsDiff, ManagerSettingsStatus,
+    PlatformError, TimeStatus,
+};
 use bmc_runtime::BoundDriver;
+use carbide_instrument::Instrumentation;
+use carbide_redfish::libredfish::host_interface::{
+    HostInterfaceStaticIpv4Repair, ensure_gb200_host_interface_static_ipv4,
+    gb200_host_interface_static_ipv4_is_missing,
+};
 use carbide_redfish::nv_redfish::RedfishBmc;
 use libredfish::{EnabledDisabled, Redfish};
+use serde_json::json;
 
 use crate::BackendBmc;
 use crate::convert::platform_error;
@@ -126,18 +135,153 @@ impl BackendBmcControl<'_> {
     pub async fn set_ipmi_over_lan(&self, enabled: bool) -> Result<DriverOutcome, PlatformError> {
         match self {
             Self::Libredfish(client) => {
-                let target = if enabled {
-                    EnabledDisabled::Enabled
-                } else {
-                    EnabledDisabled::Disabled
-                };
                 client
-                    .enable_ipmi_over_lan(target)
+                    .enable_ipmi_over_lan(enabled_disabled(enabled))
                     .await
                     .map_err(platform_error)?;
                 Ok(DriverOutcome::complete())
             }
             Self::Drivers(bmc_control) => bmc_control.set_ipmi_over_lan(enabled).await,
         }
+    }
+
+    /// Whether the BMC controls the host's management network access:
+    /// libredfish recognizes a Vera Rubin service root, and the drivers
+    /// support [`BmcControl::host_management_network_access`], whether or not
+    /// the BMC reports the access.
+    pub async fn controls_host_management_network_access(&self) -> Result<bool, PlatformError> {
+        match self {
+            Self::Libredfish(client) => client
+                .get_service_root()
+                .await
+                .map(|root| root.is_vera_rubin())
+                .map_err(platform_error),
+            Self::Drivers(bmc_control) => {
+                supported(bmc_control.host_management_network_access().await)
+            }
+        }
+    }
+
+    /// See [`BmcControl::set_host_management_network_access`].
+    pub async fn set_host_management_network_access(
+        &self,
+        enabled: bool,
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                client
+                    .set_enable_onboard_nics(enabled_disabled(enabled))
+                    .await
+                    .map_err(platform_error)?;
+                Ok(DriverOutcome::complete())
+            }
+            Self::Drivers(bmc_control) => {
+                bmc_control
+                    .set_host_management_network_access(enabled)
+                    .await
+            }
+        }
+    }
+
+    /// See [`BmcControl::apply_settings`]. libredfish implements only the
+    /// GB200 `hostusb0` static IPv4 address, reporting a different address as
+    /// manual intervention as the GB200 driver does; `instrumentation` records
+    /// its raw requests.
+    pub async fn apply_settings(
+        &self,
+        profile: &ManagerSettings,
+        instrumentation: &Instrumentation,
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                if !profile.attributes.is_empty() {
+                    return Err(PlatformError::Unsupported);
+                }
+                match ensure_gb200_host_interface_static_ipv4(instrumentation, *client)
+                    .await
+                    .map_err(platform_error)?
+                {
+                    HostInterfaceStaticIpv4Repair::AlreadyConfigured
+                    | HostInterfaceStaticIpv4Repair::Patched => Ok(DriverOutcome::complete()),
+                    HostInterfaceStaticIpv4Repair::Conflicting => {
+                        Err(PlatformError::ManualInterventionRequired {
+                            code: "gb200-host-interface-ipv4-conflict".to_string(),
+                        })
+                    }
+                }
+            }
+            Self::Drivers(bmc_control) => bmc_control.apply_settings(profile).await,
+        }
+    }
+
+    /// See [`BmcControl::settings_status`]. libredfish reports only the GB200
+    /// `hostusb0` static IPv4 address, keyed as the GB200 driver reports it.
+    /// Its model does not deserialize address values, so it never reports the
+    /// address applied: `actual` is an empty list when no address is
+    /// configured and unknown otherwise.
+    pub async fn settings_status(&self) -> Result<ManagerSettingsStatus, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                let missing = gb200_host_interface_static_ipv4_is_missing(*client)
+                    .await
+                    .map_err(platform_error)?;
+                Ok(ManagerSettingsStatus {
+                    is_applied: false,
+                    differences: vec![ManagerSettingsDiff {
+                        key: "hostusb0.IPv4StaticAddresses".to_string(),
+                        expected: json!([{
+                            "Address": "10.0.1.1",
+                            "SubnetMask": "255.255.255.0",
+                            "Gateway": "0.0.0.0",
+                        }]),
+                        actual: missing.then(|| json!([])),
+                    }],
+                })
+            }
+            Self::Drivers(bmc_control) => bmc_control.settings_status().await,
+        }
+    }
+}
+
+fn enabled_disabled(enabled: bool) -> EnabledDisabled {
+    if enabled {
+        EnabledDisabled::Enabled
+    } else {
+        EnabledDisabled::Disabled
+    }
+}
+
+/// Whether an operation that answered `result` is supported.
+fn supported<T>(result: Result<T, PlatformError>) -> Result<bool, PlatformError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(PlatformError::Unsupported) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn host_management_network_access_is_controlled_wherever_it_is_supported() {
+        let not_ready = || PlatformError::NotReady {
+            message: "not ready".to_string(),
+        };
+        value_scenarios!(supported:
+            "supported, reported or not" {
+                Ok(Some(false)) => Ok(true),
+                Ok(None) => Ok(true),
+            }
+            "unsupported" {
+                Err(PlatformError::Unsupported) => Ok(false),
+            }
+            "unreadable" {
+                Err(not_ready()) => Err(not_ready()),
+            }
+        );
     }
 }

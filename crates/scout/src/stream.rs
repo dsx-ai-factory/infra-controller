@@ -152,9 +152,11 @@ async fn run_scout_stream_loop(
         if let Some(request) = response.payload {
             // In the current model, an incoming message must have a flow_uuid associated
             // with it. If it doesn't, reject the message.
-            let flow_uuid_pb = response.flow_uuid.ok_or(ScoutStreamError::InvalidRequest(
-                "cannot determine flow, flow_uuid empty from API".to_string(),
-            ))?;
+            let flow_uuid_pb = response.flow_uuid.ok_or_else(|| {
+                ScoutStreamError::InvalidRequest(
+                    "cannot determine flow, flow_uuid empty from API".to_string(),
+                )
+            })?;
 
             let flow_uuid = flow_uuid_pb.try_into().map_err(|e| {
                 ScoutStreamError::ClientError(format!("failed to convert flow_uuid: {e}"))
@@ -541,7 +543,7 @@ exit 1
             flow_uuid,
             machine_id,
             request.clone(),
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         );
 
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
@@ -573,7 +575,7 @@ exit 1
             flow_uuid,
             machine_id,
             request,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         );
         assert_eq!(response.flow_uuid, Some(flow_uuid.into()));
         let Some(scout_stream_api_bound_message::Payload::MlxDeviceLockdownResponse(response)) =

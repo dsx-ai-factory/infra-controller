@@ -39,7 +39,7 @@ impl From<MeasurementSystemProfile> for MeasurementSystemProfilePb {
             profile_id: Some(val.profile_id),
             name: val.name,
             ts: Some(val.ts.into()),
-            attrs: val.attrs.iter().map(|attr| attr.clone().into()).collect(),
+            attrs: val.attrs.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -62,12 +62,10 @@ impl TryFrom<MeasurementSystemProfilePb> for MeasurementSystemProfile {
             .collect::<Result<Vec<_>, _>>();
 
         Ok(Self {
-            profile_id: msg
-                .profile_id
-                .ok_or(RpcDataConversionError::InvalidArgument(
-                    "missing profile_id".to_string(),
-                ))?,
-            name: msg.name.clone(),
+            profile_id: msg.profile_id.ok_or_else(|| {
+                RpcDataConversionError::InvalidArgument("missing profile_id".to_string())
+            })?,
+            name: msg.name,
             attrs: attrs?,
             ts: conv_timestamp_opt(msg.ts, "ts")?,
         })

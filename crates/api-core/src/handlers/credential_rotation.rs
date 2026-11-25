@@ -185,10 +185,8 @@ pub(crate) async fn rotate_credential(
 
     // Existing targets advance by one. NVOS is initialized at version zero only
     // after that immutable secret has been stored and read back below.
-    let mut txn = api.txn_begin().await?;
-    let current = db::credential_rotation::current_target_version(&mut txn, rotation_type).await?;
-
-    txn.commit().await?;
+    let current =
+        db::credential_rotation::current_target_version(api.pg_pool(), rotation_type).await?;
 
     let next_version_i32 = match current {
         Some(current) => current.checked_add(1).ok_or_else(|| {
@@ -297,10 +295,7 @@ pub(crate) async fn rotate_credential(
 /// Reconciliation remains authoritative if a credential source changes after
 /// this point-in-time check.
 async fn require_nvos_credential_sources(api: &Api) -> Result<(), CarbideError> {
-    let mut txn = api.txn_begin().await?;
-    let gaps = db::credential_rotation::nvos_credential_source_gaps(&mut txn).await?;
-
-    txn.commit().await?;
+    let gaps = db::credential_rotation::nvos_credential_source_gaps(api.pg_pool()).await?;
 
     let mut missing = Vec::new();
 
@@ -483,13 +478,9 @@ pub(crate) async fn get_credential_rotation_status(
         return device_rotation_status_response(api, rotation_type, device_mac).await;
     }
 
-    let mut txn = api.txn_begin().await?;
-
-    let status = db::credential_rotation::rotation_status(&mut txn, rotation_type)
+    let status = db::credential_rotation::rotation_status(&mut api.db_reader(), rotation_type)
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::CredentialRotationStatusResult {
         target_version: to_u32(status.target_version, "target version")?,
@@ -525,15 +516,11 @@ async fn device_rotation_status_response(
         ))
     })?;
 
-    let mut txn = api.txn_begin().await?;
-
-    let status = db::credential_rotation::device_rotation_status(&mut txn, rotation_type, mac)
+    let status = db::credential_rotation::device_rotation_status(api.pg_pool(), rotation_type, mac)
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
-
-    let status = status.ok_or(CarbideError::NotFoundError {
+    let status = status.ok_or_else(|| CarbideError::NotFoundError {
         kind: "device_credential_rotation",
         id: device_mac.to_string(),
     })?;

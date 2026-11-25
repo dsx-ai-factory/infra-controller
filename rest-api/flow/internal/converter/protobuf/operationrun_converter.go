@@ -529,6 +529,10 @@ func operationFrom(
 func upgradeFirmwareOperationFrom(
 	upgrade *pb.UpgradeFirmwareRequest,
 ) (*operationrun.Operation, error) {
+	if upgrade.GetDeviceCredentialOverrides() != nil {
+		return nil, fmt.Errorf("operation runs do not support device credential overrides")
+	}
+
 	if upgrade == nil {
 		return nil, fmt.Errorf("upgrade_firmware operation is required")
 	}

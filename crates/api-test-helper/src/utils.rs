@@ -26,6 +26,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_secrets::{CredentialConfig, VaultConfig, create_credential_manager};
 use carbide_utils::HostPortPair;
+use db::TransactionVending as _;
 use eyre::Report;
 use metrics_endpoint::MetricsSetup;
 use sqlx::migrate::MigrateDatabase;
@@ -107,8 +108,9 @@ impl IntegrationTestEnvironment {
         };
         let root_dir = PathBuf::from(repo_root.clone());
 
+        // Servers receive this environment's metrics directly. Publishing its
+        // provider globally would race with other environments.
         let metrics = carbide::setup_metrics()?;
-        opentelemetry::global::set_meter_provider(metrics.meter_provider.clone());
 
         let unbound_address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let carbide_api_addrs = vec![unbound_address; usize::from(api_server_count)];
@@ -169,7 +171,7 @@ async fn drop_pg_database_with_retry_if_exists(db_url: &str) -> eyre::Result<()>
             }
         }
         let db_pool = sqlx::Pool::<sqlx::postgres::Postgres>::connect(db_url).await?;
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
         sqlx::query(
             r#"
         SELECT pg_terminate_backend(pg_stat_activity.pid)
@@ -177,7 +179,7 @@ async fn drop_pg_database_with_retry_if_exists(db_url: &str) -> eyre::Result<()>
         WHERE datname = $1
         AND pid <> pg_backend_pid()"#,
         )
-        .bind(database.to_string())
+        .bind(database)
         .execute(&mut *txn)
         .await?;
         txn.commit().await?;

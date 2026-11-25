@@ -80,7 +80,7 @@ pub struct KubernetesPodServicesHandler {
 
     /// When each service first entered its current continuous container-pending period.
     /// Used for checking service containers startup timeout.
-    container_pending_since: HashMap<(String, u64), Instant>,
+    container_pending_since: HashMap<(uuid::Uuid, u64), Instant>,
 }
 
 impl KubernetesPodServicesHandler {
@@ -209,7 +209,7 @@ impl KubernetesPodServicesHandler {
             .args(["restart", service])
             .output()
             .await
-            .wrap_err(format!("failed to restart {}", service))?;
+            .wrap_err_with(|| format!("failed to restart {}", service))?;
 
         if !restart.status.success() {
             let stderr = String::from_utf8_lossy(&restart.stderr);
@@ -242,10 +242,9 @@ impl KubernetesPodServicesHandler {
 
     /// Atomic write pod spec to kubelet directory.
     async fn write_pod_spec(&self, service: &ServiceConfig) -> eyre::Result<()> {
-        let pod_spec_path =
-            self.get_pod_spec_path(&service.id.to_string(), service.version.version_nr());
-        let tmp_path =
-            self.get_temp_pod_spec_path(&service.id.to_string(), service.version.version_nr());
+        let service_id = service.id.to_string();
+        let pod_spec_path = self.get_pod_spec_path(&service_id, service.version.version_nr());
+        let tmp_path = self.get_temp_pod_spec_path(&service_id, service.version.version_nr());
 
         std::fs::create_dir_all(Path::new(KUBERNETES_POD_DIR))
             .wrap_err("failed to create pod spec directory")?;
@@ -254,11 +253,8 @@ impl KubernetesPodServicesHandler {
             .wrap_err("failed to create tmp pod spec directory")?;
 
         // We need to inject labels to help identify pod in crictl
-        let labeled_yaml = Self::inject_labels(
-            &service.data,
-            &service.id.to_string(),
-            service.version.version_nr(),
-        )?;
+        let labeled_yaml =
+            Self::inject_labels(&service.data, &service_id, service.version.version_nr())?;
 
         // Create the tmp file and write the pod spec YAML to it
         let mut tmp_file = fs::OpenOptions::new()
@@ -530,7 +526,7 @@ impl KubernetesPodServicesHandler {
         service: &ServiceConfig,
         observed_container_states: &HashMap<String, String>,
     ) -> Result<Option<String>> {
-        let service_key = (service.id.to_string(), service.version.version_nr());
+        let service_key = (service.id, service.version.version_nr());
 
         if service.removed.is_some() {
             self.container_pending_since.remove(&service_key);
@@ -1308,7 +1304,7 @@ Environment="NO_PROXY=127.0.0.1,localhost,.svc,.svc.cluster.local"
 
         let service_keys: HashSet<_> = services
             .iter()
-            .map(|service| (service.id.to_string(), service.version.version_nr()))
+            .map(|service| (service.id, service.version.version_nr()))
             .collect();
         self.container_pending_since
             .retain(|service, _| service_keys.contains(service));
@@ -1577,7 +1573,7 @@ spec:
     fn test_k8s_pod_handler_container_startup_timeout() {
         let mut handler = KubernetesPodServicesHandler::default();
         let service = test_service_config();
-        let service_key = (service.id.to_string(), service.version.version_nr());
+        let service_key = (service.id, service.version.version_nr());
 
         // Missing containers initially remain pending and start the timer.
         assert_eq!(
@@ -1588,10 +1584,9 @@ spec:
         );
 
         // Make the timer expired for the service
-        handler.container_pending_since.insert(
-            service_key.clone(),
-            Instant::now() - KUBERNETES_POD_STARTUP_TIMEOUT,
-        );
+        handler
+            .container_pending_since
+            .insert(service_key, Instant::now() - KUBERNETES_POD_STARTUP_TIMEOUT);
         let timeout = handler
             .check_container_timeout_error(&service, &HashMap::new())
             .unwrap()

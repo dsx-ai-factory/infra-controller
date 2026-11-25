@@ -24,8 +24,14 @@
 //! 400. HEAD returns 405 with `Allow: GET` and performs no artifact work.
 //! Pending work returns 202; exhausted admission/storage, unavailable state,
 //! snapshot expiry or shutdown return 503; transfer/I/O failure returns 502.
-//! Every 202/502/503 includes `Retry-After: 5`. Failures are reported once; a
-//! later authorized request may explicitly retry. Transfers belong to the cache's
+//! Every 202/502/503 includes `Retry-After: 5`. A failed origin transfer,
+//! including a bad checksum, is reported once on a later admitted request.
+//! A queued preparation returns 202 even for a cache hit. A cached-file
+//! checksum mismatch returns 202 after the cache removes the matching file
+//! or finds the pathname already gone or replaced. Cleanup I/O errors return
+//! 502. Existing readers keep their open descriptors and byte charges. Once
+//! they finish, a later authorized GET can reserve space and fetch the file
+//! again. Transfers belong to the cache's
 //! supervised lifecycle, while each response body owns its reader/admission.
 
 use std::collections::HashSet;
@@ -43,6 +49,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use carbide_firmware::{
     ArtifactDigest, CacheError, CacheLookup, CachedArtifact, FirmwareArtifactCache,
+    PreparedCacheOpen,
 };
 use carbide_libmlx_model::firmware::operation::FirmwareOperationState;
 use carbide_uuid::machine::HostMachineId;
@@ -58,14 +65,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::auth::AuthContext;
 
-// Bound admitted requests and response streams, with no admission queue.
-// After cancellation, registered cache work may still own a database session;
-// downloader capacity independently bounds those background owners and transfers.
+// Bound requests, response streams and prepared blocking workers. An abandoned
+// preparation keeps its request slot until reaped. After handoff, downloader
+// capacity bounds work that can still own a session after the GET disappears.
 const MAX_REQUESTS: usize = 32;
 const RETRY_AFTER_SECONDS: &str = "5";
 // Match power-details' finite read-only snapshot budget. It covers acquisition,
 // BEGIN, retention-lock wait and the coherent read, with no retry loop.
-// Physical cache work owns the lock afterward; transfer/streaming do not.
+// After handoff the worker holds the lock until lease acquisition or reservation.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -81,7 +88,8 @@ struct ArtifactState {
 /// `cancel` ends in-flight database snapshots during server shutdown; each
 /// snapshot has a five-second deadline for acquisition, setup, lock wait and read.
 /// Registered cache work retains the lock through physical open/eviction, even
-/// after request cancellation; it releases it before downloading or streaming.
+/// after request cancellation. It releases it before SHA-256 verification,
+/// downloading, or streaming. A queued worker cannot accept the snapshot.
 /// That physical interval has no SQL deadline; COMMIT then has its own five-second
 /// deadline. Database session loss can end exclusion before physical completion.
 pub(crate) fn router(
@@ -132,27 +140,37 @@ async fn download(
     let Ok(permit) = state.requests.clone().try_acquire_owned() else {
         return retry(StatusCode::SERVICE_UNAVAILABLE, "firmware service is busy");
     };
-    let authorized = tokio::select! {
+    let permit = Arc::new(permit);
+    let snapshot = tokio::select! {
         biased;
         _ = state.cancel.cancelled() => {
             return retry(StatusCode::SERVICE_UNAVAILABLE, "firmware service unavailable");
         }
         result = tokio::time::timeout(
             SNAPSHOT_TIMEOUT,
-            load_snapshot(&state.pool, host, &operation_id, digest, &role),
-        ) => {
-            match result {
-                Ok(Ok(Some(authorized))) => authorized,
-                Ok(Ok(None)) => return unavailable(),
-                Ok(Err(response)) => return response,
-                Err(_) => {
-                    tracing::warn!("NIC firmware artifact database snapshot deadline exceeded");
-                    return retry(StatusCode::SERVICE_UNAVAILABLE, "firmware state unavailable");
-                }
-            }
+            async {
+                // A cold connection may need a blocking thread for DNS or TLS.
+                // Finish checkout before parking a preparation on that pool.
+                let session = DbSessionGuard::acquire(&state.pool).await.map_err(snapshot_error)?;
+                let worker = state.cache.prepare_open(permit.clone());
+                let authorized = load_snapshot(session, host, &operation_id, digest, &role).await?;
+                Ok((worker, authorized))
+            },
+        ) => result,
+    };
+    let (worker, authorized) = match snapshot {
+        Ok(Ok((worker, Some(authorized)))) => (worker, authorized),
+        Ok(Ok((_, None))) => return unavailable(),
+        Ok(Err(response)) => return response,
+        Err(_) => {
+            tracing::warn!("NIC firmware artifact database snapshot deadline exceeded");
+            return retry(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "firmware state unavailable",
+            );
         }
     };
-    match open_authorized(&state.cache, digest, authorized).await {
+    match open_authorized(worker, digest, authorized).await {
         Ok(CacheLookup::Ready(artifact)) => {
             let length = artifact.content_length();
             let reader = ArtifactReader {
@@ -206,10 +224,10 @@ struct AuthorizedArtifact {
     session: DbSessionGuard,
 }
 
-// Registered cache work owns the session, so cancelling this HTTP request
-// cannot release the database lock while its filesystem worker can still evict.
+// After handoff the cache owns the session through physical open. Dropping
+// the HTTP future cannot release the lock while its worker can still evict.
 async fn open_authorized(
-    cache: &FirmwareArtifactCache,
+    worker: Result<PreparedCacheOpen, CacheError>,
     digest: ArtifactDigest,
     authorized: AuthorizedArtifact,
 ) -> Result<CacheLookup, CacheError> {
@@ -234,24 +252,29 @@ async fn open_authorized(
             }
         }
     };
-    cache
-        .open_with_retention_lock(&artifact.url, digest, &retained, release)
-        .await
+    match worker {
+        Ok(worker) => worker.open(&artifact.url, digest, retained, release).await,
+        Err(error) => {
+            release.await?;
+            Err(error)
+        }
+    }
 }
 
 // A single read-committed statement follows the shared lock. Repeatable-read
 // could establish its snapshot before a writer finishes, then evict using stale
 // membership. An abandoned SQL wait discards the connection through the guard.
+#[expect(
+    clippy::result_large_err,
+    reason = "snapshot failures are HTTP responses returned directly to Axum"
+)]
 async fn load_snapshot(
-    pool: &PgPool,
+    mut session: DbSessionGuard,
     host_machine_id: HostMachineId,
     operation_id: &str,
     digest: ArtifactDigest,
     role: &str,
 ) -> Result<Option<AuthorizedArtifact>, Response> {
-    let mut session = DbSessionGuard::acquire(pool)
-        .await
-        .map_err(snapshot_error)?;
     session
         .begin_retention_read(SNAPSHOT_TIMEOUT)
         .await
@@ -424,7 +447,7 @@ fn retry(status: StatusCode, message: &'static str) -> Response {
 // finishes. EOF releases both even if the caller keeps the body.
 struct ArtifactReader {
     artifact: Option<CachedArtifact>,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
 }
 
 impl AsyncRead for ArtifactReader {

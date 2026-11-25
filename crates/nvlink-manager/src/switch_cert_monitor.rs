@@ -679,6 +679,15 @@ impl SwitchCertificateMonitorIterationResult {
     }
 }
 
+impl db::TransactionVending for SwitchCertificateMonitor {
+    #[track_caller]
+    fn txn_begin(
+        &self,
+    ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.db_pool, &self.instrumentation)
+    }
+}
+
 impl SwitchCertificateMonitor {
     const ITERATION_WORK_KEY: &'static str = "SwitchCertificateMonitor::run_single_iteration";
     const PROBE_CANCELLED_ERROR: &'static str = "NMX-C server certificate probe cancelled";
@@ -1043,9 +1052,8 @@ impl SwitchCertificateMonitor {
     async fn load_switch_certificate_monitor_targets(
         &self,
     ) -> NvLinkManagerResult<Vec<SwitchCertificateMonitorTarget>> {
-        let mut db_reader = PgPoolReader::from(self.db_pool.clone());
         let endpoint_rows =
-            db::switch::find_ready_control_plane_configured_switch_endpoints(&mut db_reader)
+            db::switch::find_ready_control_plane_configured_switch_endpoints(&self.db_pool)
                 .await
                 .map_err(NvLinkManagerError::from)?;
 
@@ -1070,7 +1078,7 @@ impl SwitchCertificateMonitor {
             .collect::<HashSet<_>>();
         let legacy_endpoints_result = async {
             let machine_ids = db::machine::find_machine_ids::<MachineId>(
-                &mut db_reader,
+                &self.db_pool,
                 MachineSearchConfig {
                     mnnvl_only: true,
                     include_predicted_host: true,
@@ -1080,7 +1088,7 @@ impl SwitchCertificateMonitor {
             .await
             .map_err(NvLinkManagerError::from)?;
             let snapshots = db::managed_host::load_by_machine_ids(
-                &mut db_reader,
+                &mut PgPoolReader::from(self.db_pool.clone()),
                 &machine_ids,
                 LoadSnapshotOptions {
                     include_instance_data: false,
@@ -1115,7 +1123,7 @@ impl SwitchCertificateMonitor {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            db::nvlink_nmxc_endpoints::find_by_chassis_serials(&mut db_reader, &chassis_serial_refs)
+            db::nvlink_nmxc_endpoints::find_by_chassis_serials(&self.db_pool, &chassis_serial_refs)
                 .await
                 .map_err(NvLinkManagerError::from)
         }
@@ -1207,7 +1215,7 @@ impl SwitchCertificateMonitor {
                 return Err(Self::APPLY_CANCELLED_ERROR.to_string());
             }
             outcome = request_rack_maintenance_via_state_controller(
-                &self.db_pool,
+                self,
                 rack_id,
                 scope,
                 RackMaintenanceEligibility::RequireReady,
@@ -1266,9 +1274,8 @@ impl SwitchCertificateMonitor {
     /// `request_rack_maintenance_via_state_controller` with
     /// `RequireReady` would schedule new maintenance, without writing anything.
     async fn rack_would_accept_maintenance(&self, rack_id: &RackId) -> Result<bool, String> {
-        let mut db_reader = PgPoolReader::from(self.db_pool.clone());
         let rack = db::rack::find_by(
-            &mut db_reader,
+            &self.db_pool,
             ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
         )
         .await
@@ -1640,7 +1647,6 @@ fn switch_cert_monitor_error_kind(error: &str) -> SwitchCertMonitorErrorKind {
 mod tests {
     use std::net::Ipv6Addr;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
@@ -2311,9 +2317,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency_ms, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms }
                     } else {
                         SwitchCertificateMonitorIterationFinished::Failed {
@@ -2346,8 +2352,10 @@ mod tests {
         const METRIC_NAME: &str =
             "carbide_nvlink_switch_cert_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms: 225.0 });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms: 225.0 });
 
         let encoded = metrics.render();
         assert!(
@@ -2388,7 +2396,8 @@ mod tests {
         // A representative Unix epoch-seconds expiration (~2026).
         const NOT_AFTER: i64 = 1_791_539_642;
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
 
         let mut recorded = SwitchCertMonitorMetrics::new();
         recorded.observed_certs.push(ObservedSwitchCertMetrics {
@@ -2405,10 +2414,7 @@ mod tests {
 
         let holder = SharedMetricsHolder::with_hold_period(Duration::from_secs(3600));
         holder.update(recorded);
-        SwitchCertMonitorInstruments::register(
-            opentelemetry::global::meter("carbide-nvlink-switch-cert-monitor-test"),
-            holder,
-        );
+        SwitchCertMonitorInstruments::register(test_meter.meter(), holder);
 
         // The `_seconds`-suffixed alias exposes the same epoch-seconds value as the
         // retained legacy gauge, so no value or unit changes for existing consumers.

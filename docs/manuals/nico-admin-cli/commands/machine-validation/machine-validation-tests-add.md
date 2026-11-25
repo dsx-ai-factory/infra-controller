@@ -12,11 +12,11 @@ nico-admin-cli-machine-validation-tests-add - Add new test case
 nico-admin-cli machine-validation tests add <--name>
 <--command> <--args> [--contexts] [--img-name]
 [--execute-in-host] [--container-arg] [--description]
-[--extra-err-file] [--extra-output-file]
+[--extra-err-file] [--extended] [--extra-output-file]
 [--external-config-file] [--pre-condition] [--timeout]
-[--extended] [--supported-platforms] [--custom-tags]
-[--components] [--is-enabled] [--read-only]
-[--sort-by] [-h|--help]
+[--supported-platforms] [--custom-tags] [--components]
+[--is-enabled] [--read-only] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -67,6 +67,14 @@ Description
 
 Command output error file
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--extra-output-file <EXTRA_OUTPUT_FILE>`
 
 Command output file
@@ -82,14 +90,6 @@ Pre condition
 `--timeout <TIMEOUT>`
 
 Command Timeout
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--supported-platforms <SUPPORTED_PLATFORMS>`
 

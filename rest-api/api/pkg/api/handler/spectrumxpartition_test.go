@@ -4,12 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -158,11 +158,11 @@ func newSpectrumXPartitionFixture(t *testing.T) *spectrumXPartitionFixture {
 	return fx
 }
 
-func (f *spectrumXPartitionFixture) newContext(t *testing.T, method, target string, body string, user *cdbm.User, org string, pathID string) (echo.Context, *httptest.ResponseRecorder) {
+func (f *spectrumXPartitionFixture) newContext(t *testing.T, method, target string, body []byte, user *cdbm.User, org string, pathID string) (echo.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 
 	e := echo.New()
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -186,7 +186,7 @@ func (f *spectrumXPartitionFixture) create(t *testing.T, request model.APISpectr
 	body, err := json.Marshal(request)
 	require.NoError(t, err)
 
-	ec, rec := f.newContext(t, http.MethodPost, "/", string(body), user, org, "")
+	ec, rec := f.newContext(t, http.MethodPost, "/", body, user, org, "")
 	require.NoError(t, NewCreateSpectrumXPartitionHandler(f.dbSession, f.scp, common.GetTestConfig()).Handle(ec))
 	return rec
 }
@@ -297,7 +297,7 @@ func TestCreateSpectrumXPartitionHandler_Handle(t *testing.T) {
 		create := func() <-chan result {
 			done := make(chan result, 1)
 			go func() {
-				ec, rec := fx.newContext(t, http.MethodPost, "/", string(body), fx.user, fx.org, "")
+				ec, rec := fx.newContext(t, http.MethodPost, "/", body, fx.user, fx.org, "")
 				done <- result{code: rec.Code, err: handler.Handle(ec)}
 			}()
 			return done
@@ -403,7 +403,7 @@ func TestGetSpectrumXPartitionHandler_Handle(t *testing.T) {
 	sxp := testBuildSpectrumXPartition(t, fx.dbSession, "east-west-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady)
 
 	t.Run("returns the Partition with its expanded relations", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?includeRelation=Site&includeRelation=Tenant", "", fx.user, fx.org, sxp.ID.String())
+		ec, rec := fx.newContext(t, http.MethodGet, "/?includeRelation=Site&includeRelation=Tenant", nil, fx.user, fx.org, sxp.ID.String())
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code)
 
@@ -417,19 +417,19 @@ func TestGetSpectrumXPartitionHandler_Handle(t *testing.T) {
 	})
 
 	t.Run("rejects a Partition owned by another Tenant", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/", "", fx.otherUser, fx.otherOrg, sxp.ID.String())
+		ec, rec := fx.newContext(t, http.MethodGet, "/", nil, fx.otherUser, fx.otherOrg, sxp.ID.String())
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("returns 404 for an unknown ID", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/", "", fx.user, fx.org, uuid.NewString())
+		ec, rec := fx.newContext(t, http.MethodGet, "/", nil, fx.user, fx.org, uuid.NewString())
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
 	t.Run("returns 400 for a malformed ID", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/", "", fx.user, fx.org, "not-a-uuid")
+		ec, rec := fx.newContext(t, http.MethodGet, "/", nil, fx.user, fx.org, "not-a-uuid")
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
@@ -456,7 +456,7 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 
 	list := func(t *testing.T, target string, user *cdbm.User, org string) []model.APISpectrumXPartition {
 		t.Helper()
-		ec, rec := fx.newContext(t, http.MethodGet, target, "", user, org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, target, nil, user, org, "")
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code)
 
@@ -499,7 +499,7 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 	// Nothing found is an empty list, not a 404, and the body has to be `[]` rather than
 	// `null` so a client can iterate it without a nil check.
 	t.Run("returns an empty array when no Partition matches", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&status=Error", "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&status=Error", nil, fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.JSONEq(t, "[]", rec.Body.String())
@@ -511,25 +511,25 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 
 	// A repeated siteId that is not read would let an unusable value through unreported.
 	t.Run("validates every repeated siteId", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&siteId=Bogus", "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&siteId=Bogus", nil, fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("rejects an unrecognized status", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?status=Bogus", "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?status=Bogus", nil, fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("rejects an unrecognized includeRelation", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?includeRelation=Bogus", "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?includeRelation=Bogus", nil, fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("rejects an unrecognized orderBy", func(t *testing.T) {
-		ec, rec := fx.newContext(t, http.MethodGet, "/?orderBy=BOGUS_ASC", "", fx.user, fx.org, "")
+		ec, rec := fx.newContext(t, http.MethodGet, "/?orderBy=BOGUS_ASC", nil, fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
@@ -631,7 +631,7 @@ func TestDeleteSpectrumXPartitionHandler_Handle(t *testing.T) {
 			if tt.otherTenant {
 				user, org = fx.otherUser, fx.otherOrg
 			}
-			ec, rec := fx.newContext(t, http.MethodDelete, "/", "", user, org, id)
+			ec, rec := fx.newContext(t, http.MethodDelete, "/", nil, user, org, id)
 			require.NoError(t, NewDeleteSpectrumXPartitionHandler(fx.dbSession, fx.scp, common.GetTestConfig()).Handle(ec))
 			require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
 

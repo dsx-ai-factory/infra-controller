@@ -99,7 +99,7 @@ impl HttpRequestMetrics {
 }
 
 /// Creates an isolated Prometheus reader and instrumentation owner. Installs
-/// its provider globally for generated clients when `set_global_meter` is true.
+/// its provider globally for compatibility callers when `set_global_meter` is true.
 pub fn init(set_global_meter: bool) -> eyre::Result<(Registry, HttpRequestMetrics)> {
     let prometheus_registry = Registry::new();
     let exporter = ExporterBuilder::default()

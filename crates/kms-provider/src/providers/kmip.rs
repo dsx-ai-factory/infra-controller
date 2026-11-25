@@ -49,6 +49,7 @@ const REQUIRED_KEY_BITS: i32 = 256;
 
 /// A KMS provider backed by one KMIP server.
 pub struct KmipKmsProvider {
+    instrumentation: carbide_instrument::Instrumentation,
     client: Arc<KmipClient>,
     /// kek_id to the KMIP Unique Identifier of its key object.
     keys: HashMap<String, String>,
@@ -66,13 +67,14 @@ impl KmipKmsProvider {
     pub async fn connect(
         config: KmipClientConfig,
         keys: HashMap<String, String>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, KmsError> {
         if keys.is_empty() {
             return Err(KmsError::Other("keys: no KMIP keys configured".to_string()));
         }
         let client =
             KmipClient::new(config).map_err(|error| KmsError::Other(format_error_chain(&error)))?;
-        let provider = Self::new(Arc::new(client), keys);
+        let provider = Self::new(Arc::new(client), keys, instrumentation);
         provider.validate_server().await?;
         let mut kek_ids: Vec<&String> = provider.keys.keys().collect();
         kek_ids.sort();
@@ -89,17 +91,29 @@ impl KmipKmsProvider {
         Ok(provider)
     }
 
-    fn new(client: Arc<KmipClient>, keys: HashMap<String, String>) -> Self {
-        Self { client, keys }
+    fn new(
+        client: Arc<KmipClient>,
+        keys: HashMap<String, String>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            client,
+            keys,
+            instrumentation,
+        }
     }
 
     /// Requires KMIP 1.4 and the Encrypt and Decrypt operations.
     async fn validate_server(&self) -> Result<(), KmsError> {
         let endpoint = |detail: String| KmsError::Other(format!("endpoint: {detail}"));
-        let versions =
-            red::instrumented("kmip", "discover_versions", self.client.discover_versions())
-                .await
-                .map_err(|error| endpoint(format_error_chain(&error)))?;
+        let versions = red::instrumented(
+            &self.instrumentation,
+            "kmip",
+            "discover_versions",
+            self.client.discover_versions(),
+        )
+        .await
+        .map_err(|error| endpoint(format_error_chain(&error)))?;
         if !versions.contains(&REQUIRED_PROTOCOL_VERSION) {
             let offered: Vec<String> = versions.iter().map(ToString::to_string).collect();
             return Err(endpoint(format!(
@@ -107,9 +121,14 @@ impl KmipKmsProvider {
                 offered.join(", ")
             )));
         }
-        let query = red::instrumented("kmip", "query", self.client.query_operations())
-            .await
-            .map_err(|error| endpoint(format_error_chain(&error)))?;
+        let query = red::instrumented(
+            &self.instrumentation,
+            "kmip",
+            "query",
+            self.client.query_operations(),
+        )
+        .await
+        .map_err(|error| endpoint(format_error_chain(&error)))?;
         for required in [Operation::Encrypt, Operation::Decrypt] {
             if !query.operations.contains(&required) {
                 return Err(endpoint(format!(
@@ -130,6 +149,7 @@ impl KmipKmsProvider {
     async fn validate_key(&self, kek_id: &str, unique_identifier: &str) -> Result<(), KmsError> {
         let field = format!("keys.{kek_id}");
         let attributes = red::instrumented(
+            &self.instrumentation,
             "kmip",
             "get_attributes",
             self.client.get_key_attributes(unique_identifier),
@@ -176,6 +196,7 @@ impl KmsBackend for KmipKmsProvider {
     async fn encrypt_dek(&self, kek_id: &str, dek: &[u8; 32]) -> Result<EncryptedDek, KmsError> {
         let unique_identifier = self.unique_identifier(kek_id)?;
         let sealed = red::instrumented(
+            &self.instrumentation,
             "kmip",
             "encrypt_dek",
             self.client.encrypt(unique_identifier, dek),
@@ -196,6 +217,7 @@ impl KmsBackend for KmipKmsProvider {
         // place inside its zeroizing wrapper, so no plain copy of the DEK is
         // left behind on the stack.
         let plaintext = red::instrumented(
+            &self.instrumentation,
             "kmip",
             "decrypt_dek",
             self.client.decrypt(unique_identifier, &sealed),
@@ -560,6 +582,7 @@ mod tests {
         let provider = KmipKmsProvider::connect(
             config,
             HashMap::from([(KEK.to_string(), unique_identifier)]),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("connect to pykmip");
@@ -613,9 +636,10 @@ mod tests {
     #[tokio::test]
     async fn wrap_then_unwrap_round_trips_through_the_mock_server() {
         let (_server, _dir, config) = server_and_config(MockBehavior::default()).await;
-        let provider = KmipKmsProvider::connect(config, keys())
-            .await
-            .expect("connect");
+        let provider =
+            KmipKmsProvider::connect(config, keys(), carbide_instrument::Instrumentation::noop())
+                .await
+                .expect("connect");
 
         let (dek, wrapped) = provider.generate_and_wrap_dek(KEK).await.expect("wrap");
         assert_eq!(wrapped.ciphertext[0], ENCODING_VERSION);
@@ -693,6 +717,7 @@ mod tests {
             let provider = KmipKmsProvider::new(
                 Arc::new(client),
                 HashMap::from([(KEK.to_string(), case.unique_identifier.to_string())]),
+                carbide_instrument::Instrumentation::noop(),
             );
             let result = match case.call {
                 Call::Encrypt => provider
@@ -848,10 +873,14 @@ mod tests {
             let (server, _dir, mut config) = server_and_config(case.behavior).await;
             server.update_key(UID, case.key);
             (case.config)(&mut config);
-            let error = KmipKmsProvider::connect(config, case.keys)
-                .await
-                .err()
-                .unwrap_or_else(|| panic!("{}: connect must fail", case.scenario));
+            let error = KmipKmsProvider::connect(
+                config,
+                case.keys,
+                carbide_instrument::Instrumentation::noop(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{}: connect must fail", case.scenario));
             assert_eq!(
                 variant(&error),
                 case.expect_variant,

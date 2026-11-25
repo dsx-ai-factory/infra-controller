@@ -8,7 +8,8 @@
 #
 # `deploy` installs ONLY the CRDs the simulator drives — it never installs the
 # real DPF operator, so it is independent of the setup.sh DPF-install work.
-# Do NOT run this alongside a real DPF operator: both would drive DPU status.
+# Do NOT run this alongside a real DPF operator: both would drive DPU status
+# and the DPFOperatorConfig status.
 IMG           ?= dpf-sim-controller:dev
 # Default to the namespace recorded by the last `make deploy`, so a plain
 # `make undeploy` always removes the deployment it created — deploying to a

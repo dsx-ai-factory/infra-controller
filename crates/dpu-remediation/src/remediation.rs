@@ -212,7 +212,7 @@ impl RemediationExecutor {
 
         // setup log rotation for tmpdir so we don't fill the disk
         loop {
-            match forge_dpu_agent_utils::utils::create_forge_client(
+            match carbide_dpu_agent_utils::utils::create_forge_client(
                 self.forge_api_server.as_str(),
                 &self.carbide_client_config,
             )

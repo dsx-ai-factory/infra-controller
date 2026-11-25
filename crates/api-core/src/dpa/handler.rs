@@ -27,7 +27,7 @@ use std::sync::Arc;
 use carbide_dpa::rpc::SetVni;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
-use db::ObjectColumnFilter;
+use db::{ObjectColumnFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::instance::config::spx::SpxAttachmentType;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
@@ -76,7 +76,7 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
 
     let md = message.clone().metadata.unwrap();
 
-    let mut txn = match services.database_connection.begin().await {
+    let mut txn = match services.database_connection.txn_begin().await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(
@@ -301,8 +301,6 @@ pub(crate) async fn start_svpc_handler(
     api_service: Arc<Api>,
     cancel_token: CancellationToken,
 ) -> Result<Arc<MqtteaClient>, eyre::Report> {
-    let client_id = "forge-client".to_string();
-
     let default_qos = QoS::AtMostOnce;
 
     let options = {
@@ -326,7 +324,7 @@ pub(crate) async fn start_svpc_handler(
     let client = MqtteaClient::new(
         &api_service.runtime_config.mqtt_broker_host().unwrap(),
         api_service.runtime_config.mqtt_broker_port().unwrap(),
-        &client_id,
+        "forge-client",
         Some(options),
         api_service.instrumentation.clone(),
     )
@@ -334,9 +332,7 @@ pub(crate) async fn start_svpc_handler(
 
     client.register_protobuf_message::<SetVni>("SetVni").await?;
 
-    let ns = "dpa/ack/#".to_string();
-
-    client.subscribe(&ns, default_qos).await?;
+    client.subscribe("dpa/ack/#", default_qos).await?;
 
     let services = api_service.clone();
 

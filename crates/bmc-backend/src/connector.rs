@@ -15,19 +15,35 @@
  * limitations under the License.
  */
 
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bmc_platform::PlatformError;
 use bmc_runtime::{DriverConnector, ExploredConnectError};
-use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
+use carbide_redfish::libredfish::{
+    DirectRedfishPool, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+};
+use carbide_secrets::credentials::Credentials;
 use carbide_utils::redfish::BmcAccessInfo;
+use libredfish::model::service_root::RedfishVendor;
 use model::site_explorer::EndpointExplorationReport;
 
 use crate::BackendBmc;
+use crate::accounts::{BackendAccountBmc, LibredfishAccounts, client_creation_error};
+use crate::convert::platform_error;
 
 /// Connects to BMCs with their stored credentials on the configured backend.
 #[derive(Clone)]
 pub enum BmcConnector {
+    /// Libredfish using a single pool for both routed and direct traffic (tests
+    /// and unproxied deployments).
     Libredfish(Arc<dyn RedfishClientPool>),
+    /// Libredfish with separate routed (possibly proxied) and direct pools.
+    LibredfishSplit {
+        routed: Arc<dyn RedfishClientPool>,
+        direct: Arc<dyn RedfishClientPool>,
+    },
     Drivers(Arc<DriverConnector>),
 }
 
@@ -41,30 +57,168 @@ impl BmcConnector {
         }
     }
 
+    /// The drivers when the site configured them, otherwise libredfish using
+    /// `routed` for stored-credential traffic and `direct` for explicit
+    /// credentials that must bypass `nico-bmc-proxy`.
+    pub fn new_with_direct(
+        routed: Arc<dyn RedfishClientPool>,
+        direct: DirectRedfishPool,
+        drivers: Option<Arc<DriverConnector>>,
+    ) -> Self {
+        match drivers {
+            Some(drivers) => Self::Drivers(drivers),
+            None => Self::LibredfishSplit {
+                routed,
+                direct: direct.pool(),
+            },
+        }
+    }
+
     /// Connects to the BMC at `access`. Only the drivers call `report` for the
     /// exploration report they select by, so libredfish never loads it.
-    pub async fn connect<E, Fut>(
+    pub fn connect<E, Fut>(
         &self,
         access: &BmcAccessInfo,
         report: impl FnOnce() -> Fut,
+    ) -> impl Future<Output = Result<BackendBmc, BmcConnectError<E>>>
+    where
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
+    {
+        self.connect_with_policy(access, report, false)
+    }
+
+    /// Connect for a durable mutation without application-level mutation retries.
+    /// IPMI chassis resets use one bounded attempt; protocol-level HTTP retries remain.
+    pub fn connect_without_mutation_retries<E, Fut>(
+        &self,
+        access: &BmcAccessInfo,
+        report: impl FnOnce() -> Fut,
+    ) -> impl Future<Output = Result<BackendBmc, BmcConnectError<E>>>
+    where
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
+    {
+        self.connect_with_policy(access, report, true)
+    }
+
+    async fn connect_with_policy<E, Fut>(
+        &self,
+        access: &BmcAccessInfo,
+        report: impl FnOnce() -> Fut,
+        single_attempt: bool,
     ) -> Result<BackendBmc, BmcConnectError<E>>
     where
         Fut: Future<Output = Result<EndpointExplorationReport, E>>,
     {
         match self {
-            Self::Libredfish(pool) => pool
-                .client_by_info(access)
-                .await
-                .map(BackendBmc::from)
-                .map_err(BmcConnectError::Libredfish),
+            Self::Libredfish(pool) | Self::LibredfishSplit { routed: pool, .. } => {
+                let result = if single_attempt {
+                    pool.create_client_without_mutation_retries(
+                        &access.host,
+                        access.port,
+                        RedfishAuth::for_bmc_mac(access.mac_address),
+                        None,
+                    )
+                    .await
+                } else {
+                    pool.client_by_info(access).await
+                };
+                result
+                    .map(BackendBmc::from)
+                    .map_err(BmcConnectError::Libredfish)
+            }
             Self::Drivers(drivers) => {
                 let report = report().await.map_err(BmcConnectError::Report)?;
-                drivers
-                    .connect(access, &report)
-                    .await
+                let result = if single_attempt {
+                    drivers
+                        .connect_without_mutation_retries(access, &report)
+                        .await
+                } else {
+                    drivers.connect(access, &report).await
+                };
+                result
                     .map(BackendBmc::from)
                     .map_err(BmcConnectError::Drivers)
             }
+        }
+    }
+
+    /// Connects to an explored BMC at `access` with explicit `credentials` for
+    /// account operations through the direct pool, selecting drivers from
+    /// `report`. Libredfish uses the pool this connector was given: `direct`
+    /// for [`Self::new_with_direct`], or the only pool otherwise.
+    pub async fn connect_with_credentials(
+        &self,
+        access: &BmcAccessInfo,
+        report: &EndpointExplorationReport,
+        credentials: Credentials,
+    ) -> Result<BackendAccountBmc, BmcConnectError<Infallible>> {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                LibredfishAccounts::new(pool.clone(), access, credentials, Some(report))
+                    .map(BackendAccountBmc::Libredfish)
+                    .map_err(BmcConnectError::Libredfish)
+            }
+            Self::Drivers(drivers) => drivers
+                .connect_with_credentials(access, report, credentials)
+                .await
+                .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
+                .map_err(BmcConnectError::Drivers),
+        }
+    }
+
+    /// Connects to an unexplored BMC at `access` with explicit `credentials`
+    /// to change its password, through the same pool as
+    /// [`Self::connect_with_credentials`]. The drivers are selected from its
+    /// live service root.
+    pub async fn connect_unexplored_with_credentials(
+        &self,
+        access: &BmcAccessInfo,
+        credentials: Credentials,
+    ) -> Result<BackendAccountBmc, BmcConnectError<Infallible>> {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                LibredfishAccounts::new(pool.clone(), access, credentials, None)
+                    .map(BackendAccountBmc::Libredfish)
+                    .map_err(BmcConnectError::Libredfish)
+            }
+            Self::Drivers(drivers) => drivers
+                .connect_unexplored_with_credentials(access, credentials)
+                .await
+                .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
+                .map_err(BmcConnectError::Drivers),
+        }
+    }
+
+    /// Reads the service root of the BMC at `address` with no credentials,
+    /// through the same pool as [`Self::connect_with_credentials`]: a
+    /// readiness probe that spends no login attempt, so it works against a BMC
+    /// still on its factory password.
+    pub async fn anonymous_service_root(&self, address: SocketAddr) -> Result<(), PlatformError> {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                let client = pool
+                    .create_client(
+                        &address.ip().to_string(),
+                        Some(address.port()),
+                        RedfishAuth::Anonymous,
+                        Some(RedfishVendor::Unknown),
+                    )
+                    .await
+                    .map_err(client_creation_error)?;
+                client
+                    .get_service_root()
+                    .await
+                    .map(drop)
+                    .map_err(platform_error)
+            }
+            Self::Drivers(drivers) => drivers.anonymous_service_root(address).await.map(drop),
+        }
+    }
+
+    /// Evicts cached service roots for `address` after a password change.
+    pub fn invalidate_bmc(&self, address: SocketAddr) {
+        if let Self::Drivers(drivers) = self {
+            drivers.invalidate_bmc(address);
         }
     }
 }
@@ -76,4 +230,18 @@ pub enum BmcConnectError<E> {
     Report(E),
     Libredfish(RedfishClientCreationError),
     Drivers(ExploredConnectError),
+}
+
+impl BmcConnectError<Infallible> {
+    /// Classifies the connection failure as a [`bmc_platform::PlatformError`]
+    /// so callers can branch on authentication or transport errors without
+    /// knowing which backend they are on. Mirrors
+    /// [`ExploredConnectError::into_platform_error`].
+    pub fn into_platform_error(self) -> bmc_platform::PlatformError {
+        match self {
+            Self::Report(never) => match never {},
+            Self::Libredfish(err) => crate::accounts::client_creation_error(err),
+            Self::Drivers(err) => err.into_platform_error(),
+        }
+    }
 }

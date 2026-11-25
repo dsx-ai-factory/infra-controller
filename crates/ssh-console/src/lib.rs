@@ -43,8 +43,9 @@ use crate::shutdown_handle::{ReadyHandle, ShutdownHandle};
 
 pub static POWER_RESET_COMMAND: &str = "power reset";
 
-/// Run a ssh-console server in the background, returning a [`SpawnHandle`] once the service is
-/// healthy and ready. When the handle is dropped, the server will exit.
+/// Run a ssh-console server in the background, returning a [`SpawnHandle`] once its listeners are
+/// bound. The BMC connection pool fills in the background. When the handle is dropped, the server
+/// will exit.
 ///
 /// Takes an optional `CancellationToken`, which will be used if provided as a `DropGuard` in
 /// `SpawnHandle`, otherwise a new cancel token will be created.
@@ -54,14 +55,15 @@ pub async fn spawn(
 ) -> Result<SpawnHandle, SpawnError> {
     let config = Arc::new(config);
     let metrics = Arc::new(MetricsState::new());
-    let carbide_api_client = config.make_carbide_api_client();
+    let carbide_api_client = config.make_carbide_api_client(metrics.instrumentation.clone());
 
     let (cancel_token, drop_guard) = {
         let cancel_token = cancel_token.unwrap_or_default();
         (cancel_token.clone(), cancel_token.drop_guard())
     };
 
-    // 1) Start BMC client pool
+    // 1) Start BMC client pool. It is ready before its first refresh, so the servers below do
+    // not wait for the pool to fill.
     let mut bmc_client_pool = bmc::client_pool::spawn(
         config.clone(),
         carbide_api_client.clone(),

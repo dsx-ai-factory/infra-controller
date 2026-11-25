@@ -97,9 +97,11 @@ env:
   ## Keep direct Prometheus collection independent of optional OTLP analyzer targets.
   CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
 
-## /livez answers from the collector's main loop, which is busy on large fleets
-## (about 6 cores at 20,000 hosts); the 1 s kubelet default killed a healthy
-## collector there.
+## /livez is answered on its own thread and runtime, so collector tasks cannot
+## delay it. It reports only that the process and its HTTP listener are up. The
+## process exits non-zero if the listener cannot start, its thread stops, or
+## accept keeps failing for about 30 s. The 10 s timeout leaves margin for node
+## CPU contention.
 livenessProbe:
   httpGet:
     path: /livez

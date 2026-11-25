@@ -1262,10 +1262,10 @@ async fn dispatch_with_replies(
         ..Default::default()
     };
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: options.format,
             request_timeout: client_config.request_timeout,
@@ -1527,7 +1527,7 @@ fn grpc_reply(payload: Vec<u8>, code: Code) -> Response<UnsyncBoxBody<Bytes, Inf
     data.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
     data.extend_from_slice(&payload);
     let mut trailers = hyper::HeaderMap::new();
-    trailers.insert("grpc-status", (code as i32).to_string().parse().unwrap());
+    trailers.insert("grpc-status", header::HeaderValue::from(code as i32));
     if code != Code::Ok {
         trailers.insert("grpc-message", header::HeaderValue::from_static(CORE_ERROR));
     }

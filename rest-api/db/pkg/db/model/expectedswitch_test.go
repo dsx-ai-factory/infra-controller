@@ -492,6 +492,68 @@ func TestExpectedSwitchSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NotNil(t, got.Site)
 }
 
+func TestExpectedSwitchSQLDAO_GetAllIDsAndUpdated(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedSwitchSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	essd := NewExpectedSwitchDAO(dbSession)
+
+	createExpectedSwitch := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedComponentIDAndUpdated {
+		t.Helper()
+		created, err := essd.Create(ctx, nil, ExpectedSwitchCreateInput{
+			ExpectedSwitchID:   id,
+			SiteID:             site.ID,
+			BmcMacAddress:      bmcMacAddress,
+			SwitchSerialNumber: "SWITCH-" + bmcMacAddress,
+			CreatedBy:          user.ID,
+		})
+		require.NoError(t, err)
+		return ExpectedComponentIDAndUpdated{ID: created.ID, Updated: created.Updated}
+	}
+
+	// The row created first has the higher ID, so creation order differs from ID order.
+	siteIDsAndUpdated := []ExpectedComponentIDAndUpdated{
+		createExpectedSwitch(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
+		createExpectedSwitch(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
+	}
+	createExpectedSwitch(site2, uuid.New(), "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedSwitchFilterInput
+		expected []ExpectedComponentIDAndUpdated
+	}{
+		{
+			desc:     "Site filter excludes other Sites and keeps creation order",
+			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDsAndUpdated,
+		},
+		{
+			desc:     "no matching ExpectedSwitches returns an empty slice",
+			filter:   ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+		{
+			desc:     "empty ExpectedSwitch ID filter returns an empty slice",
+			filter:   ExpectedSwitchFilterInput{ExpectedSwitchIDs: []uuid.UUID{}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := essd.GetAllIDsAndUpdated(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestExpectedSwitchSQLDAO_GetAll(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)

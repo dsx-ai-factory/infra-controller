@@ -24,10 +24,12 @@ var _ MappedNullable = &VpcPrefixAutomaticCreateRequest{}
 
 // VpcPrefixAutomaticCreateRequest struct for VpcPrefixAutomaticCreateRequest
 type VpcPrefixAutomaticCreateRequest struct {
-	Name         string `json:"name"`
-	VpcId        string `json:"vpcId"`
-	IpBlockId    string `json:"ipBlockId"`
-	PrefixLength int32  `json:"prefixLength"`
+	Name string `json:"name"`
+	// Label keys must not be empty or whitespace-only. Keys and values may contain at most 255 characters and must not contain the Unicode NUL character (U+0000). Empty values are allowed.
+	Labels       map[string]string `json:"labels,omitempty"`
+	VpcId        string            `json:"vpcId"`
+	IpBlockId    string            `json:"ipBlockId"`
+	PrefixLength int32             `json:"prefixLength"`
 }
 
 type _VpcPrefixAutomaticCreateRequest VpcPrefixAutomaticCreateRequest
@@ -75,6 +77,38 @@ func (o *VpcPrefixAutomaticCreateRequest) GetNameOk() (*string, bool) {
 // SetName sets field value
 func (o *VpcPrefixAutomaticCreateRequest) SetName(v string) {
 	o.Name = v
+}
+
+// GetLabels returns the Labels field value if set, zero value otherwise.
+func (o *VpcPrefixAutomaticCreateRequest) GetLabels() map[string]string {
+	if o == nil || IsNil(o.Labels) {
+		var ret map[string]string
+		return ret
+	}
+	return o.Labels
+}
+
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// and a boolean to check if the value has been set.
+func (o *VpcPrefixAutomaticCreateRequest) GetLabelsOk() (map[string]string, bool) {
+	if o == nil || IsNil(o.Labels) {
+		return map[string]string{}, false
+	}
+	return o.Labels, true
+}
+
+// HasLabels returns a boolean if a field has been set.
+func (o *VpcPrefixAutomaticCreateRequest) HasLabels() bool {
+	if o != nil && !IsNil(o.Labels) {
+		return true
+	}
+
+	return false
+}
+
+// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+func (o *VpcPrefixAutomaticCreateRequest) SetLabels(v map[string]string) {
+	o.Labels = v
 }
 
 // GetVpcId returns the VpcId field value
@@ -160,6 +194,9 @@ func (o VpcPrefixAutomaticCreateRequest) MarshalJSON() ([]byte, error) {
 func (o VpcPrefixAutomaticCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
+	if !IsNil(o.Labels) {
+		toSerialize["labels"] = o.Labels
+	}
 	toSerialize["vpcId"] = o.VpcId
 	toSerialize["ipBlockId"] = o.IpBlockId
 	toSerialize["prefixLength"] = o.PrefixLength

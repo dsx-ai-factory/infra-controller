@@ -30,7 +30,7 @@ use carbide_uuid::rack::RackProfileId;
 use carbide_uuid::switch::SwitchId;
 use component_manager::mock::MockNvSwitchManager;
 use component_manager::nv_switch_manager::ConfigureSwitchCertificateJobStatus;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use librms::protos::rack_manager as rms;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::switch::{
@@ -107,8 +107,7 @@ async fn load_switch(env: &ControllerEnv, id: &SwitchId) -> Switch {
 
     // The state handler operates on the full model, including fields such as
     // `switch_maintenance_requested` that are not exposed on the RPC Switch.
-    let mut conn = env.pool.acquire().await.unwrap();
-    db_switch::find_by_id(conn.as_mut(), id)
+    db_switch::find_by_id(&env.pool, id)
         .await
         .unwrap()
         .expect("switch should exist")
@@ -122,6 +121,8 @@ async fn run_handler(
     let mut metrics = SwitchMetrics::default();
     let mut writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<SwitchStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,
@@ -154,9 +155,7 @@ fn services_without_component_manager(env: &ControllerEnv) -> SwitchStateHandler
         credential_manager: env.test_credential_manager.clone(),
         switch_mtls_services: default_switch_mtls_services(),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
-        redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),
@@ -172,9 +171,7 @@ async fn services_with_component_manager(env: &ControllerEnv) -> SwitchStateHand
         credential_manager: env.test_credential_manager.clone(),
         switch_mtls_services: default_switch_mtls_services(),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
-        redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),
@@ -273,7 +270,7 @@ async fn reset_preserves_restart_intent_through_queue_and_controller_reload(pool
             .await
             .unwrap();
     }
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_switch_rack_id(&mut txn, &switch_id, &rack.id)
         .await
         .unwrap();
@@ -418,7 +415,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: sqlx::Pg
             .await
             .unwrap();
     }
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     set_switch_rack_id(&mut txn, &switch_id, &rack.id)
         .await
         .unwrap();
@@ -551,7 +548,7 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
         (ConfigureSwitchCertificateState::Failed, false),
         (ConfigureSwitchCertificateState::Completed, true),
     ] {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_switch_rack_id(&mut txn, &switch_id, &"rack-id-1".into())
             .await
             .unwrap();
@@ -567,16 +564,39 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
         .await
         .unwrap();
         txn.commit().await.unwrap();
-        for _ in 0..2 {
-            run_switch_controller_with_services(
-                pool.clone(),
-                env.api.work_lock_manager_handle(),
-                services(job_state),
-            )
-            .await;
-        }
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
+        let original = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        // Replace pending work after admission, before the accepted certificate
+        // operation submits and persists its returned job ID.
+        request_switch_maintenance_via_cm(
+            &env,
+            &switch_id,
+            SwitchMaintenanceOperation::PowerOff { graceful: true },
+        )
+        .await;
+        let replacement = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
         let started = load_switch(&env, &switch_id).await;
-        let original = started.switch_maintenance_requested.unwrap();
+        assert_eq!(
+            started.switch_maintenance_requested,
+            Some(replacement.clone())
+        );
         assert_eq!(
             started.controller_state.value,
             SwitchControllerState::Maintenance {
@@ -598,16 +618,6 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
             .await
             .unwrap();
         }
-        request_switch_maintenance_via_cm(
-            &env,
-            &switch_id,
-            SwitchMaintenanceOperation::PowerOff { graceful: true },
-        )
-        .await;
-        let replacement = load_switch(&env, &switch_id)
-            .await
-            .switch_maintenance_requested
-            .unwrap();
         run_switch_controller_with_services(
             pool.clone(),
             env.api.work_lock_manager_handle(),

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 
@@ -106,37 +105,36 @@ func (mu ManageUser) GetUserDataFromNgc(ctx context.Context, userID uuid.UUID, e
 
 	apiBaseURL := mu.cfg.GetNgcAPIBaseURL()
 
-	return getUserDataFromNGC(apiBaseURL, ngcToken, logger)
+	return getUserDataFromNGC(ctx, apiBaseURL, ngcToken, logger)
 }
 
 // getUserDataFromNGC retrieves user data from NGC user API endpoint
-func getUserDataFromNGC(baseURL string, ngcToken string, logger zerolog.Logger) (*NgcUser, error) {
-	reqURL, _ := url.Parse(fmt.Sprintf("%v/v2/users/me", baseURL))
-	req := &http.Request{
-		Method: "GET",
-		URL:    reqURL,
-		Header: map[string][]string{
-			"Authorization":   {fmt.Sprintf("Bearer %v", ngcToken)},
-			"Accept-Encoding": {"identity"},
-		},
+func getUserDataFromNGC(ctx context.Context, baseURL string, ngcToken string, logger zerolog.Logger) (*NgcUser, error) {
+	reqURL := baseURL + "/v2/users/me"
+	// The request carries the activity context, so the activity timeout ends the call
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		logger.Error().Err(err).Str("Request URL", reqURL).Msg("failed to build NGC user API request")
+		return nil, err
 	}
+	req.Header.Set("Authorization", "Bearer "+ngcToken)
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		logger.Error().Err(err).Str("Request URL", fmt.Sprintf("%v", reqURL)).
+		logger.Error().Err(err).Str("Request URL", reqURL).
 			Msg("http error retrieving user data from NGC user API endpoint")
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error().Str("Request URL", fmt.Sprintf("%v", reqURL)).
+		logger.Error().Str("Request URL", reqURL).
 			Str("Response Status", resp.Status).Msg("invalid response code returned by NGC API")
 		return nil, fmt.Errorf("invalid response code: %v returned by NGC API", resp.StatusCode)
 	}
 
 	respData, err := io.ReadAll(resp.Body)
-	defer resp.Body.Close()
-
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to read NGC user API response")
 		return nil, err
@@ -151,9 +149,9 @@ func getUserDataFromNGC(baseURL string, ngcToken string, logger zerolog.Logger) 
 	}
 
 	if ngcUserResponse.RequestStatus.StatusCode != NgcRequestStatusSuccess {
-		logger.Error().Err(err).Str("Request Status Code", ngcUserResponse.RequestStatus.StatusCode).
+		logger.Error().Str("Request Status Code", ngcUserResponse.RequestStatus.StatusCode).
 			Msg("invalid request status returned by NGC API")
-		return nil, err
+		return nil, fmt.Errorf("invalid request status: %v returned by NGC API", ngcUserResponse.RequestStatus.StatusCode)
 	}
 
 	logger.Info().Msg("successfully completed activity")
@@ -209,7 +207,7 @@ func (mu ManageUser) GetUserDataFromNgcWithAuxiliaryID(ctx context.Context, auxi
 
 	apiBaseURL := mu.cfg.GetNgcAPIBaseURL()
 
-	return getUserDataFromNGC(apiBaseURL, ngcToken, logger)
+	return getUserDataFromNGC(ctx, apiBaseURL, ngcToken, logger)
 }
 
 // CreateOrUpdateUserInDBWithAuxiliaryID updates user data in DB from NGC user data
@@ -275,7 +273,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 
 		if starfleetIDUsers[0].ID != auxiliaryIDUsers[0].ID {
 			return errors.Wrap(cdb.ErrInvalidParams, fmt.Sprintf("different users found: StarfleetID %s belongs to user %s, AuxiliaryID %s belongs to user %s",
-				ngcUser.StarfleetID, starfleetIDUsers[0].ID.String(), ngcUser.ClientID, auxiliaryIDUsers[0].ID.String()))
+				ngcUser.StarfleetID, starfleetIDUsers[0].ID, ngcUser.ClientID, auxiliaryIDUsers[0].ID))
 		}
 
 		existingUser = &starfleetIDUsers[0]

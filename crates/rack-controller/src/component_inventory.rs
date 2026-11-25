@@ -39,10 +39,8 @@ impl RackComponentCounts {
         db_pool: &sqlx::PgPool,
         rack_id: &RackId,
     ) -> Result<Self, StateHandlerError> {
-        let mut connection = db_pool.acquire().await?;
-
         let compute = db_machine::find_machine_ids::<MachineId>(
-            connection.as_mut(),
+            db_pool,
             MachineSearchConfig {
                 rack_id: Some(rack_id.clone()),
                 ..Default::default()
@@ -51,7 +49,7 @@ impl RackComponentCounts {
         .await?
         .len() as u32;
         let switch = db_switch::find_ids(
-            connection.as_mut(),
+            db_pool,
             model::switch::SwitchSearchFilter {
                 rack_id: Some(rack_id.clone()),
                 ..Default::default()
@@ -60,7 +58,7 @@ impl RackComponentCounts {
         .await?
         .len() as u32;
         let power_shelf = db_power_shelf::find_ids(
-            connection.as_mut(),
+            db_pool,
             model::power_shelf::PowerShelfSearchFilter {
                 rack_id: Some(rack_id.clone()),
                 ..Default::default()

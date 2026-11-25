@@ -35,6 +35,9 @@ on:
       - "v[0-9]*.[0-9]*.[0-9]*"
       - "v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]*"
       - "v[0-9].[0-9].[0-9]-rc[0-9]*"
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
 
 permissions:
   contents: read
@@ -128,6 +131,9 @@ jobs:
 
       - name: Test DevSpace REST integration addresses
         run: bash dev/deployment/devspace/setup-rest-integration_test.sh
+
+      - name: Test DevSpace host runtime
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest dev/deployment/devspace/tests/test_host_runtime.py
 
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
@@ -1418,7 +1424,7 @@ jobs:
     if: >-
       ${{
         !cancelled()
-        && startsWith(github.ref, 'refs/heads/pull-request/')
+        && (startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group')
         && needs.prepare.result == 'success'
         && contains('success,skipped', needs.build-container-x86_64.result)
         && contains('success,skipped', needs.build-container-aarch64.result)
@@ -1879,7 +1885,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$GITHUB_REF" == refs/heads/pull-request/* || "$GITHUB_REF" == refs/tags/* ]]; then
+          if [[ "$GITHUB_REF" == refs/heads/pull-request/* || "$GITHUB_REF" == refs/tags/* || "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
           else
             BEFORE="${{ github.event.before }}"
@@ -2170,7 +2176,7 @@ jobs:
   proto-police:
     needs:
       - prepare
-    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ needs.prepare.outputs.proto_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu4
     container:
       image: yoheimuta/protolint
@@ -2186,7 +2192,7 @@ jobs:
   migration-police:
     needs:
       - changes
-    if: ${{ contains(github.ref, 'pull-request/') }}
+    if: ${{ contains(github.ref, 'pull-request/') || github.event_name == 'merge_group' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2282,7 +2288,7 @@ jobs:
     needs:
       - prepare
       - build-container-x86_64
-    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && contains(github.ref, 'pull-request/') }}
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.source_files_changed == 'true' && (contains(github.ref, 'pull-request/') || github.event_name == 'merge_group') }}
     runs-on: linux-amd64-cpu32
     container:
       image: ${{ needs.prepare.outputs.lint_container_ref }}
@@ -2629,7 +2635,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2707,6 +2713,9 @@ jobs:
       - name: Test health check external VIPs
         run: bash helm-prereqs/tests/health-check-external-vips_test.sh
 
+      - name: Test health check HTTP
+        run: bash helm-prereqs/tests/health-check-http_test.sh
+
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
 
@@ -2762,7 +2771,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3073,7 +3082,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3086,7 +3095,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3099,7 +3108,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3112,7 +3121,7 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3125,7 +3134,7 @@ jobs:
 
       - name: Package and push nico-unbound-local chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-unbound-local
           chart-version: ${{ needs.prepare.outputs.helm_version }}

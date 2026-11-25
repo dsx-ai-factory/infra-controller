@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -340,11 +342,61 @@ func TestClient_Do(t *testing.T) {
 	}
 }
 
+// TestClient_do protects the per-request notification that MCP metrics count.
+func TestClient_do(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	readErr := errors.New("body read failure")
+	for _, tc := range []struct {
+		name       string
+		response   func() (*http.Response, error)
+		wantStatus int
+		wantErr    error
+	}{
+		{name: "success reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
+		}, wantStatus: http.StatusOK},
+		// An API error is still a response; its status must not be reported as a failure to connect.
+		{name: "API error reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}, wantStatus: http.StatusNotFound},
+		{name: "transport failure reports the error", response: func() (*http.Response, error) {
+			return nil, transportErr
+		}, wantErr: transportErr},
+		// Headers arrived but the body did not, so no status is reported as read.
+		{name: "body read failure reports the error", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: &errorReadCloser{err: readErr}}, nil
+		}, wantErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					time.Sleep(3 * time.Second)
+					return tc.response()
+				})
+				var events []RequestEvent
+				client.RequestNotify = func(event RequestEvent) {
+					events = append(events, event)
+				}
+
+				_, _, _ = client.Do(http.MethodGet, "/v2/org/{org}/nico/instance", nil, nil, nil)
+
+				require.Len(t, events, 1)
+				assert.Equal(t, http.MethodGet, events[0].Method)
+				assert.Equal(t, tc.wantStatus, events[0].StatusCode)
+				assert.ErrorIs(t, events[0].Err, tc.wantErr)
+				assert.Equal(t, 3*time.Second, events[0].Duration)
+			})
+		})
+	}
+}
+
 func TestClient_doWithQueryValues(t *testing.T) {
 	tests := []struct {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "redacts firmware credentials in debug output", run: testClientDebugFirmwareCredentials},
 		// Multi-value requests must preserve every value at the HTTP boundary.
 		{
 			name: "preserves repeated query values",
@@ -653,6 +705,31 @@ func TestFormatDebugBodyRedactsNestedSecrets(t *testing.T) {
 	assert.Contains(t, formatted, `"publicKey":"ssh-ed25519 public"`)
 }
 
+func TestFormatDebugBodyRedactsFirmwareURLSecrets(t *testing.T) {
+	body := []byte(`{
+		"components":[{"firmware":[{
+			"artifacts":[
+				{"url":"https://user:synthetic-pass@fw.example.invalid/et07.lod?token=synthetic#frag","sha256":"abc"},
+				{"url":"https://fw.example.invalid/plain.bin"}
+			],
+			"upgradeScript":{"url":"https://scripts.example.invalid/up.sh?X-Amz-Signature=synthetic","sha256":"def"}
+		}]}],
+		"documentationUrl":"https://docs.example.invalid/firmware?page=2"
+	}`)
+
+	formatted := formatDebugBody(body)
+
+	assert.NotContains(t, formatted, "synthetic-pass")
+	assert.NotContains(t, formatted, "token=synthetic")
+	assert.NotContains(t, formatted, "X-Amz-Signature")
+	assert.NotContains(t, formatted, "frag")
+	assert.Contains(t, formatted, `"url":"https://redacted@fw.example.invalid/et07.lod?<redacted>"`)
+	assert.Contains(t, formatted, `"url":"https://fw.example.invalid/plain.bin"`)
+	assert.Contains(t, formatted, `"url":"https://scripts.example.invalid/up.sh?<redacted>"`)
+	assert.Contains(t, formatted, `"sha256":"abc"`)
+	assert.Contains(t, formatted, `"documentationUrl":"https://docs.example.invalid/firmware?page=2"`)
+}
+
 func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 	assert.Equal(
 		t,
@@ -663,4 +740,40 @@ func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 
 func TestFormatDebugBodyPreservesNonJSONDiagnostics(t *testing.T) {
 	assert.Equal(t, "upstream unavailable", formatDebugBody([]byte("upstream unavailable")))
+}
+
+// Exercise both HTTP logging directions without changing the credential-bearing wire body.
+func testClientDebugFirmwareCredentials(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct{ name, field, value string }{
+		{"shared download auth", "downloadCredentials", `{"shared":"download-secret"}`},
+		{"per-component download auth", "downloadCredentials", `{"perComponent":{"compute":"download-secret"}}`},
+		{"legacy download auth", "authenticationData", `{"shared":"download-secret"}`},
+		{"device overrides", "deviceCredentialOverrides", `{"bmc":{"username":"device-user","password":"device-secret"},"nvos":{"username":"nvos-user","password":"nvos-secret"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"siteId":"site-1","` + tc.field + `":` + tc.value + `}`)
+			var logs bytes.Buffer
+			logger := logrus.New()
+			logger.SetOutput(&logs)
+			logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true, DisableColors: true})
+			client := NewClient("https://api.example.com", "test-org", "bearer-secret", logrus.NewEntry(logger), true)
+			client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				received, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				require.JSONEq(t, string(body), string(received))
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+			})
+			response, _, err := client.doWithQueryValues(http.MethodPatch, "/v2/org/{org}/nico/tray/tray-1/firmware", nil, nil, body)
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(response))
+			for _, secret := range []string{"download-secret", "device-user", "device-secret", "nvos-user", "nvos-secret", "bearer-secret"} {
+				assert.NotContains(t, logs.String(), secret)
+			}
+			assert.Contains(t, logs.String(), "Request body:")
+			assert.Contains(t, logs.String(), "Response body:")
+			assert.Contains(t, logs.String(), "site-1")
+			assert.Contains(t, logs.String(), "<redacted>")
+		})
+	}
 }

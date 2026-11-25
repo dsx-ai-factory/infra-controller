@@ -167,7 +167,8 @@ mod test {
         assert!(
             test_meter
                 .formatted_metrics("c_seconds_bucket")
-                .contains(&"{le=\"100\"} 1".to_string())
+                .iter()
+                .any(|value| value == "{le=\"100\"} 1")
         );
 
         assert_eq!(

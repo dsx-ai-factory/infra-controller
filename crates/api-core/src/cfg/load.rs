@@ -26,6 +26,7 @@ use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
+use itertools::Itertools;
 use serde::de::DeserializeOwned;
 
 use super::file::{
@@ -192,11 +193,9 @@ fn reject_unknown_fields_if_requested(
         return Ok(());
     }
 
-    let fields = unknown_fields
-        .iter()
-        .map(|field| format!("{} ({})", field.path, field.source))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let fields = unknown_fields.iter().format_with(", ", |field, f| {
+        f(&format_args!("{} ({})", field.path, field.source))
+    });
     Err(eyre::eyre!("unknown configuration fields: {fields}"))
 }
 
@@ -1005,6 +1004,92 @@ selections = { power = "standard" }"#
         })
     }
 
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bluefield_patterns_require_one_operator_at_startup() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("base.toml", include_str!("test_data/min_config.toml"))?;
+            let load = |patterns: &str, strict: bool| {
+                let site = format!(
+                    r#"
+                    deny_unknown_fields = {strict}
+                    [[site_explorer.host_bluefield_rules]]
+                    id = "site-oem"
+                    sources = ["system_pcie_device"]
+                    product = "bluefield3_dpu"
+                    part_numbers = [{patterns}]
+                    "#
+                );
+                jail.create_file("site.toml", &site).unwrap();
+                parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml"))).map(
+                    |config| {
+                        !config
+                            .site_explorer
+                            .host_bluefield_rules
+                            .uses_only_defaults()
+                    },
+                )
+            };
+
+            let alternatives =
+                r#"{ exact = "OEM-A" }, { prefix = "OEM-B" }, { contains = "OEM-C" }"#;
+            assert!(load(alternatives, true).unwrap());
+            for strict in [false, true] {
+                let ambiguous = r#"{ exact = "OEM-A", contains = "OEM-" }"#;
+                let error =
+                    load(ambiguous, strict).expect_err("ambiguous pattern must fail startup");
+                let message = format!("{error:#}");
+                assert!(message.contains("exactly one operator"), "{message}");
+                assert!(
+                    message.contains("\"exact\"") && message.contains("\"contains\""),
+                    "{message}"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn host_serial_rules_load_from_site_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("base.toml", include_str!("test_data/min_config.toml"))?;
+            let load = |site: &str| {
+                jail.create_file("site.toml", &format!("deny_unknown_fields = true\n{site}"))
+                    .unwrap();
+                parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml")))
+            };
+            let rule = r#"[[site_explorer.host_serial_rules]]
+id = "site-tray"
+hardware_class = { prefix = "acme_" }
+[site_explorer.host_serial_rules.source]
+kind = "chassis_assembly"
+chassis_id = { prefix = "Enclosure" }
+name = { exact = "Tray FRU" }
+"#;
+            let config = load(rule).unwrap();
+            assert!(
+                config
+                    .site_explorer
+                    .host_serial_rules
+                    .needs_chassis_assembly("ENCLOSURE-2")
+            );
+            // Exercise the production loader's strict field diagnostics and rule validation.
+            for (site, error) in [
+                (
+                    rule.replace("chassis_assembly", "system_sku"),
+                    "source.chassis_id",
+                ),
+                (rule.replace("Tray FRU", " "), "blank assembly selector"),
+            ] {
+                let result = load(&site).map(|_| ());
+                let message = format!("{:#}", result.expect_err(&site));
+                assert!(message.contains(error), "{site}: {message}");
+            }
+            Ok(())
+        })
+    }
+
     /// Existing configurations keep libredfish, and only the two clients parse.
     #[test]
     #[allow(clippy::result_large_err)]
@@ -1102,10 +1187,9 @@ selections = { power = "standard" }"#
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
             // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
-            let oversized_targets = (0..=256)
-                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let oversized_targets = (0..=256).format_with(", ", |vni, f| {
+                f(&format_args!("{{ asn = 64512, vni = {vni} }}"))
+            });
             let oversized_conditional_exports = format!(
                 "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
             );

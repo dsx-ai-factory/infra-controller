@@ -39,7 +39,7 @@ use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
     record_device_enrolled, set_next_target_version,
 };
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::power_shelf::{PowerShelfConfig, PowerShelfControllerState};
@@ -117,9 +117,7 @@ fn power_shelf_services(
         credential_manager: env.credential_manager.clone(),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
-        redfish_client_pool: env.redfish_sim.clone(),
         bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: RotationGate::new_for_family(CredentialRotationType::Bmc),
         bmc_rotation_enabled,
     }
@@ -139,7 +137,7 @@ async fn run_power_shelf_controller_with_services(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool, work_lock_manager_handle)
+        .database(pool, work_lock_manager_handle, &services.instrumentation)
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(services.into())
         .state_handler(Arc::new(PowerShelfStateHandler::default()))
@@ -190,7 +188,7 @@ async fn create_power_shelf(env: &ControllerEnv, name: &str) -> PowerShelfId {
 }
 
 async fn move_to_ready(pool: &PgPool, power_shelf_id: &PowerShelfId) -> TestResult {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_power_shelf_controller_state(
         txn.as_mut(),
         power_shelf_id,
@@ -293,8 +291,7 @@ async fn failing_pmc_rotation_returns_to_ready_and_quarantines(pool: PgPool) -> 
         power_shelf.controller_state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(!status.converged, "a failed rotation must not converge");
@@ -364,8 +361,7 @@ async fn feature_flag_off_suppresses_pmc_rotation(pool: PgPool) -> TestResult {
         power_shelf.controller_state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -463,8 +459,7 @@ async fn force_request_converges_quarantined_pmc_when_disabled(pool: PgPool) -> 
     // The device converged despite its quarantine, and the one-shot request was
     // cleared so the shelf does not re-enter RotatingBmc on the next sweep.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -536,8 +531,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(pool: PgPo
         "the rotation suppression must be retained while the store lags"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -588,8 +582,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(pool: PgPo
         "resume must delete the rotation suppression once reconciled"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(

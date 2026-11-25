@@ -773,6 +773,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 		}, []string{"V1-1234567890"}, cdbm.DpuExtensionServiceStatusReady, ipu)
 	_ = util.TestBuildDpuExtensionServiceDeployment(t, dbSession, des.ID, site.ID, tenant.ID, instance.ID, "V1-1234567890", cdbm.DpuExtensionServiceDeploymentStatusRunning, tnu)
 
+	// Deleting and replacement Interfaces together can exceed the default page limit
+	subnet := util.TestBuildSubnet(t, dbSession, tenant, vpc, "testSubnet", cdbm.SubnetStatusReady, cutil.GetPtr(uuid.New()))
+	for i := range cdbp.DefaultLimit + 1 {
+		util.TestBuildInterface(t, dbSession, &instance.ID, &subnet.ID, nil, i == 0, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusReady)
+	}
+
 	tx, err := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	require.NoError(t, err)
 
@@ -808,6 +814,10 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
 	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil, false)
 	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
+
+	ifcs, _, err := cdbm.NewInterfaceDAO(dbSession).GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	require.NoError(t, err)
+	require.Empty(t, ifcs)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
@@ -996,7 +1006,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	nvlinkInterface3 := util.TestBuildNVLinkInterface(t, dbSession, instance1.ID, site.ID, nvllPartition1.ID, cutil.GetPtr(""), 2, cutil.GetPtr("e1f2a30200d71e9f"), nil, cdbm.NVLinkInterfaceStatusDeleting)
 	assert.NotNil(t, nvlinkInterface3)
 
-	// Set updated earlier than the inventory receipt interval for nvlinkInterface3 so it can be deleted
+	// Set updated earlier than the inventory receipt interval for nvlinkInterface3, making it stale
 	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkInterface3.ID.String())
 	assert.NoError(t, err)
 
@@ -1028,8 +1038,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance2.ID.String())
 	assert.NoError(t, err)
 
 	instance2Subnet := util.TestBuildInterface(t, dbSession, &instance2.ID, &subnet1.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
@@ -1222,8 +1232,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	)
 	assert.Nil(t, err)
 
-	// Set updated earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
+	// Set created and updated earlier than the inventory receipt interval
+	_, err = dbSession.DB.Exec("UPDATE instance SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
 	assert.NoError(t, err)
 
 	// Instance 9 is in Ready state and power status is Rebooting, gets set to BootCompleted
@@ -2216,6 +2226,24 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance12.ID.String())
 	assert.NoError(t, err)
 
+	// Created within the inventory interval, so the Site's inventory can predate it
+	recentTerminatingInstance, err := instanceDAO.Create(
+		ctx, nil,
+		cdbm.InstanceCreateInput{
+			Name:                     "test-instance-recent-terminating",
+			TenantID:                 tenant.ID,
+			InfrastructureProviderID: ip.ID,
+			SiteID:                   site3.ID,
+			InstanceTypeID:           &instanceType3.ID,
+			VpcID:                    vpc3.ID,
+			ControllerInstanceID:     cutil.GetPtr(uuid.New()),
+			Labels:                   map[string]string{},
+			Status:                   cdbm.InstanceStatusTerminating,
+			CreatedBy:                tnu.ID,
+		},
+	)
+	assert.NoError(t, err)
+
 	// --- Site 4: NVLink Interface deletion strategy test scenarios ---
 	site4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 	vpc4 := util.TestBuildVpc(t, dbSession, ip, site4, tenant, "test-vpc-4")
@@ -2229,7 +2257,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	gpuGuidDel4 := "gpu-guid-nvlink-del-4"
 	gpuGuidDel5 := "gpu-guid-nvlink-del-5"
 
-	// Instance A: Deleting NVLink Interface whose GPU GUID/Partition combo is NOT reported in controller status (should be deleted)
+	// Instance A: Site reports only GPU 1, so inventory deletes the aged GPU 0 binding and marks GPU 1 Ready.
 	machineNvlA := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstA, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-A", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2243,13 +2271,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstA.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
 
 	nvlifcDelA1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel1), nil, cdbm.NVLinkInterfaceStatusDeleting)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlifcDelA1.ID.String())
-	assert.NoError(t, err)
+	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval), nvlifcDelA1.ID)
+	require.NoError(t, err)
 
 	nvlifcDelA2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstA.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel2), nil, cdbm.NVLinkInterfaceStatusPending)
 	assert.NotNil(t, nvlifcDelA2)
 
-	// Instance B: Deleting NVLink Interface combo IS reported AND a Pending duplicate exists (should be deleted)
+	// Instance B: inventory removes the old partition assignment and the Deleting duplicate of the current binding.
 	machineNvlB := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
 	nvlinkDelInstB, err := instanceDAO.Create(ctx, nil, cdbm.InstanceCreateInput{
 		Name: "test-instance-nvlink-B", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site4.ID,
@@ -2262,12 +2290,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	assert.NoError(t, err)
 	_ = util.TestBuildInterface(t, dbSession, &nvlinkDelInstB.ID, &subnet4.ID, nil, true, nil, nil, nil, &tnu.ID, cdbm.InterfaceStatusPending)
 
-	nvlifcDelB1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 0, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusDeleting)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlifcDelB1.ID.String())
-	assert.NoError(t, err)
+	intermediatePartition := util.TestBuildNVLinkLogicalPartition(t, dbSession, "nvlink-intermediate", nil, site4, tenant, cdbm.NVLinkLogicalPartitionStatusReady, false)
+	nvlifcDelB1 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusDeleting)
+	retiredIntermediate := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, intermediatePartition.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusDeleting)
+	_, err = dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), nvlinkDelInstB.ID)
+	require.NoError(t, err)
 
-	nvlifcDelB2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, cutil.GetPtr(""), 1, cutil.GetPtr(gpuGuidDel3), nil, cdbm.NVLinkInterfaceStatusPending)
-	assert.NotNil(t, nvlifcDelB2)
+	nvlifcDelB2 := util.TestBuildNVLinkInterface(t, dbSession, nvlinkDelInstB.ID, site4.ID, nvllPartition4.ID, nil, 1, nil, nil, cdbm.NVLinkInterfaceStatusPending)
 
 	// Instance C: Last deleting NVLink Interface, Site won't report GPUConfig or Status, should be deleted
 	machineNvlC := util.TestBuildMachine(t, dbSession, ip.ID, site4.ID, nil, cutil.GetPtr(true), cdbm.MachineStatusReady)
@@ -2502,8 +2531,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		deletingInstance                      *cdbm.Instance
 		deletedInstances                      []*cdbm.Instance
 		missingInstances                      []*cdbm.Instance
-		// notMissingInstances are absent from the inventory but must keep their state,
-		// because the page carried no basis for calling them missing.
+		// notMissingInstances are absent from the inventory but must keep their state, because the
+		// page carried no basis for calling them missing or they may postdate the Site's inventory.
 		notMissingInstances                   []*cdbm.Instance
 		restoredInstance                      *cdbm.Instance
 		unpairedInstances                     []*cdbm.Instance
@@ -2571,7 +2600,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				status:     cdbm.DpuExtensionServiceDeploymentStatusRunning,
 			}},
 			readyNVLinkInterfaces:         []*cdbm.NVLinkInterface{nvlinkInterface1, nvlinkInterface2},
-			deletedNVLinkInterfaces:       []*cdbm.NVLinkInterface{nvlinkInterface3},
+			deletingNVLinkInterfaces:      []*cdbm.NVLinkInterface{nvlinkInterface3},
 			tpmCertificateUpdatedInstance: instance16,
 			expectErr:                     false,
 		},
@@ -2611,7 +2640,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 					PageSize:    25,
 				},
 			},
-			deletedInstances: []*cdbm.Instance{instance12},
+			deletedInstances:    []*cdbm.Instance{instance12},
+			notMissingInstances: []*cdbm.Instance{recentTerminatingInstance},
 		},
 		{
 			name:             "test paged Instance inventory processing, first page",
@@ -2696,7 +2726,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			clientPoolSiteID:         site4.ID.String(),
 			clientPoolClient:         mtc4,
 			instanceInventory:        nvlinkDelInventory,
-			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelA1, nvlifcDelB1, nvlifcDelC1},
+			deletedNVLinkInterfaces:  []*cdbm.NVLinkInterface{nvlifcDelA1, nvlifcDelB1, retiredIntermediate, nvlifcDelC1},
 			readyNVLinkInterfaces:    []*cdbm.NVLinkInterface{nvlifcDelA2, nvlifcDelB2},
 			deletingNVLinkInterfaces: []*cdbm.NVLinkInterface{nvlifcDelD1, nvlifcDelE1},
 		},
@@ -2796,7 +2826,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				// Instance NVLink Interfaces
 				_, totalNvIfcs, err := nvifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
-				assert.Equal(t, 3, totalNvIfcs)
+				assert.Equal(t, 4, totalNvIfcs)
 
 				nvIfc1, err := nvifcDAO.GetByID(ctx, nil, nvlinkInterface1.ID, nil)
 				assert.Nil(t, err)
@@ -3096,8 +3126,8 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.deletingNVLinkInterfaces != nil {
 				for _, nvIfc := range tc.deletingNVLinkInterfaces {
-					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, []string{cdbm.InstanceRelationName})
-					require.NoError(t, err, "NVLink Interface: %s for Instance: %s should still exist", nvIfc.ID.String(), nvIfc.Instance.Name)
+					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, nil)
+					require.NoError(t, err, "NVLink interface %s for instance %s should still exist", nvIfc.ID, nvIfc.InstanceID)
 					assert.Equal(t, cdbm.NVLinkInterfaceStatusDeleting, unvIfc.Status)
 				}
 			}
@@ -3821,6 +3851,21 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 			"the row must survive while the Site still reports the attachment")
 	})
 
+	t.Run("removes a retiring duplicate when an active row owns the Site report", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		active := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusReady)
+		duplicate := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusDeleting)
+		fx.age(t, duplicate.ID)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+		}, corev1.SyncState_SYNCED))
+
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, fx.get(t, active.ID).Status)
+		_, err := fx.sxaDAO.Get(context.Background(), nil, duplicate.ID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
 	// Changing the attachment type retires the old row and creates a new one sharing the
 	// Partition, device and device instance, so a stale report for the retired Physical
 	// attachment must not be applied to its OVS replacement.
@@ -3864,5 +3909,61 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		require.NotNil(t, persisted.BridgeName)
 		assert.Equal(t, "br-new", *persisted.BridgeName, "the reported bridge must be applied")
 		assert.Nil(t, persisted.OvnNetworkName, "an omitted ovn_network_name must clear the stale persisted value")
+	})
+}
+
+// TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation covers the InfiniBand Interface branch
+// of the Instance inventory activity, on the SpectrumX fixture's Site and Instance.
+func TestUpdateInstancesInDB_InfiniBandInterfaceReconciliation(t *testing.T) {
+	// Config and status Interfaces are index-aligned by Core. A truncated status list must not
+	// panic the activity or shift another Interface's GUID onto this row.
+	t.Run("a status list shorter than the config list leaves the unmatched Interface alone", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		ctx := context.Background()
+		const device = "MT2910 Family [ConnectX-7]"
+		controllerPartitionID := uuid.New()
+		partition := util.TestBuildInfiniBandPartition(t, fx.dbSession, "ib-partition", fx.site, fx.tenant, &controllerPartitionID, cdbm.InfiniBandPartitionStatusReady, false)
+		first := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 0, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+		second := util.TestBuildInfiniBandInterface(t, fx.dbSession, fx.instance.ID, fx.site.ID, partition.ID, device, 1, true, nil, cdbm.InfiniBandInterfaceStatusPending, false)
+
+		configs := []*corev1.InstanceIBInterfaceConfig{}
+		for _, ibi := range []*cdbm.InfiniBandInterface{first, second} {
+			configs = append(configs, &corev1.InstanceIBInterfaceConfig{
+				Device:         device,
+				DeviceInstance: uint32(ibi.DeviceInstance),
+				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				IbPartitionId:  &corev1.IBPartitionId{Value: controllerPartitionID.String()},
+			})
+		}
+
+		_, err := fx.manager.UpdateInstancesInDB(ctx, fx.site.ID, &corev1.InstanceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			Instances: []*corev1.Instance{{
+				Id:     &corev1.InstanceId{Value: fx.instance.ControllerInstanceID.String()},
+				Config: &corev1.InstanceConfig{Infiniband: &corev1.InstanceInfinibandConfig{IbInterfaces: configs}},
+				Status: &corev1.InstanceStatus{Infiniband: &corev1.InstanceInfinibandStatus{
+					IbInterfaces:  []*corev1.InstanceIBInterfaceStatus{{Guid: cutil.GetPtr("1070fd0300bd43ad")}},
+					ConfigsSynced: corev1.SyncState_SYNCED,
+				}},
+			}},
+			InventoryPage: &corev1.InventoryPage{
+				TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1,
+				ItemIds: []string{fx.instance.ControllerInstanceID.String()},
+			},
+		})
+		require.NoError(t, err)
+
+		ibiDAO := cdbm.NewInfiniBandInterfaceDAO(fx.dbSession)
+		firstPersisted, err := ibiDAO.GetByID(ctx, nil, first.ID, nil)
+		require.NoError(t, err)
+		require.NotNil(t, firstPersisted.GUID)
+		assert.Equal(t, "1070fd0300bd43ad", *firstPersisted.GUID)
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusReady, firstPersisted.Status)
+
+		secondPersisted, err := ibiDAO.GetByID(ctx, nil, second.ID, nil)
+		require.NoError(t, err)
+		assert.Nil(t, secondPersisted.GUID, "the second Interface has no reported status, so it must stay empty")
+		assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, secondPersisted.Status)
 	})
 }

@@ -11,7 +11,6 @@ use ::rpc::forge::component_firmware_installed::Result as Installed;
 use ::rpc::forge::forge_server::Forge;
 use ::rpc::forge::get_component_firmware_details_request::Target;
 use ::rpc::forge::{self as rpc};
-use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::capture_logs_async;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_secrets::SecretsError;
@@ -23,6 +22,7 @@ use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineTy
 use carbide_uuid::rack::RackId;
 use component_manager::component_manager::ComponentManager;
 use component_manager::rms::RmsBackend;
+use db::TransactionVending as _;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
@@ -36,6 +36,7 @@ use model::power_shelf::NewPowerShelf;
 use model::rack_type::RackFirmwareObjectConfig;
 use model::switch::{NewSwitch, SwitchConfig};
 use model::test_support::{TEST_RMS_RACK_PROFILE_ID, power_shelf_config};
+use rms_mock::test_support::MockRmsApi;
 use tonic::Request;
 
 use crate::api::{Api, RequestReceivedAt};
@@ -202,7 +203,7 @@ async fn seed_target(
     seed: u8,
 ) -> TestResult<TargetFixture> {
     let mac = MacAddress::new([2, 0, 0, 0, 0, seed]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (id, target, association, nvos_interface) = match role {
         Role::Compute => {
             let id = HostMachineId::try_from(MachineId::new(
@@ -352,7 +353,7 @@ async fn api(
         reader.clone(),
         Arc::new(config.rack_profiles.clone()),
         false,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
     let manager = ComponentManager::new(
         backend.clone(),
@@ -396,17 +397,19 @@ async fn replies(mock: &MockRmsApi, id: &str, inventory_fails: bool, job_fails: 
     .await;
     mock.enqueue_compare_firmware_object(Ok(comparison_reply(id, "expected-v2")))
         .await;
-    mock.enqueue_get_firmware_job_status(if job_fails {
+
+    mock.enqueue_get_job_status(if job_fails {
         Err(librms::RackManagerError::ApiInvocationError(
             tonic::Status::unavailable(PRIVATE),
         ))
     } else {
-        Ok(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
-            job_id: format!("job-{id}"),
-            job_state: rms::FirmwareJobState::Running as i32,
-            error_message: PRIVATE.into(),
-            ..Default::default()
+        Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: format!("job-{id}"),
+                execution_state: rms::JobExecutionState::Running as i32,
+                error_message: PRIVATE.into(),
+                ..Default::default()
+            }],
         })
     })
     .await;
@@ -507,7 +510,7 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
     let env = create_test_env(pool.clone()).await;
     let config = firmware_config();
     let rack = RackId::new("firmware-public");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -694,12 +697,10 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
                 1
             );
         }
+
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "{name}");
-        assert_eq!(
-            mock.get_firmware_job_status_calls().await.len(),
-            1,
-            "{name}"
-        );
+        assert_eq!(mock.get_job_status_calls().await.len(), 1, "{name}");
+
         for marker in [
             PRIVATE,
             "private-password",
@@ -743,15 +744,14 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
                     .interface
                     .as_ref()
                     .expect("owned NVOS network identity");
-                let mut conn = pool.acquire().await?;
                 let expected_ip =
-                    db::machine_interface_address::find_for_interface(&mut conn, nvos_interface)
+                    db::machine_interface_address::find_for_interface(&pool, nvos_interface)
                         .await?[0]
                         .address;
                 let expected_mac: MacAddress =
                     sqlx::query_scalar("SELECT mac_address FROM machine_interfaces WHERE id = $1")
                         .bind(nvos_interface)
-                        .fetch_one(&mut *conn)
+                        .fetch_one(&pool)
                         .await?;
 
                 assert_eq!(interface.ip_address, expected_ip.to_string());
@@ -794,12 +794,10 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
     mock.enqueue_compare_firmware_object(Ok(compared)).await;
     // Durable reference recovery is serialized in the supplied MAC order.
     for target in [&second_host, &host] {
-        mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
-            job_id: format!("job-{}", target.id),
-            job_state: rms::FirmwareJobState::Running as i32,
-            ..Default::default()
-        }))
+        mock.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+            &format!("job-{}", target.id),
+            rms::JobExecutionState::Running,
+        )))
         .await;
     }
     let (api, fetcher) = api(&env, pool.clone(), config, mock.clone(), false).await?;
@@ -903,12 +901,13 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
             .code,
         rpc::ComponentFirmwareErrorCode::NotFound as i32
     );
+
     assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(mock.get_firmware_job_status_calls().await.len(), 2);
+    assert_eq!(mock.get_job_status_calls().await.len(), 2);
 
     // Deleting this owner removes its profile context and prevents another
     // fetch while the host's independent saved request remains visible.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::rack::mark_as_deleted(&rack, &mut txn).await?;
     txn.commit().await?;
 
@@ -961,7 +960,7 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
     capabilities.switch.count = 2;
     capabilities.power_shelf.count = 2;
     let rack = RackId::new("firmware-ownership");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -990,7 +989,7 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
         (&target, &foreign_switch),
         (&shelf, &foreign_shelf),
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine_interface::associate_bmc_interface(
             &member.bmc_interface,
             target_owner(foreign),
@@ -1012,8 +1011,8 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
         assert_eq!(credentials.calls.load(Ordering::SeqCst), 0);
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
         assert!(mock.batch_get_firmware_inventory_calls().await.is_empty());
-        assert!(mock.get_firmware_job_status_calls().await.is_empty());
-        let mut txn = pool.begin().await?;
+        assert!(mock.get_job_status_calls().await.is_empty());
+        let mut txn = pool.txn_begin().await?;
         db::machine_interface::associate_bmc_interface(
             &member.bmc_interface,
             target_owner(member),
@@ -1105,7 +1104,7 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
     api.component_manager = configured_manager;
     // Real saved requests and references make lifecycle suppression meaningful
     // with configured readers, rather than relying on an already disabled API.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::switch::set_switch_reprovisioning_requested(
         &mut txn,
         target.id.parse()?,
@@ -1154,12 +1153,11 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
             "configured-default",
         )))
         .await;
-        mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
-            job_id: format!("job-{}", member.id),
-            job_state: rms::FirmwareJobState::Running as i32,
-            ..Default::default()
-        }))
+
+        mock.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+            &format!("job-{}", member.id),
+            rms::JobExecutionState::Running,
+        )))
         .await;
 
         let eligible = api
@@ -1186,7 +1184,7 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
     }
     let credential_reads = credentials.calls.load(Ordering::SeqCst);
     let manifest_reads = fetcher.calls.load(Ordering::SeqCst);
-    let job_polls = mock.get_firmware_job_status_calls().await.len();
+    let job_polls = mock.get_job_status_calls().await.len();
     let inventory_reads = mock.batch_get_firmware_inventory_calls().await.len();
     let comparison_reads = mock.compare_firmware_object_calls().await.len();
     let switch_state = model::switch::SwitchControllerState::Decommissioning {
@@ -1262,7 +1260,8 @@ async fn component_firmware_details_reject_unowned_and_ineligible_targets(
             );
             assert_eq!(credentials.calls.load(Ordering::SeqCst), credential_reads);
             assert_eq!(fetcher.calls.load(Ordering::SeqCst), manifest_reads);
-            assert_eq!(mock.get_firmware_job_status_calls().await.len(), job_polls);
+            assert_eq!(mock.get_job_status_calls().await.len(), job_polls);
+
             assert_eq!(
                 mock.batch_get_firmware_inventory_calls().await.len(),
                 inventory_reads
@@ -1354,7 +1353,7 @@ async fn component_firmware_details_validate_before_external_work(
     assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
     assert!(mock.batch_get_firmware_inventory_calls().await.is_empty());
     assert!(mock.compare_firmware_object_calls().await.is_empty());
-    assert!(mock.get_firmware_job_status_calls().await.is_empty());
+    assert!(mock.get_job_status_calls().await.is_empty());
     Ok(())
 }
 
@@ -1373,7 +1372,7 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
     let env = create_test_env(pool.clone()).await;
     let mut config = firmware_config();
     let rack = RackId::new("standalone-fixture");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -1413,7 +1412,7 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
             ..Default::default()
         },
     )]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ip = db::machine_interface_address::find_for_interface(&mut txn, target.bmc_interface)
         .await?[0]
         .address;
@@ -1449,7 +1448,7 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
     general.set_create_client_error("general pool must not serve standalone firmware");
     let mock = Arc::new(MockRmsApi::new());
     let (mut api, fetcher) = api(&env, pool, config, mock.clone(), false).await?;
-    api.bmc_credential_ops = direct.clone();
+    api.direct_redfish_pool = direct.clone().into();
     api.redfish_pool = general.clone();
 
     let response = api
@@ -1493,7 +1492,8 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
         1,
         "eligible standalone saved intent is visible before lifecycle exclusion"
     );
-    assert!(mock.get_firmware_job_status_calls().await.is_empty());
+
+    assert!(mock.get_job_status_calls().await.is_empty());
     assert_eq!(direct.create_client_calls().len(), 1);
     assert!(general.create_client_calls().is_empty());
     assert!(mock.batch_get_firmware_inventory_calls().await.is_empty());
@@ -1543,7 +1543,7 @@ async fn component_firmware_details_use_direct_core_and_effective_host_defaults(
             decommissioning_state: model::machine::DecommissioningState::SuppressingSiteExplorer,
         },
     ] {
-        let mut txn = api.pg_pool().begin().await?;
+        let mut txn = api.pg_pool().txn_begin().await?;
         db::machine::update_state(&mut txn, &target.id.parse::<HostMachineId>()?, &state).await?;
         txn.commit().await?;
 
@@ -1592,7 +1592,7 @@ async fn component_firmware_details_own_pending_reads_and_preserve_completed_sec
     capabilities.switch.count = 0;
     capabilities.power_shelf.count = 0;
     let rack = RackId::new("firmware-cancellation");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -1611,7 +1611,13 @@ async fn component_firmware_details_own_pending_reads_and_preserve_completed_sec
             mock.block_next_batch_get_firmware_inventory().await;
         let (comparison_arrived, comparison_release) =
             mock.block_next_compare_firmware_object().await;
-        let (job_arrived, job_release) = mock.block_next_get_firmware_job_status().await;
+
+        let (job_arrived, job_release) = mock
+            .block_next_job_status_requests(1)
+            .await
+            .pop()
+            .expect("one job status gate was requested");
+
         let (api, _) = api(&env, pool.clone(), config.clone(), mock.clone(), false).await?;
         let started = tokio::time::Instant::now();
         let mut input = Request::new(rpc::GetComponentFirmwareDetailsRequest {
@@ -1698,7 +1704,7 @@ async fn component_firmware_details_keep_bmc_evidence_without_nvos_readiness(
     caps.switch.count = 2;
     caps.power_shelf.count = 0;
     let rack = RackId::new("firmware-nvos-boundary");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -1711,7 +1717,7 @@ async fn component_firmware_details_keep_bmc_evidence_without_nvos_readiness(
     // Endpoint rejection, absent NVOS credentials and a private BMC reader
     // error exercise different boundaries without another inventory fixture.
     for (owned, fail_bmc) in [(false, false), (true, false), (true, true)] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine_interface::associate_interface_with_machine(
             &target.nvos_interface.unwrap(),
             target_owner(if owned { &target } else { &foreign }),
@@ -1864,7 +1870,7 @@ async fn component_firmware_details_caller_budget_bounds_credentials(
     profile.rack_capabilities.power_shelf.count = 0;
     profile.firmware_object = None;
     let rack = RackId::new("firmware-caller-budget");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -1875,7 +1881,7 @@ async fn component_firmware_details_caller_budget_bounds_credentials(
     let (mut api, fetcher) = api(&env, pool, config, mock.clone(), false).await?;
     api.component_manager.as_mut().unwrap().compute_tray = Arc::new(
         component_manager::core_compute_manager::CoreComputeTrayManager::new(
-            api.bmc_credential_ops.clone(),
+            api.direct_redfish_pool.pool(),
         ),
     );
     let (arrivals, mut arrived) = tokio::sync::mpsc::unbounded_channel();
@@ -1941,7 +1947,7 @@ async fn component_firmware_details_bound_installed_workflows(pool: sqlx::PgPool
     profile.rack_capabilities.power_shelf.count = 0;
     profile.firmware_object = None;
     let rack = RackId::new("firmware-workflow-bound");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack.clone())
         .persist(&mut txn)
@@ -2050,7 +2056,7 @@ async fn component_firmware_details_keep_owning_sources_and_target_identity(
         .insert("second-firmware-profile".into(), second_profile);
     let first_rack = RackId::new("firmware-source-a");
     let second_rack = RackId::new("firmware-source-b");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(first_rack.clone())
         .persist(&mut txn)
@@ -2075,13 +2081,14 @@ async fn component_firmware_details_keep_owning_sources_and_target_identity(
             power_drains_needed: None,
             started_at: now,
             deadline: now + chrono::Duration::hours(1),
+            delivered_at: None,
             task_json: PRIVATE.into(),
             result: None,
         },
         retry_count: 0,
     };
     let alias = MacAddress::new([2, 0, 0, 0, 2, 102]);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(&mut txn, &first.id.parse::<HostMachineId>()?, &frozen_state).await?;
     interface(&mut txn, alias, target_owner(&second), InterfaceType::Bmc).await?;
     let rack_state = RackState::Maintenance {

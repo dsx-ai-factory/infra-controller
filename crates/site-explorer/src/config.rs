@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use arc_swap::ArcSwap;
+use carbide_hw_identification::host_bluefield::HostBlueFieldRules;
+use carbide_hw_identification::host_serial::HostSerialRules;
 use carbide_utils::HostPortPair;
 use carbide_utils::config::{
     as_duration, as_std_duration, deserialize_arc_atomic_bool, serialize_arc_atomic_bool,
@@ -95,7 +97,9 @@ pub struct SiteExplorerConfig {
     )]
     pub exploration_timeouts_before_prevent_allocations: u32,
 
-    /// When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true
+    /// When false, SiteExplorer skips creating ManagedHost state machines; the
+    /// DPU agent (scout) must self-register via the DiscoverMachine gRPC endpoint
+    /// with create_machine=true. BMC preingestion is independent of this setting.
     #[serde(
         default = "SiteExplorerConfig::default_create_machines",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -133,7 +137,28 @@ pub struct SiteExplorerConfig {
     )]
     pub switch_and_power_shelf_pass_interval: std::time::Duration,
 
-    /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
+    /// The longest one ManagedHost creation attempt may take once it holds
+    /// its admin-lock admission permit. The deadline covers acquiring a pool
+    /// connection, the creation transaction, and the after-commit admin
+    /// address repair together. A transaction that exceeds it fails the
+    /// attempt, releases the permit, and closes the connection instead of
+    /// returning it to the pool; a later run retries the host. A repair that
+    /// exceeds it leaves the host created and counts as a failed admin
+    /// address reconciliation. The host reconciler's admin address repair
+    /// has the same deadline, counted from its own admission permit. Keep it
+    /// above the PostgreSQL `statement_timeout`, so the server ends a
+    /// statement before the attempt is abandoned. Must be at least `1s` and
+    /// at most `24h`. Configuration loading rejects other values. Read
+    /// at startup. A change needs a restart.
+    #[serde(
+        default = "SiteExplorerConfig::default_machine_creation_timeout",
+        deserialize_with = "SiteExplorerConfig::deserialize_machine_creation_timeout",
+        serialize_with = "as_std_duration"
+    )]
+    pub machine_creation_timeout: std::time::Duration,
+
+    /// Deprecated and ignored. NVOS credentials are rotated during switch
+    /// pre-ingestion and by the switch controller after ingestion.
     #[serde(
         default = "SiteExplorerConfig::default_rotate_switch_nvos_credentials",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -214,6 +239,17 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_switches_created_per_run")]
     pub switches_created_per_run: u64,
 
+    /// Additional host inventory rules. The first matching site rule takes precedence over defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "HostBlueFieldRules::uses_only_defaults"
+    )]
+    pub host_bluefield_rules: HostBlueFieldRules,
+
+    /// Ordered host serial sources for ExpectedMachine audits, ahead of built-in rules.
+    #[serde(default, skip_serializing_if = "HostSerialRules::uses_only_defaults")]
+    pub host_serial_rules: HostSerialRules,
+
     /// Site-wide host DPU policy. Per-host `Nic` and `Ignore` policies
     /// override it; per-host `Manage` inherits it for backward compatibility.
     /// `None` falls back to [`HostDpuPolicy::Manage`].
@@ -249,6 +285,7 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
             machines_created_per_run: config.machines_created_per_run,
             machine_creation_concurrency: config.machine_creation_concurrency,
             switch_and_power_shelf_pass_interval: config.switch_and_power_shelf_pass_interval,
+            machine_creation_timeout: config.machine_creation_timeout,
             create_power_shelves: config.create_power_shelves.clone(),
             power_shelves_created_per_run: config.power_shelves_created_per_run,
             create_switches: config.create_switches.clone(),
@@ -276,6 +313,7 @@ impl Default for SiteExplorerConfig {
             machine_creation_concurrency: Self::default_machine_creation_concurrency(),
             switch_and_power_shelf_pass_interval:
                 Self::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: Self::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
@@ -287,6 +325,8 @@ impl Default for SiteExplorerConfig {
             create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
+            host_bluefield_rules: HostBlueFieldRules::default(),
+            host_serial_rules: HostSerialRules::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,
@@ -311,6 +351,7 @@ impl PartialEq for SiteExplorerConfig {
             machines_created_per_run,
             machine_creation_concurrency,
             switch_and_power_shelf_pass_interval,
+            machine_creation_timeout,
             rotate_switch_nvos_credentials,
             override_target_ip,
             override_target_port,
@@ -322,6 +363,8 @@ impl PartialEq for SiteExplorerConfig {
             power_shelves_created_per_run,
             create_switches,
             switches_created_per_run,
+            host_bluefield_rules,
+            host_serial_rules,
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             deprecated_explore_mode,
@@ -341,6 +384,7 @@ impl PartialEq for SiteExplorerConfig {
             && *machines_created_per_run == other.machines_created_per_run
             && *machine_creation_concurrency == other.machine_creation_concurrency
             && *switch_and_power_shelf_pass_interval == other.switch_and_power_shelf_pass_interval
+            && *machine_creation_timeout == other.machine_creation_timeout
             && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
                 == other
                     .rotate_switch_nvos_credentials
@@ -360,6 +404,8 @@ impl PartialEq for SiteExplorerConfig {
             && create_switches.load(AtomicOrdering::Relaxed)
                 == other.create_switches.load(AtomicOrdering::Relaxed)
             && *switches_created_per_run == other.switches_created_per_run
+            && *host_bluefield_rules == other.host_bluefield_rules
+            && *host_serial_rules == other.host_serial_rules
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *deprecated_explore_mode == other.deprecated_explore_mode
@@ -368,6 +414,31 @@ impl PartialEq for SiteExplorerConfig {
 }
 
 impl SiteExplorerConfig {
+    // Hard minimum of `machine_creation_timeout`.
+    const MIN_MACHINE_CREATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    // Hard maximum of `machine_creation_timeout`.
+    const MAX_MACHINE_CREATION_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(24 * 60 * 60);
+
+    fn deserialize_machine_creation_timeout<'de, D>(
+        deserializer: D,
+    ) -> Result<std::time::Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout: std::time::Duration = deserialize_duration(deserializer)?;
+        // Reject values that leave a creation attempt without a usable deadline.
+        if timeout < Self::MIN_MACHINE_CREATION_TIMEOUT
+            || timeout > Self::MAX_MACHINE_CREATION_TIMEOUT
+        {
+            return Err(serde::de::Error::custom(
+                "site_explorer.machine_creation_timeout must be at least 1s and at most 24h",
+            ));
+        }
+        Ok(timeout)
+    }
+
     pub const fn default_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(120)
     }
@@ -413,6 +484,13 @@ impl SiteExplorerConfig {
     /// created.
     pub const fn default_switch_and_power_shelf_pass_interval() -> std::time::Duration {
         std::time::Duration::from_secs(15 * 60)
+    }
+
+    /// Deadline of one managed host creation attempt after admission: three
+    /// times the 10 minute `statement_timeout` that `helm-prereqs` sets for
+    /// PostgreSQL.
+    pub const fn default_machine_creation_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(30 * 60)
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {
@@ -466,8 +544,40 @@ where
     S: Serializer,
 {
     if let Some(val) = val.load().deref().deref() {
-        s.serialize_str(val.to_string().as_str())
+        // Keep `HostPortPair`'s YAML map-key handling.
+        val.serialize(s)
     } else {
         s.serialize_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    /// The range configuration loading enforces, so no creation attempt runs
+    /// without a usable deadline.
+    #[test]
+    fn machine_creation_timeout_is_bounded_at_loading() {
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"machine_creation_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<SiteExplorerConfig>(&config_json)
+                    .map(|config| config.machine_creation_timeout)
+                    .map_err(drop)
+            };
+            "a timeout up to the hard maximum is accepted" {
+                "24h" => Yields(SiteExplorerConfig::MAX_MACHINE_CREATION_TIMEOUT),
+            }
+            "a timeout below one second is rejected" {
+                "999ms" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "86401s" => Fails,
+            }
+        );
     }
 }

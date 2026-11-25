@@ -4,7 +4,7 @@
 package memory
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -32,7 +32,7 @@ func (s *Store) Events() ([]eventrule.Event, error) {
 	}
 
 	slices.SortFunc(result, func(a, b eventrule.Event) int {
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 
 	return result, nil
@@ -105,4 +105,22 @@ func (s *Store) setEvent(event *eventrule.Event) error {
 	s.events[event.ID] = *persisted
 
 	return nil
+}
+
+// GetEventTypeForExecution resolves immutable provenance through the accepted execution.
+func (s *Store) GetEventTypeForExecution(ctx context.Context, id uuid.UUID) (eventrule.Type, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	execution, ok := s.executions[id]
+	if !ok {
+		return "", eventrule.ErrExecutionNotFound
+	}
+	record, ok := s.events[execution.persisted.EventID]
+	if !ok {
+		return "", eventrule.ErrEventNotFound
+	}
+	return eventrule.Type(record.EventType), nil
 }

@@ -141,7 +141,7 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 
 	// Verify if vpc is ready
 	if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
-		logger.Warn().Msg(fmt.Sprintf("VPC: %v specified in request data must be in Ready state in order to create Subnet", apiRequest.VpcID))
+		logger.Warn().Msgf("VPC: %v specified in request data must be in Ready state in order to create Subnet", apiRequest.VpcID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "VPC specified in request data must be in Ready state in order to create Subnet", nil)
 	}
 
@@ -157,7 +157,7 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("The Site: %v where the Subnet is being created must be in Registered state in order to proceed", vpc.SiteID.String()))
+		logger.Warn().Msgf("The Site: %v where the Subnet is being created must be in Registered state in order to proceed", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the Subnet is being created must be in Registered state in order to proceed", nil)
 	}
 
@@ -210,7 +210,7 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, csh.dbSession, func(tx *cdb.Tx) error {
 		// acquire an advisory lock on the parent IP block ID on which there could be contention
 		// this lock is released when the transaction commits or rollsback
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID.String(), ipv4Block.ID.String())), nil)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", tenant.ID, ipv4Block.ID)), nil)
 		if derr != nil {
 			// TODO add a retry here
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on ipblock")
@@ -390,7 +390,7 @@ func NewGetAllSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Param vpcId query string true "ID of Vpc"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "Subnet IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
@@ -524,7 +524,7 @@ func (gash GetAllSubnetHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.SubnetStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		status = &statusQuery
@@ -637,7 +637,7 @@ func NewGetSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Subnet"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Vpc', 'Tenant', 'IPv4Block', 'IPv6Block'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "Subnet IPv4 usage (interface/instance-derived; same shape as IP Block usage)"
 // @Success 200 {object} model.APISubnet
 // @Router /v2/org/{org}/nico/subnet/{id} [get]
@@ -1050,7 +1050,7 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, dsh.dbSession, func(tx *cdb.Tx) error {
 		// acquire an advisory lock on the parent IP block ID on which there could be contention
 		// this lock is released when the transaction commits or rollsback
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", subnet.TenantID.String(), subnet.IPv4BlockID.String())), nil)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", subnet.TenantID, *subnet.IPv4BlockID)), nil)
 		if derr != nil {
 			// TODO: Add a retry here
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on ipblock")

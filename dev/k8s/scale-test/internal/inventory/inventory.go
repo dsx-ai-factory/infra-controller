@@ -60,9 +60,10 @@ type RackGroup struct {
 }
 
 type Member struct {
-	Type         string `json:"type"`
-	Manufacturer string `json:"manufacturer"`
-	ID           string `json:"id"`
+	CartridgeIndex uint32 `json:"cartridgeIndex"`
+	Type           string `json:"type"`
+	Manufacturer   string `json:"manufacturer"`
+	ID             string `json:"id"`
 }
 
 // DeviceKind is a served device's kind, on the wire in serde snake_case.

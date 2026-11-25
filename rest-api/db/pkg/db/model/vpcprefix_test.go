@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,7 +26,12 @@ import (
 func TestVpcPrefix_ToProto(t *testing.T) {
 	prefixID := uuid.New()
 	vpcID := uuid.New()
-	vp := &VpcPrefix{ID: prefixID, Name: "prefix-a", Prefix: "10.0.0.0/16"}
+	vp := &VpcPrefix{
+		ID:     prefixID,
+		Name:   "prefix-a",
+		Labels: Labels{"owner": "networking"},
+		Prefix: "10.0.0.0/16",
+	}
 	vpc := &Vpc{ID: vpcID}
 
 	t.Run("populates wire fields and translates VpcId via the parent VPC", func(t *testing.T) {
@@ -39,6 +45,9 @@ func TestVpcPrefix_ToProto(t *testing.T) {
 		assert.Equal(t, "10.0.0.0/16", proto.Config.Prefix)
 		require.NotNil(t, proto.Metadata)
 		assert.Equal(t, "prefix-a", proto.Metadata.Name)
+		require.Len(t, proto.Metadata.Labels, 1)
+		assert.Equal(t, "owner", proto.Metadata.Labels[0].GetKey())
+		assert.Equal(t, "networking", proto.Metadata.Labels[0].GetValue())
 	})
 
 	t.Run("leaves VpcId nil when parent VPC is not provided", func(t *testing.T) {
@@ -119,15 +128,28 @@ func TestVpcPrefix_FromProto(t *testing.T) {
 		vpcID := uuid.New()
 		vp := &VpcPrefix{}
 		vp.FromProto(&corev1.VpcPrefix{
-			Id:       &corev1.VpcPrefixId{Value: prefixID.String()},
-			VpcId:    &corev1.VpcId{Value: vpcID.String()},
-			Config:   &corev1.VpcPrefixConfig{Prefix: "10.0.0.0/16"},
-			Metadata: &corev1.Metadata{Name: "prefix-a"},
+			Id:     &corev1.VpcPrefixId{Value: prefixID.String()},
+			VpcId:  &corev1.VpcId{Value: vpcID.String()},
+			Config: &corev1.VpcPrefixConfig{Prefix: "10.0.0.0/16"},
+			Metadata: &corev1.Metadata{
+				Name: "prefix-a",
+				Labels: []*corev1.Label{{
+					Key:   "owner",
+					Value: cutil.GetPtr("networking"),
+				}},
+			},
 		})
 		assert.Equal(t, prefixID, vp.ID)
 		assert.Equal(t, vpcID, vp.VpcID)
 		assert.Equal(t, "prefix-a", vp.Name)
+		assert.Equal(t, Labels{"owner": "networking"}, vp.Labels)
 		assert.Equal(t, "10.0.0.0/16", vp.Prefix)
+	})
+
+	t.Run("clears labels when Metadata is omitted", func(t *testing.T) {
+		vp := &VpcPrefix{Labels: Labels{"owner": "networking"}}
+		vp.FromProto(&corev1.VpcPrefix{})
+		assert.Nil(t, vp.Labels)
 	})
 
 	t.Run("falls back to deprecated top-level Name and Prefix", func(t *testing.T) {
@@ -332,7 +354,7 @@ func TestVpcPrefixSQLDAO_Create(t *testing.T) {
 			desc: "create one",
 			vps: []VpcPrefix{
 				{
-					Name: "test", Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IPBlockID: &ipBlock.ID, Prefix: prefix, PrefixLength: 24, Status: VpcPrefixStatusReady, CreatedBy: user.ID,
+					Name: "test", Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, IPBlockID: &ipBlock.ID, Labels: Labels{"owner": "networking"}, Prefix: prefix, PrefixLength: 24, Status: VpcPrefixStatusReady, CreatedBy: user.ID,
 				},
 			},
 			expectError:        false,
@@ -371,6 +393,7 @@ func TestVpcPrefixSQLDAO_Create(t *testing.T) {
 					VpcID:        i.VpcID,
 					TenantID:     i.TenantID,
 					IpBlockID:    i.IPBlockID,
+					Labels:       i.Labels,
 					Prefix:       i.Prefix,
 					PrefixLength: i.PrefixLength,
 					Status:       i.Status,
@@ -380,6 +403,11 @@ func TestVpcPrefixSQLDAO_Create(t *testing.T) {
 				if !tc.expectError {
 					assert.NotNil(t, got)
 					assert.Equal(t, i.Prefix, got.Prefix)
+					expectedLabels := i.Labels
+					if expectedLabels == nil {
+						expectedLabels = Labels{}
+					}
+					assert.Equal(t, expectedLabels, got.Labels)
 				}
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
@@ -508,6 +536,10 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 	vps := []VpcPrefix{}
 
 	for i := 0; i < totalCount; i++ {
+		labels := map[string]string{}
+		if i == 0 {
+			labels["owner"] = "launchlayer"
+		}
 		if i%2 == 0 {
 			vpcPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
 				Name:         fmt.Sprintf("VpcPrefix-%v", i),
@@ -516,6 +548,7 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 				VpcID:        vpc1.ID,
 				TenantID:     tenant1.ID,
 				IpBlockID:    &ipBlock1.ID,
+				Labels:       labels,
 				Prefix:       prefix,
 				PrefixLength: 24,
 				Status:       VpcPrefixStatusReady,
@@ -532,6 +565,7 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 				VpcID:        vpc2.ID,
 				TenantID:     tenant2.ID,
 				IpBlockID:    &ipBlock2.ID,
+				Labels:       labels,
 				Prefix:       prefix,
 				PrefixLength: 24,
 				Status:       VpcPrefixStatusReady,
@@ -642,6 +676,13 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 			searchQuery:   cutil.GetPtr("VpcPrefix-"),
 			expectedCount: paginator.DefaultLimit,
 			expectedTotal: &totalCount,
+			expectedError: false,
+		},
+		{
+			desc:          "GetAll with label search query returns objects",
+			searchQuery:   cutil.GetPtr("launchlayer"),
+			expectedCount: 1,
+			expectedTotal: cutil.GetPtr(1),
 			expectedError: false,
 		},
 		{
@@ -780,6 +821,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 		paramVpcID           *uuid.UUID
 		paramTenantID        *uuid.UUID
 		paramIPBlockID       *uuid.UUID
+		paramLabels          map[string]string
 		paramPrefix          *string
 		paramPrefixLength    *int
 		paramStatus          *string
@@ -790,6 +832,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 		expectedVpcID           *uuid.UUID
 		expectedTenantID        *uuid.UUID
 		expectedIPBlockID       *uuid.UUID
+		expectedLabels          Labels
 		expectedprefix          *string
 		expectedPrefixLength    *int
 		expectedStatus          *string
@@ -805,6 +848,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 			paramVpcID:           &vpc2.ID,
 			paramTenantID:        &tenant2.ID,
 			paramIPBlockID:       &ipBlock2.ID,
+			paramLabels:          map[string]string{"owner": "networking"},
 			paramPrefix:          cutil.GetPtr(newPrefix),
 			paramPrefixLength:    &newPrefixLength,
 			paramStatus:          cutil.GetPtr(VpcPrefixStatusReady),
@@ -816,6 +860,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 			expectedVpcID:           &vpc2.ID,
 			expectedTenantID:        &tenant2.ID,
 			expectedIPBlockID:       &ipBlock2.ID,
+			expectedLabels:          Labels{"owner": "networking"},
 			expectedprefix:          cutil.GetPtr(newPrefix),
 			expectedPrefixLength:    &newPrefixLength,
 			expectedStatus:          cutil.GetPtr(VpcPrefixStatusReady),
@@ -834,6 +879,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 			expectedError:           false,
 			expectedName:            cutil.GetPtr("updatedName"),
 			expectedVpcID:           &vpc.ID,
+			expectedLabels:          Labels{"owner": "networking"},
 			expectedprefix:          cutil.GetPtr(newPrefix),
 			expectedPrefixLength:    &newPrefixLength,
 			expectedStatus:          cutil.GetPtr(VpcPrefixStatusReady),
@@ -854,6 +900,12 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := vpsd.GetByID(ctx, nil, tc.id, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := vpsd.Update(
 				ctx, nil, VpcPrefixUpdateInput{
 					VpcPrefixID:     tc.id,
@@ -862,6 +914,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 					VpcID:           tc.paramVpcID,
 					TenantID:        tc.paramTenantID,
 					IpBlockID:       tc.paramIPBlockID,
+					Labels:          tc.paramLabels,
 					Prefix:          tc.paramPrefix,
 					PrefixLength:    tc.paramPrefixLength,
 					Status:          tc.paramStatus,
@@ -881,6 +934,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 				if tc.expectedIPBlockID != nil {
 					assert.Equal(t, *tc.expectedIPBlockID, *got.IPBlockID)
 				}
+				assert.Equal(t, tc.expectedLabels, got.Labels)
 				if tc.expectedprefix != nil {
 					assert.Equal(t, *tc.expectedprefix, got.Prefix)
 				}
@@ -888,9 +942,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.expectedIsMissingOnSite, got.IsMissingOnSite)
 
-				if got.Updated.String() == VpcPrefix1.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			} else {
 				assert.Nil(t, got)

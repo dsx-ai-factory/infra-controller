@@ -67,6 +67,7 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPUNode CR name | `node-{dpf_id}` (`dpf_id` = host BMC MAC, `:`→`-`) | NICo creates |
 | DPUDevice CR name | `device-{device_id}` | NICo creates |
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
+| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
 | host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
@@ -99,7 +100,8 @@ dpf-sim-controller/
 ├── cmd/main.go                      # manager wiring, flags
 ├── internal/
 │   ├── controller/
-│   │   └── dpudevice_controller.go  # reconcile DPUDevice → ensure+advance DPU
+│   │   ├── dpudevice_controller.go  # reconcile DPUDevice → ensure+advance DPU
+│   │   └── operator_config.go       # keep the DPFOperatorConfig NICo reads at startup
 │   ├── simulator/
 │   │   └── phases.go                # phase state machine + dwell timing
 │   └── carbide/
@@ -117,11 +119,50 @@ the CRs NICo references) present on the cluster, never the DPF operator. Those
 CRDs ship in this repo at `crates/dpf/crds/`, so `make deploy` applies them
 directly. It does **not** depend on the setup.sh DPF-install work: that branch
 installs the real operator, which you must **not** run here. The operator and
-the simulator would both drive `DPU.status.phase` and fight.
+the simulator would both drive `DPU.status.phase` and the `DPFOperatorConfig`
+status and fight.
 
 The only coupling is version consistency: the simulator's Go types are pinned to
-doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must be v26.4.0
-compatible. `crates/dpf/crds/` is that version.
+doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must accept v26.4.0
+objects. The CRDs in `crates/dpf/crds/` are newer than those types, and the
+simulator relies only on fields both have. It handles `DPFOperatorConfig` as
+unstructured data, because the shipped CRD requires `spec.deploymentMode` and
+the v26.4.0 types do not have it.
+
+## The operator config NICo reads at startup
+
+When nico-api starts with `[dpf] enabled = true`, it reads `status.version` of
+the `DPFOperatorConfig` named `dpfoperatorconfig` in the DPF namespace
+(`crates/dpf/src/sdk/version.rs`). It drops a leading `v` and parses the rest
+as a semantic version. When the object is missing, or the version is missing
+or does not parse, nico-api exits with `failed to initialize DPF SDK`. On a
+real site the installer creates the object and the operator writes the
+version. A simulated site has neither, so the simulator provides both:
+
+- It creates the object when it is absent, with only what the CRD in
+  `crates/dpf/crds/` requires: `deploymentMode: zero-trust` and the Redfish
+  install interface that mode needs. Nothing reads that spec on a simulated
+  site.
+- It keeps `status.version` at `v26.4.0`, the release the simulator
+  reproduces. NICo treats versions from 26.8.0 as supporting per-DPU BMC
+  credential Secrets, and the simulator reads only the shared Secret.
+- It checks when it starts and every 30 seconds after that, so a deleted
+  object comes back. A failed check is logged and retried, and the DPU walk
+  continues meanwhile.
+
+The simulator never changes the spec of an object that already exists. At
+every check, it removes any `Ready` condition from the status, including one
+that a real operator left, and keeps the other conditions. NICo scans for DPUs
+that no longer match their `DPUDeployment` only while a `Ready` condition is
+`True`, so the scan stays off while the simulator runs.
+
+nico-api reads the version once, at startup, so the simulator has to run
+before nico-api starts. A nico-api that starts first exits, and Kubernetes
+restarts it until the version is there. The Core install in
+`helm-prereqs/setup.sh` waits 600 seconds for nico-api to become ready and
+then fails. `helm-prereqs/clean.sh` deletes `dpf-operator-system` and the
+DPF CRDs, and the simulator and the object with them, so deploy the simulator
+again before the next `setup.sh`. `make undeploy` leaves the object in place.
 
 ## Quick start (against a machine-a-tron cluster)
 
@@ -132,8 +173,13 @@ Discovery from a shared pod IP needs `allow_insecure_discovery = true` in the
 nico-api site config. Both are set in
 `helm-prereqs/values/nico-core-simulation.yaml`.
 
+nico-api also needs a `DPFOperatorConfig` with a `status.version` at startup.
+The simulator creates it, so run `make deploy` before `setup.sh --skip-dpf`.
+Refer to
+[The operator config NICo reads at startup](#the-operator-config-nico-reads-at-startup).
+
 Never run the simulator beside the real DPF operator: both would drive
-`DPU.status.phase`. Check before deploying. The command prints nothing when no
+`DPU.status.phase` and the `DPFOperatorConfig` status. Check before deploying. The command prints nothing when no
 operator is deployed. Otherwise remove the operator first, or leave the
 simulator out and accept that ingested hosts park in `dpuinit`:
 

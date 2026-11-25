@@ -49,7 +49,7 @@ pub(super) async fn show_attachments(
     if nsg_attachments.vpc_ids.is_empty() && nsg_attachments.instance_ids.is_empty() {
         println!(
             "Network security group {} is not referenced by any objects",
-            args.id.clone()
+            args.id
         );
 
         return Ok(());
@@ -114,14 +114,13 @@ pub(super) async fn show_attachments(
                 }
 
                 for id in vpc.related_instance_ids {
-                    // If it was seen already, then it's not propagated.
+                    // Missing interface evidence can coexist with applied interfaces.
                     if id_set.contains(&id) {
                         propagation_table.add_row(row![
                             id,
                             "INSTANCE",
                             format!("INDIRECT via VPC {}", vpc.id),
-                            forgerpc::NetworkSecurityGroupPropagationStatus::NsgPropStatusNone
-                                .as_str_name()
+                            "Incomplete"
                         ]);
                     } else {
                         propagation_table.add_row(row![

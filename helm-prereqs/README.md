@@ -63,6 +63,7 @@ helm-prereqs/
 │   ├── nico-core.yaml           # NICo Core deployment values (hostname, siteConfig, VIPs)
 │   ├── nico-core-simulation.yaml  # NICo Core values for a machine-a-tron simulation site
 │   ├── nico-core-10k-hosts.yaml   # NICo Core values for the 556-rack (10,008-host) machine-a-tron fleet
+│   ├── nico-core-20k-hosts.yaml   # NICo Core values for the 1,112-rack (20,016-host) machine-a-tron fleet
 │   ├── machine-a-tron*.yaml     # machine-a-tron chart values: Override Mode and the scale profiles
 │   ├── nico-rest.yaml           # NICo REST deployment values (Keycloak config)
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
@@ -1109,8 +1110,12 @@ back to Vault follows the asymmetric rule in
 there is no export from Postgres to Vault.
 
 The installer does not deploy the REST `powershelf-manager` and
-`nvswitch-manager`; a selectable credential backend for those services is
-tracked in [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954).
+`nvswitch-manager`. When started with `serve --datastore Persistent`, both
+services keep device credentials in Vault. Both are deprecated in favor of RMS,
+so a credential backend without Vault is not planned for them
+([#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954)).
+On an installation without Vault, keep the default `rms` backend for power
+shelves and switches.
 
 ## Upgrading deployments that bundled PSM and NSM
 

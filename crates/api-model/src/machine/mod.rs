@@ -34,6 +34,7 @@ use chrono::{DateTime, Duration, Utc};
 use config_version::{ConfigVersion, Versioned};
 use duration_str::deserialize_duration_chrono;
 use health_report::HealthReport;
+use itertools::Itertools;
 use json::MachineSnapshotPgJson;
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize, Serializer};
@@ -41,6 +42,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{Column, FromRow, Row};
 use strum_macros::EnumIter;
 
+use self::dpf_bmc_rotation::DpfBmcRotation;
 use self::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use super::StateSla;
 use super::instance::snapshot::InstanceSnapshot;
@@ -76,6 +78,7 @@ pub mod slas;
 pub mod astra;
 pub mod capabilities;
 pub mod config;
+pub mod dpf_bmc_rotation;
 pub mod health_override;
 pub mod infiniband;
 pub mod json;
@@ -127,11 +130,7 @@ type DpuDeviceMappings = (
 );
 
 pub fn get_display_ids(machines: &[Machine<impl MachineIdSubtypeTrait>]) -> String {
-    machines
-        .iter()
-        .map(|x| x.id.to_string())
-        .collect::<Vec<String>>()
-        .join("/")
+    machines.iter().map(|x| x.id).join("/")
 }
 
 fn default_true() -> bool {
@@ -1316,10 +1315,10 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     /// e.g. `9C:63:C0:E6:B4:3D` -> `9c-63-c0-e6-b4-3d`.
     /// Not using Machine ID because it's too long, and not using IP because it's not stable.
     pub fn dpf_id(&self) -> Option<String> {
-        self.status
-            .bmc_info
-            .mac
-            .map(|mac| mac.to_string().to_lowercase().replace(':', "-"))
+        self.status.bmc_info.mac.map(|mac| {
+            let [a, b, c, d, e, f] = mac.bytes();
+            format!("{a:02x}-{b:02x}-{c:02x}-{d:02x}-{e:02x}-{f:02x}")
+        })
     }
 
     pub fn loopback_ip(&self) -> Option<IpAddr> {
@@ -1421,14 +1420,12 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             ));
         }
 
-        let hardware_info =
-            self.status
-                .hardware_info
-                .as_ref()
-                .ok_or(ModelError::DpuMappingError(format!(
-                    "Missing hardware information for machine {}",
-                    self.id
-                )))?;
+        let hardware_info = self.status.hardware_info.as_ref().ok_or_else(|| {
+            ModelError::DpuMappingError(format!(
+                "Missing hardware information for machine {}",
+                self.id
+            ))
+        })?;
 
         let mut id_to_device_map: HashMap<DpuMachineId, String> = HashMap::default();
         let mut device_to_id_map: HashMap<String, Vec<DpuMachineId>> = HashMap::default();
@@ -1593,6 +1590,8 @@ pub enum ManagedHostState {
     RotatingBmc {
         #[serde(default)]
         retry_count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpf_rotation: Option<Box<DpfBmcRotation>>,
     },
 
     /// The host is converging its own UEFI (BIOS setup) password to the staged
@@ -1735,10 +1734,10 @@ pub enum DeconfiguringDpuState {
 }
 
 /// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
-/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
+/// deleting the tenant Instance, then remove the DPF CRs and credential Secrets before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+#[allow(clippy::enum_variant_names)] // Each step deletes a different owned resource.
 pub enum ResetState {
     /// Retains the Instance and its network resources until every topology DPU
     /// acknowledges Admin networking, then deletes them before host cleanup.
@@ -1748,6 +1747,9 @@ pub enum ResetState {
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
     /// rather than for the delete to be accepted.
     DeletingCrs,
+    /// Deletes NICo-owned per-DPU BMC credential Secrets after DPF resources are gone,
+    /// and waits for Secret finalizers before re-ingestion.
+    DeletingBmcCredentialSecrets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2291,13 +2293,15 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Absolute deadline; the API declares failure past this time.
-        /// Derived from scout's execution/download timeouts plus slack.
+        /// Completion deadline, shifted once by the delivery wait inferred from Scout contact.
         deadline: DateTime<Utc>,
+        /// Scout contact used to infer delivery; absent until delivery is recorded.
+        #[serde(default)]
+        delivered_at: Option<DateTime<Utc>>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
-        result: Option<ScoutUpgradeResult>,
+        result: Option<Box<ScoutUpgradeResult>>,
     },
 }
 
@@ -2637,9 +2641,9 @@ pub enum UefiSetupState {
 /// Tracks progress waiting for the Dell BIOS config job (from machine_setup PATCH) to complete
 /// before configuring boot order. Same pattern as SetBootOrderInfo / SetBootOrderState.
 ///
-/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` only during
-/// `HandleBiosJobFailure` recovery from stuck PollingBiosSetup; non-Dell hosts reboot in
-/// `configure_host_bios` and never enter job-polling substates.
+/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` when the BMC
+/// returns no job, where the host restarts in `RebootHost`, and during `HandleBiosJobFailure`
+/// recovery from stuck PollingBiosSetup.
 ///
 /// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
@@ -3001,11 +3005,23 @@ pub enum AcPowercycleState {
     DisableOnboardNics { state: DisableOnboardNicsState },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct MachineMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: MachineMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for MachineMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Struct to store information if host reprovision is requested.
@@ -3236,23 +3252,18 @@ impl Display for ManagedHostState {
             ManagedHostState::DpuDiscoveringState { dpu_states } => {
                 // Min state indicates the least processed DPU. The state machine is blocked
                 // becasue of this.
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-
-                write!(f, "DPUDiscovering/{dpu_lowest_state}")
+                f.write_str("DPUDiscovering/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::DPUInit { dpu_states } => {
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-                write!(f, "DPUInitializing/{dpu_lowest_state}")
+                f.write_str("DPUInitializing/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::HostInit { machine_state } => {
                 write!(f, "HostInitializing/{machine_state}")
@@ -3275,13 +3286,11 @@ impl Display for ManagedHostState {
             }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
-                    let dpu_lowest_state = dpu_states
-                        .states
-                        .values()
-                        .min()
-                        .map(|x| x.to_string())
-                        .unwrap_or("Unknown".to_string());
-                    write!(f, "Assigned/Reprovision/{dpu_lowest_state}")
+                    f.write_str("Assigned/Reprovision/")?;
+                    match dpu_states.states.values().min() {
+                        Some(state) => write!(f, "{state}"),
+                        None => f.write_str("Unknown"),
+                    }
                 }
                 _ => {
                     write!(f, "Assigned/{instance_state}")
@@ -3295,13 +3304,11 @@ impl Display for ManagedHostState {
                 write!(f, "Failed/{}", details.cause)
             }
             ManagedHostState::DPUReprovision { dpu_states } => {
-                let dpu_lowest_state = dpu_states
-                    .states
-                    .values()
-                    .min()
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown".to_string());
-                write!(f, "Reprovisioning/{dpu_lowest_state}")
+                f.write_str("Reprovisioning/")?;
+                match dpu_states.states.values().min() {
+                    Some(state) => write!(f, "{state}"),
+                    None => f.write_str("Unknown"),
+                }
             }
             ManagedHostState::HostReprovision {
                 reprovision_state, ..
@@ -3363,15 +3370,11 @@ impl ManagedHostState {
                 .states
                 .get(dpu_id)
                 .map(|x| x.to_string())
-                .unwrap_or("Unknown DPU".to_string()),
-            ManagedHostState::DPUInit { dpu_states } => format!(
-                "DPUInitializing/{}",
-                dpu_states
-                    .states
-                    .get(dpu_id)
-                    .map(|x| x.to_string())
-                    .unwrap_or("Unknown DPU".to_string())
-            ),
+                .unwrap_or_else(|| "Unknown DPU".to_string()),
+            ManagedHostState::DPUInit { dpu_states } => match dpu_states.states.get(dpu_id) {
+                Some(state) => format!("DPUInitializing/{state}"),
+                None => "DPUInitializing/Unknown DPU".to_string(),
+            },
             ManagedHostState::HostInit { machine_state } => {
                 format!("HostInitializing/{machine_state}")
             }
@@ -3391,14 +3394,10 @@ impl ManagedHostState {
             ManagedHostState::NicFirmwareUpdating { .. } => self.to_string(),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
-                    format!(
-                        "Assigned/Reprovision/{}",
-                        dpu_states
-                            .states
-                            .get(dpu_id)
-                            .map(|x| x.to_string())
-                            .unwrap_or("Unknown DPU".to_string())
-                    )
+                    match dpu_states.states.get(dpu_id) {
+                        Some(state) => format!("Assigned/Reprovision/{state}"),
+                        None => "Assigned/Reprovision/Unknown DPU".to_string(),
+                    }
                 }
                 _ => format!("Assigned/{instance_state}"),
             },
@@ -3410,14 +3409,10 @@ impl ManagedHostState {
                 format!("Failed/{}", details.cause)
             }
             ManagedHostState::DPUReprovision { dpu_states } => {
-                format!(
-                    "Reprovisioning/{}",
-                    dpu_states
-                        .states
-                        .get(dpu_id)
-                        .map(|x| x.to_string())
-                        .unwrap_or("Unknown DPU".to_string())
-                )
+                match dpu_states.states.get(dpu_id) {
+                    Some(state) => format!("Reprovisioning/{state}"),
+                    None => "Reprovisioning/Unknown DPU".to_string(),
+                }
             }
             ManagedHostState::HostReprovision {
                 reprovision_state, ..
@@ -3967,7 +3962,7 @@ fn as_duration<S>(d: &Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.num_seconds()))
+    serializer.collect_str(&format_args!("{}s", d.num_seconds()))
 }
 
 impl Default for HostHealthConfig {
@@ -4136,6 +4131,73 @@ mod tests {
         dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn scout_upgrade_state_without_delivery_timestamp_remains_readable() {
+        let fixture = r#"{"waitingforscoutupgrade":{
+            "upgrade_task_id":"legacy-task","firmware_type":"bmc",
+            "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
+            "deadline":"2026-10-28T13:00:00Z","task_json":"{}","result":null
+        }}"#;
+        let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
+        let HostReprovisionState::WaitingForScoutUpgrade {
+            delivered_at,
+            deadline,
+            ..
+        } = &state
+        else {
+            panic!("unexpected state")
+        };
+        assert!(delivered_at.is_none());
+        assert_eq!(
+            *deadline,
+            "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let roundtrip: HostReprovisionState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(roundtrip, state);
+    }
+
+    #[test]
+    fn dpu_state_display_preserves_lowest_state_and_missing_labels() {
+        let dpu_id = dpu_machine_id(1);
+        let states = DpuReprovisionStates {
+            states: HashMap::new(),
+        };
+        value_scenarios!(run = |state: ManagedHostState| (state.to_string(), state.dpu_state_string(&dpu_id));
+            "discovery without observations" {
+                ManagedHostState::DpuDiscoveringState { dpu_states: DpuDiscoveringStates { states: HashMap::new() } }
+                    => ("DPUDiscovering/Unknown".to_string(), "Unknown DPU".to_string()),
+            }
+            "discovery selects the lowest observation" {
+                ManagedHostState::DpuDiscoveringState { dpu_states: DpuDiscoveringStates { states: HashMap::from([(dpu_id, DpuDiscoveringState::EnableRshim), (dpu_machine_id(2), DpuDiscoveringState::Initializing)]) } }
+                    => ("DPUDiscovering/Initializing".to_string(), "EnableRshim".to_string()),
+            }
+            "initialization without observations" {
+                ManagedHostState::DPUInit { dpu_states: DpuInitStates { states: HashMap::new() } }
+                    => ("DPUInitializing/Unknown".to_string(), "DPUInitializing/Unknown DPU".to_string()),
+            }
+            "initialization for the requested DPU" {
+                ManagedHostState::DPUInit { dpu_states: DpuInitStates { states: HashMap::from([(dpu_id, DpuInitState::Init)]) } }
+                    => ("DPUInitializing/Init".to_string(), "DPUInitializing/Init".to_string()),
+            }
+            "reprovision without observations" {
+                ManagedHostState::DPUReprovision { dpu_states: states.clone() }
+                    => ("Reprovisioning/Unknown".to_string(), "Reprovisioning/Unknown DPU".to_string()),
+            }
+            "assigned reprovision without observations" {
+                ManagedHostState::Assigned { instance_state: InstanceState::DPUReprovision { dpu_states: states } }
+                    => ("Assigned/Reprovision/Unknown".to_string(), "Assigned/Reprovision/Unknown DPU".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn dpf_id_uses_lowercase_mac_octets_and_hyphens() {
+        let mut machine = dpu_machine(1);
+        machine.status.bmc_info.mac = Some(MacAddress::new([0x0a, 0, 1, 0xb0, 0xcd, 0xff]));
+        assert_eq!(machine.dpf_id().as_deref(), Some("0a-00-01-b0-cd-ff"));
+    }
+
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,
@@ -4271,6 +4333,7 @@ mod tests {
                 network: Default::default(),
                 infiniband: Default::default(),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 extension_services: Default::default(),
                 nvlink: Default::default(),
                 spxconfig: Default::default(),
@@ -4653,6 +4716,7 @@ mod tests {
     fn ready_host_with_pending_maintenance_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
         snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            action_id: None,
             requested_at: chrono::Utc::now(),
             initiator: "test".to_string(),
             operation: MachineMaintenanceOperation::ChassisReset {
@@ -5706,7 +5770,7 @@ mod tests {
         };
 
         check_values(
-            [
+            vec![
                 Check {
                     scenario: "one exclusion among several alerts suppresses a failed-state SLA",
                     input: Inputs {
@@ -6103,16 +6167,16 @@ mod tests {
             };
             "absent retry_count defaults to 0" {
                 r#"{"state":"rotatingbmc"}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
-                    ManagedHostState::RotatingBmc { retry_count: 0 },
+                    ManagedHostState::RotatingBmc { retry_count: 0, dpf_rotation: None },
+                    ManagedHostState::RotatingBmc { retry_count: 0, dpf_rotation: None },
                     "RotatingBmc".to_string(),
                 )),
             }
 
             "explicit retry_count round-trips" {
                 r#"{"state":"rotatingbmc","retry_count":4}"# => Yields((
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
-                    ManagedHostState::RotatingBmc { retry_count: 4 },
+                    ManagedHostState::RotatingBmc { retry_count: 4, dpf_rotation: None },
+                    ManagedHostState::RotatingBmc { retry_count: 4, dpf_rotation: None },
                     "RotatingBmc".to_string(),
                 )),
             }
@@ -6125,7 +6189,10 @@ mod tests {
                 .unwrap();
         let sla = state_sla(
             &machine_id,
-            &ManagedHostState::RotatingBmc { retry_count: 0 },
+            &ManagedHostState::RotatingBmc {
+                retry_count: 0,
+                dpf_rotation: None,
+            },
             &ConfigVersion::initial(),
             &health_report_with_alerts(vec![]),
             &slas::MachineSlaConfig::default(),

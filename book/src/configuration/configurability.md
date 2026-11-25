@@ -177,7 +177,7 @@ requirements.
 
 `site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
 
-`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix. Exact parentage takes precedence over containment; a child parented to a replacement root does not retain the removed root. Direct prefixes retain retiring roots while their segment exists and no Ready operator root fully covers them, including during draining. Adding or restoring Ready operator coverage releases those roots without deleting the segment. VpcPrefix references remain until hard deletion. Inherited roots are reduced to their minimal exact union.
 
 An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
 
@@ -405,6 +405,10 @@ plus thresholds for DPU agent compliance. Operators flip this from
   switches and power shelves (both on by default). A declared power shelf with
   no DHCP lease is discovered at its static `expected_power_shelves` IP as a
   matter of course.
+
+These creation toggles do not control BMC pre-ingestion. In particular, disabling
+switch creation still allows [initial NVOS password rotation](../../../docs/operations/nvos-password-rotation.md#initial-rotation-during-pre-ingestion)
+to complete before a switch state machine is created.
 
 Site Explorer auto-creation is additionally gated per device on a matching
 expected-hardware record (`expected_machines`, `expected_switches`,
@@ -1063,15 +1067,22 @@ overrides.
 | `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
-| `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
+| `concurrency_limit` | `16` | Maximum number of pre-ingestion endpoint tasks running concurrently within one pass. Separate from Machine Update Manager capacity for managed hosts. Use a positive value no greater than Tokio's semaphore maximum (`usize::MAX >> 3`). `0` stalls a nonempty pass; values above that maximum panic when the pass starts. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
 | `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
-| `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
+| `instance_updates_manual_tagging` | `true` if field omitted; `false` if merged table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other admission and [execution gates](../../../docs/operations/firmware-updates/host-firmware.md#scheduling-gates) still apply. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
 | `hgx_bmc_gpu_reboot_delay` | `30s` | Delay after GPU reboot before HGX BMC is contacted again. |
 | `requires_manual_upgrade` | `false` | Force every firmware upgrade to require explicit administrator approval. |
 | `max_concurrent_bfb_copies` | `10` | Concurrent DPU BFB copies. |
+
+Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
+site configuration, and `CARBIDE_API_` overrides before applying defaults.
+If the merged `firmware_global` table omits this field, its value is `true`;
+if that table is absent, its value is `false`. A `[firmware_global.downloads]`
+section also creates the parent table. The chart's bundled base configuration
+includes this table, so its omitted-field default is `true`.
 
 ### Update policy — `[machine_updater]`
 

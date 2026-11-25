@@ -17,12 +17,15 @@
 
 //! Handler for RackState::Ready.
 
+use std::fmt::Write;
+
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use db::{
-    machine as db_machine, power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
+    TransactionVending as _, machine as db_machine, power_shelf as db_power_shelf, rack as db_rack,
+    switch as db_switch,
 };
 use model::DeletedFilter;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -53,7 +56,12 @@ pub async fn handle_ready(
             "Rack topology changed, transitioning from Ready to Discovering",
         );
         state.config.topology_changed = false;
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;
         return Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn));
     }
@@ -66,7 +74,12 @@ pub async fn handle_ready(
         state.config.reprovision_requested = false;
         state.config.ingestion_in_progress = false;
         state.config.maintenance_requested = None;
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: RackMaintenanceState::FirmwareUpgrade {
@@ -80,12 +93,14 @@ pub async fn handle_ready(
         let activities_desc = if scope.activities.is_empty() {
             "all non-power activities".to_string()
         } else {
-            scope
-                .activities
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut description = String::new();
+            for (index, activity) in scope.activities.iter().enumerate() {
+                if index > 0 {
+                    description.push_str(", ");
+                }
+                write!(description, "{activity}").expect("writing to a String cannot fail");
+            }
+            description
         };
         if scope.is_full_rack() {
             tracing::info!(
@@ -105,11 +120,9 @@ pub async fn handle_ready(
         }
         // Leave maintenance_requested set; the maintenance handler reads the
         // scope to decide which activities to run and clears it on Completed.
-        let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
-        })
-        .with_txn(txn));
+        }));
     }
 
     if let Some(cause) = detect_component_failure(id, ctx).await? {
@@ -118,13 +131,11 @@ pub async fn handle_ready(
             cause = %cause,
             "Rack transitioning from Ready to Error",
         );
-        let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Error {
             certificate_failure: None,
             cause,
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
-        })
-        .with_txn(txn));
+        }));
     }
 
     Ok(StateHandlerOutcome::wait(
@@ -138,10 +149,8 @@ pub(super) async fn detect_component_failure(
     rack_id: &RackId,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<Option<String>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    let failed_switches = db_switch::find_ids(
-        txn.as_mut(),
+    let mut failed_switches = db_switch::find_ids(
+        &ctx.services.db_pool,
         SwitchSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: DeletedFilter::Exclude,
@@ -151,8 +160,8 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    let failed_power_shelves = db_power_shelf::find_ids(
-        txn.as_mut(),
+    let mut failed_power_shelves = db_power_shelf::find_ids(
+        &ctx.services.db_pool,
         PowerShelfSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: DeletedFilter::Exclude,
@@ -162,8 +171,8 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    let failed_machines = db_machine::find_machine_ids::<MachineId>(
-        txn.as_mut(),
+    let mut failed_machines = db_machine::find_machine_ids::<MachineId>(
+        &ctx.services.db_pool,
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
             controller_state: Some(MACHINE_FAILED_STATE.to_string()),
@@ -172,49 +181,59 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    txn.commit().await?;
-
     if failed_switches.is_empty() && failed_power_shelves.is_empty() && failed_machines.is_empty() {
         return Ok(None);
     }
 
-    let mut parts = Vec::new();
+    // Database lookup order is unspecified; keep unchanged failure sets stable.
+    failed_switches.sort_unstable();
+    failed_power_shelves.sort_unstable();
+    failed_machines.sort_unstable();
+
+    let mut cause = String::from("component(s) reported terminal failure: ");
     if !failed_switches.is_empty() {
-        parts.push(format!(
-            "{} switch(es) in Error: [{}]",
-            failed_switches.len(),
-            failed_switches
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        write!(cause, "{} switch(es) in Error: [", failed_switches.len())
+            .expect("writing to a String cannot fail");
+        for (index, id) in failed_switches.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
     if !failed_power_shelves.is_empty() {
-        parts.push(format!(
-            "{} power shelf/shelves in Error: [{}]",
-            failed_power_shelves.len(),
-            failed_power_shelves
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        if !failed_switches.is_empty() {
+            cause.push_str("; ");
+        }
+        write!(
+            cause,
+            "{} power shelf/shelves in Error: [",
+            failed_power_shelves.len()
+        )
+        .expect("writing to a String cannot fail");
+        for (index, id) in failed_power_shelves.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
     if !failed_machines.is_empty() {
-        parts.push(format!(
-            "{} machine(s) in Failed: [{}]",
-            failed_machines.len(),
-            failed_machines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+        if !failed_switches.is_empty() || !failed_power_shelves.is_empty() {
+            cause.push_str("; ");
+        }
+        write!(cause, "{} machine(s) in Failed: [", failed_machines.len())
+            .expect("writing to a String cannot fail");
+        for (index, id) in failed_machines.iter().enumerate() {
+            if index > 0 {
+                cause.push_str(", ");
+            }
+            write!(cause, "{id}").expect("writing to a String cannot fail");
+        }
+        cause.push(']');
     }
 
-    Ok(Some(format!(
-        "component(s) reported terminal failure: {}",
-        parts.join("; ")
-    )))
+    Ok(Some(cause))
 }

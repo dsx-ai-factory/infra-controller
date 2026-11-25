@@ -13,7 +13,7 @@ nico-admin-cli extension-service create [-i|--id]
 <-n|--name> <-t|--type> [--dpu-target]
 [--description] [--tenant-organization-id]
 <-d|--data> [--registry-url] [--username]
-[--password] [--observability] [--extended]
+[--extended] [--password] [--observability]
 [--sort-by] [-h|--help]
 ```
 
@@ -75,6 +75,14 @@ Registry URL for the service credential (optional)
 
 Username for the service credential (optional)
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--password <PASSWORD>`
 
 Password for the service credential (optional)
@@ -83,14 +91,6 @@ Password for the service credential (optional)
 
 JSON array containing a defined set of extension observability configs
 (optional)
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

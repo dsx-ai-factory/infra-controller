@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::ffi::CString;
+use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
 
@@ -87,10 +88,14 @@ fn dhcp_v6_multicast_groups(join_site_scoped_group: bool) -> impl Iterator<Item 
 }
 
 pub(super) fn u8_to_mac(data: &[u8]) -> String {
-    data.iter()
-        .map(|x| format!("{x:02x}"))
-        .collect::<Vec<String>>()
-        .join(":")
+    let mut mac = String::new();
+    for (index, byte) in data.iter().enumerate() {
+        if index > 0 {
+            mac.push(':');
+        }
+        write!(mac, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    mac
 }
 
 pub(super) fn u8_to_hex_string(data: &[u8]) -> Result<String, DhcpError> {
@@ -279,16 +284,18 @@ fn if_index_for(interface: &str) -> Result<u32, DhcpError> {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::value_scenarios;
 
     use super::*;
 
     #[test]
     fn u8_to_mac_zero_pads_octets() {
-        assert_eq!(
-            u8_to_mac(&[0x00, 0x00, 0x5e, 0x00, 0x53, 0x01]),
-            "00:00:5e:00:53:01"
+        value_scenarios!(u8_to_mac:
+            "empty and arbitrary-length slices preserve the byte sequence" {
+                &[][..] => "".to_string(),
+                &[0x00, 0x0a, 0xff][..] => "00:0a:ff".to_string(),
+                &[0x00, 0x00, 0x5e, 0x00, 0x53, 0x01][..] => "00:00:5e:00:53:01".to_string(),
+            }
         );
     }
 
@@ -329,9 +336,6 @@ mod tests {
     /// cannot run if setup still panics.
     #[tokio::test(start_paused = true)]
     async fn get_socket_returns_after_interface_retry_exhaustion() {
-        // Serialize emitted socket-failure metrics with other process-global metric assertions.
-        let _metrics_guard = MetricsCapture::start();
-
         // Use a deliberately absent device so every production bind attempt takes the terminal retry path.
         let result = get_socket(
             "127.0.0.1:0".parse().unwrap(),

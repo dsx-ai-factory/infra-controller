@@ -14,6 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Keep these suites in one executable so libtest can run their environments in parallel.
+use db::TransactionVending as _;
+mod decommission;
+mod rack;
+
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -66,7 +71,6 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
-const SSH_METRIC_CATALOGUE_OUTPUT: &str = "CARBIDE_SSH_METRIC_CATALOGUE_OUTPUT";
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -76,12 +80,6 @@ fn setup() {
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
 #[test]
 fn test_integration() -> eyre::Result<()> {
-    if let Some(output_path) = std::env::var_os(SSH_METRIC_CATALOGUE_OUTPUT) {
-        return utils::api_server_runtime_builder()
-            .worker_threads(2)
-            .build()?
-            .block_on(write_ssh_console_metric_info(output_path.into()));
-    }
     utils::api_server_runtime_builder()
         .build()?
         .block_on(run_integration())
@@ -112,7 +110,7 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
         recovery_tenant_id.to_string(),
@@ -293,7 +291,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Startup rejects remote bindings, so add this fixture after both servers
     // start. Its missing accepted definition makes the direct poll below emit
     // the unavailable counter for the catalogue.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &model::resource_pool::ResourcePoolSelection {
@@ -334,7 +332,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Extension-service controller families only appear in the catalogue
     // scrape once the controller processes an object. The controller only
     // reconciles DPF Helm chart services; without DPF this one waits in Creating.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::extension_service::create(
         &mut txn,
         ConfigVersion::initial(),
@@ -940,7 +938,7 @@ async fn exercise_dpf_exploration_suppression(
     )
     .fetch_one(&test_env.db_pool)
     .await?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -960,16 +958,19 @@ async fn exercise_dpf_exploration_suppression(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     let result = client
         .refresh_endpoint_report(rpc::forge::RefreshEndpointReportRequest {
             ip_address: address.to_string(),
         })
         .await;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::delete(
         &mut txn,
         mac,
@@ -1047,7 +1048,7 @@ async fn exercise_admin_address_reconcile_failures(
     .hardware_info
     .context("the chosen host's DPU recorded hardware info")?;
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, false, &mut txn).await?;
     // The next explorer run revisits the host and its steady-state repair
     // fails the same way.
@@ -1062,10 +1063,13 @@ async fn exercise_admin_address_reconcile_failures(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     // The discovery commits and its own reconcile finds no primary to repair.
     client
         .discover_machine(MachineDiscoveryInfo {
@@ -1089,18 +1093,19 @@ async fn exercise_admin_address_reconcile_failures(
         .await?;
     }
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
     txn.commit().await?;
     Ok(())
 }
 
 /// Proves `FindIBPartitionsByIds` returns a row with an unrecognized stored MTU
-/// and exports the fallback counter for the generated catalogue.
+/// and exercises the fallback and controller transition metrics for the catalogue.
 async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
+    use model::ib_partition::IBPartitionControllerState;
     use rpc::carbide_api_client::CarbideApiClient;
     use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
@@ -1108,11 +1113,12 @@ async fn exercise_ib_partition_mtu_fallback(
     sqlx::query(
         "INSERT INTO ib_partitions
             (id, name, organization_id, config_version, controller_state_version,
-             mtu, rate_limit, service_level)
-         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, 3, 200, 0)",
+             controller_state, mtu, rate_limit, service_level)
+         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, $3, 3, 200, 0)",
     )
     .bind(id)
     .bind(ConfigVersion::initial())
+    .bind(sqlx::types::Json(IBPartitionControllerState::Provisioning))
     .execute(&test_env.db_pool)
     .await?;
 
@@ -1124,16 +1130,28 @@ async fn exercise_ib_partition_mtu_fallback(
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = CarbideApiClient::new(&ApiConfig::new(
-        &format!("https://{}", test_env.carbide_api_addrs[0]),
-        &config,
-    ));
+    let client = CarbideApiClient::new(
+        &ApiConfig::new(
+            &format!("https://{}", test_env.carbide_api_addrs[0]),
+            &config,
+        ),
+        carbide_instrument::Instrumentation::noop(),
+    );
     let response = client
         .find_ib_partitions_by_ids(rpc::forge::IbPartitionsByIdsRequest {
             ib_partition_ids: vec![id],
             include_history: false,
         })
         .await;
+    // Keep the fixture until the controller has recorded the transition and
+    // all three families are visible in the live scrape.
+    for line in [
+        "# TYPE carbide_ib_partitions_state_entered_total counter\n",
+        "# TYPE carbide_ib_partitions_state_exited_total counter\n",
+        "# TYPE carbide_ib_partitions_time_in_state_seconds histogram\n",
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
     sqlx::query("DELETE FROM ib_partitions WHERE id = $1")
         .bind(id)
         .execute(&test_env.db_pool)
@@ -1180,7 +1198,7 @@ async fn exercise_nvlink_partition_monitor(
         &mut work_lock_tasks,
         test_env.db_pool.clone(),
         db::work_lock_manager::KeepaliveConfig::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
@@ -1212,33 +1230,6 @@ async fn exercise_nvlink_partition_monitor(
 }
 
 async fn collect_ssh_console_metric_info() -> eyre::Result<metrics::MetricInfo> {
-    // A separate process prevents SSH Console from replacing the API server's
-    // global meter provider or binding its cached Events to that provider.
-    let output_dir = temp_dir::TempDir::with_prefix("ssh-metric-catalogue")?;
-    let output_path = output_dir.path().join("metric.json");
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args(["--exact", "test_integration", "--nocapture"])
-        .env(SSH_METRIC_CATALOGUE_OUTPUT, &output_path)
-        .kill_on_drop(true)
-        .spawn()?;
-    // This child only starts local listeners, scrapes once, and shuts down.
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-        Ok(status) => status?,
-        Err(error) => {
-            child.kill().await?;
-            return Err(error).wrap_err("SSH metric catalogue subprocess timed out");
-        }
-    };
-    eyre::ensure!(
-        status.success(),
-        "SSH metric catalogue subprocess failed: {status}"
-    );
-    let (name, ty, help): (String, String, String) =
-        serde_json::from_slice(&std::fs::read(output_path)?)?;
-    Ok(metrics::MetricInfo { name, ty, help })
-}
-
-async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()> {
     use ssh_console::shutdown_handle::ShutdownHandle;
 
     let certs = &utils::LOCALHOST_CERTS;
@@ -1268,11 +1259,7 @@ async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()>
         !info.help.is_empty(),
         "the SSH recovery counter needs HELP text"
     );
-    std::fs::write(
-        output_path,
-        serde_json::to_vec(&(info.name, info.ty, info.help))?,
-    )?;
-    Ok(())
+    Ok(info)
 }
 
 fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {
@@ -2330,7 +2317,7 @@ async fn prepare_dpu_certificate_expiry(
         .observed_machine_id()
         .context("ready DPU has no observed machine ID")?
         .try_into()?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let mut observation = db::machine::find_one(
         &mut *txn,
         &dpu_id,

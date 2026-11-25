@@ -109,6 +109,19 @@ pub fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
 /// `mlxconfig_profiles` is intentionally exempted by `SKIP_SERIALIZING` in
 /// `crates/api-web/src/configuration.rs`.
 pub fn fully_populated() -> CarbideConfig {
+    let mut config = get();
+    config.site_explorer.host_bluefield_rules = serde_json::from_value(serde_json::json!([{
+        "id": "example-oem-bf3",
+        "sources": ["system_pcie_device"],
+        "part_numbers": [{ "exact": "EXAMPLE-OEM-BF3" }],
+        "product": "bluefield3_dpu"
+    }]))
+    .expect("valid host BlueField rule");
+    config.site_explorer.host_serial_rules = serde_json::from_value(serde_json::json!([{
+        "id": "site-enclosure",
+        "source": {"kind": "chassis", "chassis_id": {"exact": "Enclosure"}}
+    }]))
+    .expect("valid host serial rule");
     CarbideConfig {
         auth: Some(AuthConfig {
             permissive_mode: true,
@@ -143,7 +156,7 @@ pub fn fully_populated() -> CarbideConfig {
             ..Default::default()
         },
         admin_lock_admission_permits: Some(16),
-        ..get()
+        ..config
     }
 }
 
@@ -212,6 +225,7 @@ pub fn get() -> CarbideConfig {
         allow_bmc_basic_auth_fallback: false,
         allow_insecure_discovery: true,
         scout_boot_interface_correction_enabled: false,
+        maintenance_end_boot_config_recheck_enabled: false,
         initial_domain_name: Some("test.com".to_string()),
         sitename: Some("testsite".to_string()),
         initial_dpu_agent_upgrade_policy: None,
@@ -274,6 +288,7 @@ pub fn get() -> CarbideConfig {
             rack_firmware_reprovisioning_enabled: false,
             controller: StateControllerConfig::default(),
         },
+        nvlink_domain_state_controller: Default::default(),
         rack_state_controller: RackStateControllerConfig {
             controller: StateControllerConfig::default(),
             nmx_cluster_switch_mtls_services: vec![],

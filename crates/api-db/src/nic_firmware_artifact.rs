@@ -9,6 +9,7 @@ use model::machine::nic_firmware::NicFirmwareOperation;
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// `ArtifactSnapshot` keeps authorization and retention from one SQL statement.
@@ -60,7 +61,8 @@ pub async fn lock_retention_for_update(txn: &mut PgConnection) -> DatabaseResult
 /// Use read-committed isolation and call `snapshot` after this returns, so its
 /// statement snapshot includes a writer that committed while the lock waited.
 /// Keep the transaction through physical cache open/eviction, then release it
-/// before a source download or response stream. Callers bound the SQL wait.
+/// before hashing the leased descriptor, downloading, or streaming. Callers
+/// bound the SQL wait.
 pub async fn lock_retention(txn: &mut PgConnection) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended('nic_firmware_artifact_retention', 0))";
     sqlx::query(query)
@@ -75,7 +77,7 @@ pub async fn lock_retention(txn: &mut PgConnection) -> DatabaseResult<()> {
 /// `None`; malformed host state fails the read. Decode retention only after
 /// authorization, then validate and select retaining phases. No rows are locked.
 pub async fn snapshot(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_id: HostMachineId,
 ) -> DatabaseResult<Option<ArtifactSnapshot>> {
     let query = r#"
@@ -92,7 +94,7 @@ pub async fn snapshot(
         .bind(host_id)
         .bind(format!("{}%", MachineType::Host.id_prefix()))
         .bind(format!("{}%", MachineType::PredictedHost.id_prefix()))
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(row.map(|(state, operations)| ArtifactSnapshot {

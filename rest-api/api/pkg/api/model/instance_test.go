@@ -1390,7 +1390,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 			err := icr.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIInstanceCreateRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIInstanceCreateRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 
 			if tt.wantErrorMessage != "" && err != nil {
@@ -1562,7 +1562,7 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 			err := tt.req.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIBatchInstanceCreateRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIBatchInstanceCreateRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 
 			if tt.wantErrorMessage != "" && err != nil {
@@ -2229,7 +2229,7 @@ phone_home:
 			err := icr.ValidateAndSetOperatingSystemData(cfg1, tt.os)
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIInstanceCreateRequest.ValidateAndSetOperatingSystemData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIInstanceCreateRequest.ValidateAndSetOperatingSystemData() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 
 			if err != nil {
@@ -3073,7 +3073,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData(t *testing.T
 			err := iur.ValidateAndSetOperatingSystemData(tt.cfg, tt.instance, tt.os)
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIInstanceUpdateRequest.ValidateAndSetOperatingSystemData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIInstanceUpdateRequest.ValidateAndSetOperatingSystemData() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 		})
 	}
@@ -3566,7 +3566,7 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 			err := idr.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIInstanceDeleteRequest.Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIInstanceDeleteRequest.Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 		})
 	}
@@ -3644,7 +3644,7 @@ func TestAPIInstanceCreateRequest_Validate_Auto(t *testing.T) {
 			err := tt.req.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 			if tt.wantErrorMessage != "" && err != nil {
 				assert.Contains(t, err.Error(), tt.wantErrorMessage)
@@ -3698,7 +3698,7 @@ func TestAPIBatchInstanceCreateRequest_Validate_Auto(t *testing.T) {
 			err := tt.req.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 			if tt.wantErrorMessage != "" && err != nil {
 				assert.Contains(t, err.Error(), tt.wantErrorMessage)
@@ -3764,7 +3764,7 @@ func TestAPIInstanceUpdateRequest_Validate_Auto(t *testing.T) {
 			err := tt.req.Validate()
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("Validate() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("Validate() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 			if tt.wantErrorMessage != "" && err != nil {
 				assert.Contains(t, err.Error(), tt.wantErrorMessage)

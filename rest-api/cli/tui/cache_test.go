@@ -9,7 +9,7 @@ func TestInvalidateFiltered_ClearsScopeFilteredTypes(t *testing.T) {
 	scopeFiltered := []string{
 		"vpc", "subnet", "instance",
 		"allocation", "machine", "ip-block", "operating-system",
-		"ssh-key-group", "network-security-group",
+		"ssh-key-group", "network-security-group", "dhcp-option-set",
 		"vpc-prefix", "rack", "expected-machine", "sku",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",

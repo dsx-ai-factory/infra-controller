@@ -256,6 +256,7 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
         carbide_instrument::Instrumentation::from_meter_provider(
             &opentelemetry::metrics::noop::NoopMeterProvider::new(),
         ),
+        None,
     )?;
 
     // --- Populate Vault with secrets ---
@@ -282,7 +283,7 @@ async fn exercise_import(test_pool: &PgPool) -> eyre::Result<()> {
         &mut work_lock_tasks,
         test_pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_lock = work_lock_manager

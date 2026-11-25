@@ -24,7 +24,7 @@
 #
 FROM ubuntu:24.04
 
-ARG RUST_VERSION=1.97.1
+ARG RUST_VERSION=1.100.0
 
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

@@ -26,11 +26,12 @@
 
 use std::sync::Arc;
 
-use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialWriter as _, Credentials};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
+use db::TransactionVending as _;
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
     record_device_enrolled, set_next_target_version,
@@ -124,7 +125,7 @@ async fn ready_lenovo_host(
     // The controller reads the vendor from Scout discovery, not exploration.
     let mut hardware_info = mh.host.hardware_info();
     hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true).await?;
     db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info).await?;
     txn.commit().await?;
@@ -165,7 +166,7 @@ async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
             .iter()
             .all(|state| *state == libredfish::EnabledDisabled::Enabled)
     );
-    let status = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+    let status = device_rotation_status(&pool, HOST_UEFI, mac)
         .await?
         .unwrap();
     assert!(status.converged);
@@ -191,11 +192,12 @@ async fn stage_lagging_host_uefi(
             "target must advance from version 0"
         );
     }
-    // The controller resolves the site-wide UEFI credential through the Redfish
-    // pool's own store, so seed it there rather than in the API credential store.
-    env.redfish_sim
-        .seed_credential(&site_key(1), &uefi_creds("uefi-v1"))
-        .await;
+    // The controller resolves the site-wide UEFI credential through its own
+    // credential manager, so seed it there rather than in the API credential store.
+    env.credential_manager
+        .set_credentials(&site_key(1), &uefi_creds("uefi-v1"))
+        .await
+        .expect("seed site host UEFI credential");
     Ok(())
 }
 
@@ -239,8 +241,7 @@ async fn ready_host_converges_uefi_to_site_target(
 
     // The device lags the staged target before the controller runs.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -266,8 +267,7 @@ async fn ready_host_converges_uefi_to_site_target(
 
     // The device is recorded converged at the target version.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -310,8 +310,7 @@ async fn feature_flag_off_suppresses_passive_uefi_rotation(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -375,8 +374,7 @@ async fn force_request_converges_quarantined_uefi_when_disabled(
     // The device converged despite its quarantine, and the one-shot request was
     // cleared so it does not re-enter.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "forced device should be converged");
@@ -436,8 +434,7 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
     // The device did not converge; it is quarantined with a recorded, redacted
     // error and an incremented attempt count.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -496,7 +493,7 @@ async fn lenovo_failed_rotation_retries_only_relock_before_ready(
             }
         }
     ));
-    let failed = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+    let failed = device_rotation_status(&pool, HOST_UEFI, mac)
         .await?
         .unwrap();
     assert!(failed.quarantined);
@@ -507,7 +504,7 @@ async fn lenovo_failed_rotation_retries_only_relock_before_ready(
     env.run_single_iteration().await;
     assert_eq!(mh.host.machine().await.state.value, cleanup);
     assert_eq!(
-        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        device_rotation_status(&pool, HOST_UEFI, mac)
             .await?
             .unwrap(),
         failed
@@ -523,7 +520,7 @@ async fn lenovo_failed_rotation_retries_only_relock_before_ready(
     );
     // Cleanup must neither retry/promote the password nor count another failure.
     assert_eq!(
-        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        device_rotation_status(&pool, HOST_UEFI, mac)
             .await?
             .unwrap(),
         failed
@@ -580,8 +577,7 @@ async fn uefi_client_creation_failure_retries_without_quarantine(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -599,8 +595,7 @@ async fn uefi_client_creation_failure_retries_without_quarantine(
     env.redfish_sim.clear_create_client_error();
     run_until_ready(&mut env, &mh).await;
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+        let status = device_rotation_status(&pool, HOST_UEFI, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "the retried rotation should converge");

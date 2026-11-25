@@ -28,11 +28,9 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use db::db_read::PgPoolReader;
 use db::instance::InstanceExtensionServicesNotCurrent;
-use db::{
-    ConditionalWrite, DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group,
-};
-use futures_util::FutureExt;
+use db::{ConditionalWrite, ObjectColumnFilter, network_security_group};
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
 };
@@ -59,7 +57,7 @@ use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentType};
 use model::os::OperatingSystem;
 use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
@@ -161,8 +159,9 @@ pub(crate) async fn allocate(
     reject_unsupported_external_validation_binding(&request)?;
 
     if request.needs_hydration_from_deprecated_fields() {
-        api.with_txn(|txn| request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+        request
+            .hydrate_from_deprecated_fields(api.pg_pool())
+            .await?;
     }
 
     let request = InstanceAllocationRequest::try_from(request)?;
@@ -202,8 +201,9 @@ pub(crate) async fn batch_allocate(
     }
 
     if batch_request.needs_hydration_from_deprecated_fields() {
-        api.with_txn(|txn| batch_request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+        batch_request
+            .hydrate_from_deprecated_fields(api.pg_pool())
+            .await?;
     }
 
     // Convert all requests
@@ -276,10 +276,8 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let snapshots = db::managed_host::load_by_instance_ids(
-        &mut txn,
+        api.pg_pool(),
         instance_ids.as_ref(),
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
@@ -288,8 +286,6 @@ pub(crate) async fn find_by_ids(
     for snapshot in snapshots.into_iter() {
         instances.push(snapshot_to_instance(snapshot)?);
     }
-    txn.rollback_or_log("read-only load of instances by id")
-        .await;
 
     Ok(Response::new(rpc::InstanceList { instances }))
 }
@@ -303,10 +299,8 @@ pub(crate) async fn find_by_machine_id(
     let machine_id = request.into_inner();
     log_machine_id(&machine_id);
 
-    let mut txn = api.txn_begin().await?;
-
     let mh_snapshot = match db::managed_host::load_snapshot(
-        &mut txn,
+        &mut api.db_reader(),
         &machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
@@ -327,8 +321,6 @@ pub(crate) async fn find_by_machine_id(
     };
 
     let response = Response::new(rpc::InstanceList { instances });
-
-    txn.commit().await?;
 
     Ok(response)
 }
@@ -392,7 +384,7 @@ fn create_request_repair_override(issue: &rpc::Issue) -> HealthReport {
 
 /// Helper function to apply health override with consistent error handling
 async fn apply_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     override_report: &HealthReport,
     operation_desc: &str,
@@ -425,7 +417,7 @@ async fn apply_health_override(
 
 /// Helper function to remove health override with consistent error handling
 async fn remove_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     source: &str,
     operation_desc: &str,
@@ -490,7 +482,7 @@ fn log_delete_attribution(delete_attribution: Option<&rpc::DeleteAttribution>) {
 /// The function specifically avoids triggering auto-repair (RequestRepair) for repair tenant
 /// releases to prevent infinite loops where RepairSystem triggers itself repeatedly.
 async fn handle_instance_release_from_repair_tenant(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: Option<&rpc::Issue>,
     machine: &HostMachine,
@@ -647,7 +639,7 @@ async fn handle_instance_release_from_repair_tenant(
 /// The RequestRepair override signals the RepairSystem to attempt automated repairs
 /// on the machine before it can be allocated to new instances.
 async fn handle_instance_release_from_regular_tenant_and_report_issue(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: &rpc::Issue,
     auto_repair_enabled: bool,
@@ -963,7 +955,12 @@ async fn release_one_instance(
         }
     }
 
-    let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.infiniband_config],
+        &api.instrumentation,
+    )
+    .await?;
     let memberships = ib_memberships_from_config(&instance.infiniband_config, &pkeys);
     for membership in memberships {
         db::retired_ib_membership::record(txn.as_mut(), &membership).await?;
@@ -1085,7 +1082,7 @@ pub(crate) async fn invoke_power(
     // both locks so an earlier snapshot cannot bypass admitted firmware work.
     let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1097,7 +1094,7 @@ pub(crate) async fn invoke_power(
     )
     .await?
     .pop()
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -1114,21 +1111,59 @@ pub(crate) async fn invoke_power(
         .into());
     }
 
+    let queue_reboot = api
+        .runtime_config
+        .machine_state_controller
+        .instance_reboot_queue_enabled;
+    let retained_reboot = snapshot
+        .host_snapshot
+        .status
+        .hardware_dispatch
+        .as_ref()
+        .is_some_and(|dispatch| {
+            dispatch.is_pending()
+                && matches!(
+                    dispatch.owner,
+                    model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot { .. }
+                )
+        });
+    if retained_reboot
+        || (queue_reboot
+            && snapshot
+                .host_snapshot
+                .status
+                .hardware_dispatch
+                .as_ref()
+                .is_some_and(|dispatch| dispatch.is_pending()))
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "instance power control is blocked by an unfinished hardware request".into(),
+        )
+        .into());
+    }
+
     // Log tenant organization ID
     if let Some(ref instance) = snapshot.instance {
         log_tenant_organization_id(instance.config.tenant.tenant_organization_id.as_str());
     }
 
-    let bmc_ip = snapshot
-        .host_snapshot
-        .status
-        .bmc_info
-        .ip
-        .as_ref()
-        .ok_or_else(|| CarbideError::NotFoundError {
-            kind: "bmc_ip",
-            id: machine_id.to_string(),
-        })?;
+    if queue_reboot && locked_instance.deleted.is_some() {
+        return Err(CarbideError::FailedPrecondition(
+            "cannot reboot a terminating instance".into(),
+        )
+        .into());
+    }
+
+    let bmc_ip =
+        snapshot
+            .host_snapshot
+            .status
+            .bmc_info
+            .ip
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "bmc_ip",
+                id: machine_id.to_string(),
+            })?;
 
     let run_provisioning_instructions_on_every_boot = snapshot
         .instance
@@ -1140,52 +1175,6 @@ pub(crate) async fn invoke_power(
                 .run_provisioning_instructions_on_every_boot
         })
         .unwrap_or_default();
-
-    // Determine if we should let the state machine handle the reboot.
-    // This is true when:
-    // 1. The machine is in Assigned/Ready state, AND
-    // 2. The instance needs to PXE boot (either always-PXE or explicit request)
-    //
-    // In this case, we set the custom_pxe_reboot_requested flag and return early.
-    // The Assigned/Ready handler will pick up the flag, verify boot order via
-    // HostPlatformConfiguration, and initiate the reboot.
-    //
-    // Otherwise, we issue a synchronous Redfish reboot directly.
-    // Determine how to handle the reboot based on the instance configuration and request.
-    //
-    // For custom PXE or always-PXE instances in Ready state, we use the state machine to
-    // verify boot order before rebooting. For regular reboots, we clear the use_custom_pxe_on_boot
-    // flag so the iPXE handler returns "exit" (boot from disk).
-    let use_state_machine_for_reboot = matches!(
-        snapshot.managed_state,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::Ready,
-        }
-    ) && (run_provisioning_instructions_on_every_boot
-        || request.boot_with_custom_ipxe);
-
-    if use_state_machine_for_reboot {
-        db::instance::set_custom_pxe_reboot_requested(&machine_id, true, &mut txn).await?;
-    }
-
-    if request.boot_with_custom_ipxe
-        && let Some(instance) = snapshot.instance.as_ref()
-        && instance.config.os.phone_home_enabled
-    {
-        db::instance::clear_phone_home_last_contact(&mut txn, instance.id).await?;
-    }
-
-    // For non-always-PXE instances, set use_custom_pxe_on_boot based on the request.
-    // This tells the iPXE handler whether to serve the custom script or return "exit".
-    // If we are using the state machine for a custom pxe reboot, let the state machine set the use_custom_ipxe_on_next_boot flag.
-    if !use_state_machine_for_reboot && !run_provisioning_instructions_on_every_boot {
-        db::instance::use_custom_ipxe_on_next_boot(
-            &machine_id,
-            request.boot_with_custom_ipxe,
-            &mut txn,
-        )
-        .await?;
-    }
 
     // Check if reprovision is requested.
     // TODO: multidpu: Fix it for multiple dpus.
@@ -1242,51 +1231,125 @@ pub(crate) async fn invoke_power(
         }
     }
 
+    // Reprovision approval owns the reboot, but must preserve any requested
+    // tenant script for the existing provisioning continuation.
+    let custom_pxe = run_provisioning_instructions_on_every_boot || request.boot_with_custom_ipxe;
+    let ready = matches!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        }
+    );
+    let needs_boot_order_verification = ready && custom_pxe;
+    if needs_boot_order_verification {
+        db::instance::set_custom_pxe_reboot_requested(&machine_id, true, &mut txn).await?;
+    }
+    if request.boot_with_custom_ipxe
+        && let Some(instance) = snapshot.instance.as_ref()
+        && instance.config.os.phone_home_enabled
+    {
+        db::instance::clear_phone_home_last_contact(&mut txn, instance.id).await?;
+    }
+    if !needs_boot_order_verification && !run_provisioning_instructions_on_every_boot {
+        db::instance::use_custom_ipxe_on_next_boot(
+            &machine_id,
+            request.boot_with_custom_ipxe,
+            &mut txn,
+        )
+        .await?;
+    }
+
+    // Pre-Ready custom PXE retains its existing synchronous path. It must not
+    // additionally reserve an ordinary reboot to run after provisioning reaches Ready.
+    let ordinary_reboot = !reprovision_handled && !needs_boot_order_verification && !custom_pxe;
+    let immediate_reboot =
+        !reprovision_handled && !needs_boot_order_verification && (!queue_reboot || custom_pxe);
+    if ordinary_reboot && queue_reboot {
+        if snapshot
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.custom_pxe_reboot_requested)
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "cannot queue an ordinary reboot while a custom PXE reboot is pending".into(),
+            )
+            .into());
+        }
+        if matches!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Failed { .. },
+            }
+        ) {
+            return Err(CarbideError::FailedPrecondition(
+                "cannot queue a reboot while instance provisioning has failed".into(),
+            )
+            .into());
+        }
+        if !matches!(snapshot.managed_state, ManagedHostState::Assigned { .. })
+            || snapshot.host_snapshot.reset_requested.is_some()
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "cannot queue an instance reboot during host reset or deletion".into(),
+            )
+            .into());
+        }
+        if !ready {
+            return Err(CarbideError::FailedPrecondition(
+                "cannot queue an instance reboot until provisioning is ready".into(),
+            )
+            .into());
+        }
+        let bmc = &snapshot.host_snapshot.status.bmc_info;
+        bmc.mac.ok_or_else(|| CarbideError::NotFoundError {
+            kind: "bmc_mac",
+            id: machine_id.to_string(),
+        })?;
+        db::hardware_dispatch::begin(
+            &mut txn,
+            uuid::Uuid::new_v4(),
+            &model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot {
+                machine_id,
+                instance_id,
+                bmc: bmc.clone(),
+                last_attempt_at: None,
+                reconcile_after: None,
+            },
+        )
+        .await?;
+    }
+
     txn.commit().await?;
-
-    if reprovision_handled {
-        // Host will reboot once DPU reprovisioning is successfully finished.
-        return Ok(Response::new(rpc::InstancePowerResult {}));
-    }
-
-    // If using state machine for reboot, return early. The flag was set above and the
-    // Assigned/Ready handler will pick it up, verify BIOS boot order, and initiate the reboot.
-    if use_state_machine_for_reboot {
-        tracing::info!(
-            machine_id = %machine_id,
-            run_provisioning_instructions_on_every_boot,
-            boot_with_custom_ipxe = request.boot_with_custom_ipxe,
-            "Delegating reboot to state machine for boot order verification"
-        );
-        return Ok(Response::new(rpc::InstancePowerResult {}));
-    }
-
-    let bmc_mac_address =
-        snapshot
-            .host_snapshot
-            .status
-            .bmc_info
-            .mac
-            .ok_or_else(|| CarbideError::NotFoundError {
+    if immediate_reboot {
+        // Keep the existing synchronous path until queued reboot recovery is available.
+        let bmc_mac_address = snapshot.host_snapshot.status.bmc_info.mac.ok_or_else(|| {
+            CarbideError::NotFoundError {
                 kind: "bmc_mac",
                 id: machine_id.to_string(),
-            })?;
-
-    // TODO: The API call should maybe not directly trigger the reboot
-    // but instead queue it for the state handler. That will avoid racing
-    // with other internal reboot requests from the state handler.
-    let bmc = api
-        .connect_bmc(&BmcAccessInfo {
-            host: bmc_ip.to_string(),
-            port: snapshot.host_snapshot.status.bmc_info.port,
-            mac_address: bmc_mac_address,
-        })
-        .await?;
-    async { bmc.power()?.set(ResetType::ForceRestart).await }
-        .await
-        .map_err(|e: PlatformError| {
-            CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}"))
+            }
         })?;
+        let bmc = api
+            .connect_bmc(&BmcAccessInfo {
+                host: bmc_ip.to_string(),
+                port: snapshot.host_snapshot.status.bmc_info.port,
+                mac_address: bmc_mac_address,
+            })
+            .await?;
+        async { bmc.power()?.set(ResetType::ForceRestart).await }
+            .await
+            .map_err(|error: PlatformError| {
+                CarbideError::internal(format!("failed redfish ForceRestart subtask: {error}"))
+            })?;
+    } else if ordinary_reboot {
+        // Acceptance is durable; periodic scanning also recovers a failed wakeup.
+        if let Err(error) = api
+            .machine_state_handler_enqueuer
+            .enqueue_object(&machine_id)
+            .await
+        {
+            tracing::warn!(%machine_id, %error, "Failed to enqueue managed host after recording instance reboot request");
+        }
+    }
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }
@@ -1314,7 +1377,7 @@ pub(crate) async fn update_operating_system(
 
     let instance = db::instance::find_by_id(&mut txn, instance_id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1342,7 +1405,7 @@ pub(crate) async fn update_operating_system(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -1431,7 +1494,7 @@ pub(crate) async fn update_instance_config(
         // implicit optimistic token rather than silently rebasing.
         let request_start_instance = db::instance::find_by_id(&mut txn, instance_id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
             })?;
@@ -1447,7 +1510,7 @@ pub(crate) async fn update_instance_config(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;
@@ -1474,7 +1537,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1547,7 +1610,7 @@ pub(crate) async fn update_instance_config(
     // requires overlap admission here.
     let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         // No resource locks precede this wait. Reload the retained networks,
         // but keep the request's original version rather than rebasing it.
         mh_snapshot = db::managed_host::load_snapshot(
@@ -1556,7 +1619,7 @@ pub(crate) async fn update_instance_config(
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
@@ -1565,7 +1628,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1612,8 +1675,27 @@ pub(crate) async fn update_instance_config(
         {
             return Err(CarbideError::FailedPrecondition(format!(
                 "NetworkSecurityGroup `{}` does not exist or is not owned by tenant `{}`",
-                nsg_id,
-                tenant_org.clone(),
+                nsg_id, tenant_org,
+            ))
+            .into());
+        }
+    }
+
+    if let Some(ref id) = config.dhcp_option_set_id {
+        let tenant_org = &config.tenant.tenant_organization_id;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
             ))
             .into());
         }
@@ -1786,7 +1868,7 @@ pub(crate) async fn update_instance_config(
     if ib_config_update_requested {
         let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
             })?;
@@ -1823,7 +1905,7 @@ pub(crate) async fn update_instance_config(
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
@@ -1836,7 +1918,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1860,8 +1942,14 @@ pub(crate) async fn update_instance_config(
     // Checks if the instance IB configuration was updated
     // If yes - assign devices (GUIDs) to the new configuration, update
     // the database and increment the IB version number
-    update_instance_infiniband_config(&mh_snapshot, instance, &mut config.infiniband, &mut txn)
-        .await?;
+    update_instance_infiniband_config(
+        &mh_snapshot,
+        instance,
+        &mut config.infiniband,
+        &mut txn,
+        &api.instrumentation,
+    )
+    .await?;
 
     tracing::debug!(
         instance_id = %instance.id,
@@ -1894,7 +1982,7 @@ pub(crate) async fn update_instance_config(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -1914,7 +2002,7 @@ async fn update_instance_network_config(
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
     vf_inventory_source: crate::instance::InstanceVfInventorySource,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
@@ -2072,7 +2160,7 @@ async fn update_instance_network_config(
 /// rejects only new host/service VPC conflicts so previously accepted bindings remain updateable.
 async fn validate_service_vpc_tenant_overlap(
     api: &Api,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance: &InstanceSnapshot,
     requested_network: &InstanceNetworkConfig,
 ) -> Result<(), CarbideError> {
@@ -2089,13 +2177,13 @@ async fn validate_service_vpc_tenant_overlap(
     db::instance_address::lock_table_for_allocation(txn.as_mut()).await?;
     let locked = db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance.id.to_string(),
         })?;
     let locked_snapshot = db::instance::find_by_id(txn.as_mut(), instance.id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance.id.to_string(),
         })?;
@@ -2145,7 +2233,7 @@ async fn validate_service_vpc_tenant_overlap(
 /// allocation validator without this earlier check.
 async fn validate_primary_address_update_intent_before_resource_reuse(
     network: &InstanceNetworkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let requested_prefixes: Vec<(VpcPrefixId, IpAddr)> = network
         .interfaces
@@ -2227,7 +2315,7 @@ async fn validate_primary_address_update_intent_before_resource_reuse(
 }
 
 async fn validate_auto_inband_segment_vpc_bindings(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     mh_snapshot: &ManagedHostStateSnapshot,
     inband_segment_ids: &[NetworkSegmentId],
     requested_vpc_id: VpcId,
@@ -2266,7 +2354,8 @@ async fn update_instance_infiniband_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     ib_config: &mut InstanceInfinibandConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2289,6 +2378,7 @@ async fn update_instance_infiniband_config(
         txn,
         &instance.config.tenant.tenant_organization_id,
         ib_config,
+        instrumentation,
     )
     .await?;
 
@@ -2297,8 +2387,12 @@ async fn update_instance_infiniband_config(
 
     *ib_config = ib_config_with_ports;
 
-    let pkeys =
-        load_ib_partition_pkeys(txn.as_mut(), &[&instance.config.infiniband, &*ib_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.config.infiniband, &*ib_config],
+        instrumentation,
+    )
+    .await?;
     let current_memberships = ib_memberships_from_config(&instance.config.infiniband, &pkeys);
     let requested_memberships = ib_memberships_from_config(ib_config, &pkeys);
 
@@ -2523,13 +2617,15 @@ pub(super) fn snapshot_to_optional_instance(
 pub(super) async fn record_force_delete_retired_ib_memberships(
     txn: &mut PgConnection,
     instance_id: InstanceId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     let instance = db::instance::find_by_id(&mut *txn, instance_id)
         .await?
         .ok_or_else(|| {
             CarbideError::internal(format!("could not find an instance for {instance_id}"))
         })?;
-    let pkeys = load_ib_partition_pkeys(txn, &[&instance.config.infiniband]).await?;
+    let pkeys =
+        load_ib_partition_pkeys(txn, &[&instance.config.infiniband], instrumentation).await?;
     for membership in ib_memberships_from_config(&instance.config.infiniband, &pkeys) {
         db::retired_ib_membership::record(txn, &membership).await?;
     }
@@ -2584,7 +2680,7 @@ pub(super) async fn force_delete_instance(
     // Admin. Recheck after external cleanup, with the Machine row locked so
     // neither the requested wait nor the network configuration can change.
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     if db::instance::find_by_id(&mut txn, instance_id)
         .await?
         .is_none()
@@ -2608,7 +2704,7 @@ pub(super) async fn force_delete_instance(
         },
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: instance.machine_id.to_string(),
     })?;
@@ -2618,7 +2714,7 @@ pub(super) async fn force_delete_instance(
         LoadSnapshotOptions::default(),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: instance.machine_id.to_string(),
     })?;
@@ -2699,7 +2795,7 @@ async fn update_instance_nvlink_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     nvlcfg: &InstanceNvLinkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2740,7 +2836,7 @@ async fn update_instance_spx_config(
     instance: &InstanceSnapshot,
     spxcfg: &mut InstanceSpxConfig,
     partial_multiplane_enabled: bool,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let mid = instance.machine_id;
 
@@ -2851,27 +2947,16 @@ async fn unbind_all_instance_ib_ports(
         return Ok(0);
     }
 
-    // Get the infiniband info from UFM, being careful not to call UFM while holding an open db
-    // transaction.
-    // First, look up the pkey in the database for each partition ID, in one transaction
-    let pkeys_with_guids_to_unbind: Vec<(u16, Vec<String>)> = api
-        .with_txn(|txn| {
-            async move {
-                let mut result = Vec::with_capacity(ib_config_map.len());
-                for (ib_partition_id, guids) in ib_config_map.into_iter() {
-                    if let Some(pkey) =
-                        db::ib_partition::find_pkey_by_partition_id(txn, ib_partition_id).await?
-                    {
-                        result.push((pkey, guids))
-                    }
-                }
-                Ok::<_, DatabaseError>(result)
-            }
-            .boxed()
-        })
-        .await??;
+    let mut pkeys_with_guids_to_unbind = Vec::with_capacity(ib_config_map.len());
+    for (ib_partition_id, guids) in ib_config_map {
+        if let Some(pkey) =
+            db::ib_partition::find_pkey_by_partition_id(api.pg_pool(), ib_partition_id).await?
+        {
+            pkeys_with_guids_to_unbind.push((pkey, guids));
+        }
+    }
 
-    // Then, tell UFM to unbind the port for each pkey we found
+    // Tell UFM to unbind the port for each pkey we found.
     let ib_fabric = api
         .ib_fabric_manager
         .new_client(model::ib::DEFAULT_IB_FABRIC_NAME)
@@ -2890,8 +2975,7 @@ async fn unbind_all_instance_ib_ports(
 trait HydrateFromDeprecatedFields {
     fn needs_hydration_from_deprecated_fields(&self) -> bool;
 
-    async fn hydrate_from_deprecated_fields(&mut self, txn: &mut PgConnection)
-    -> CarbideResult<()>;
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()>;
 }
 
 #[async_trait::async_trait]
@@ -2912,10 +2996,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
             .is_none_or(|c| c.vpc_id.is_none())
     }
 
-    async fn hydrate_from_deprecated_fields(
-        &mut self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<()> {
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()> {
         let Some(netconf) = self.config.as_mut().and_then(|c| c.network.as_mut()) else {
             // Conversion to model type will fail, return Ok
             return Ok(());
@@ -2932,7 +3013,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
         );
 
         let ns_id = match db::network_segment::find_ids_by_machine_id(
-            txn,
+            pool,
             &machine_id,
             Some(NetworkSegmentType::HostInband),
         )
@@ -2955,7 +3036,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
         };
 
         let maybe_vpc_id = match db::network_segment::find_by(
-            txn,
+            &mut PgPoolReader::from(pool.clone()),
             ObjectColumnFilter::One(db::network_segment::IdColumn, &ns_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -2988,12 +3069,9 @@ impl HydrateFromDeprecatedFields for rpc::BatchInstanceAllocationRequest {
             .any(|req| req.needs_hydration_from_deprecated_fields())
     }
 
-    async fn hydrate_from_deprecated_fields(
-        &mut self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<()> {
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()> {
         for req in self.instance_requests.iter_mut() {
-            req.hydrate_from_deprecated_fields(txn).await?;
+            req.hydrate_from_deprecated_fields(pool).await?;
         }
         Ok(())
     }

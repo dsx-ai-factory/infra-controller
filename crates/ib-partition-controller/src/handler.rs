@@ -21,15 +21,22 @@ use carbide_ib_fabric::ib::{
     GetPartitionOptions, IBFabric, IBFabricManager, IBFabricManagerConfig,
 };
 use carbide_instrument::{Event, LabelValue};
+use carbide_resource_pool::{
+    AllocationOwnerIds, IntegratedAllocationOwner, ResourcePoolBackendError,
+    ResourcePoolRegistryError,
+};
 use carbide_uuid::infiniband::IBPartitionId;
+use db::TransactionVending as _;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBQosConf};
-use model::ib_partition::{IBPartition, IBPartitionControllerState, IBPartitionStatus};
+use model::ib_partition::{
+    IBPartition, IBPartitionControllerState, IBPartitionStatus, PKEY_ALLOCATION_SLOT, PartitionKey,
+};
 use state_controller::CheckApplied;
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use crate::context::IBPartitionStateHandlerContextObjects;
+use crate::context::{IBPartitionStateHandlerContextObjects, IBPartitionStateHandlerServices};
 use crate::ufm_error;
 
 /// The controller states in which a persisted partition must already have a
@@ -158,7 +165,12 @@ impl StateHandler for IBPartitionStateHandler {
                                     // this partition. This prevents deleting a partition that
                                     // instances still depend on, which would cause errors when
                                     // the instance state handler tries to unbind ports.
-                                    let mut txn = ctx.services.db_pool.begin().await?;
+                                    let mut txn = ctx
+                                        .services
+                                        .db_pool
+                                        .txn_begin()
+                                        .await
+                                        .map_err(StateHandlerError::from_transaction)?;
                                     db::ib_partition::lock_for_delete(&mut txn, *partition_id)
                                         .await?
                                         .check_applied()?;
@@ -183,26 +195,13 @@ impl StateHandler for IBPartitionStateHandler {
                                         .with_txn(txn));
                                     }
 
-                                    let pkey_pool = ctx
-                                        .services
-                                        .ib_pools
-                                        .pkey_pools
-                                        .get(DEFAULT_IB_FABRIC_NAME)
-                                        .ok_or_else(|| {
-                                            let error = eyre::eyre!(
-                                                "pkey pool for fabric \"{DEFAULT_IB_FABRIC_NAME}\" was not found"
-                                            );
-                                            ufm_error("release_pkey", error)
-                                        })?;
-
-                                    db::ib_partition::delete_and_release_pkey(
+                                    delete_and_release_pkey(
+                                        ctx.services,
                                         *partition_id,
                                         pkey,
-                                        pkey_pool,
                                         &mut txn,
                                     )
-                                    .await?
-                                    .check_applied()?;
+                                    .await?;
                                     Ok(StateHandlerOutcome::deleted().with_txn(txn))
                                 }
                                 _ => Err(ufm_error("get_ib_network", e.into())),
@@ -288,9 +287,19 @@ impl StateHandler for IBPartitionStateHandler {
                                     Ok(())
                                 };
 
-                                let mut txn = ctx.services.db_pool.begin().await?;
-                                db::ib_partition::update_status(state.id, &state.status, &mut txn)
-                                    .await?;
+                                let mut txn = ctx
+                                    .services
+                                    .db_pool
+                                    .txn_begin()
+                                    .await
+                                    .map_err(StateHandlerError::from_transaction)?;
+                                db::ib_partition::update_status(
+                                    state.id,
+                                    &state.status,
+                                    &mut txn,
+                                    &ctx.services.instrumentation,
+                                )
+                                .await?;
 
                                 if let Err(e) = ib_result {
                                     return Ok(StateHandlerOutcome::transition(
@@ -335,6 +344,64 @@ impl StateHandler for IBPartitionStateHandler {
     }
 }
 
+/// Delete the drained partition and end ownership of its original PKey together.
+async fn delete_and_release_pkey(
+    services: &IBPartitionStateHandlerServices,
+    partition_id: IBPartitionId,
+    pkey: PartitionKey,
+    txn: &mut db::Transaction<'_>,
+) -> Result<(), StateHandlerError> {
+    let pkey_pool = services
+        .ib_pools
+        .pkey_pools
+        .get(DEFAULT_IB_FABRIC_NAME)
+        .ok_or_else(|| {
+            ufm_error(
+                "release_pkey",
+                eyre::eyre!("pkey pool for fabric \"{DEFAULT_IB_FABRIC_NAME}\" was not found"),
+            )
+        })?;
+    // Roll back deletion if releasing the PKey fails, even when the caller
+    // commits other work in its transaction.
+    let mut inner_txn = db::Transaction::begin_inner(txn).await?;
+    db::ib_partition::delete_if_pkey(partition_id, pkey, &mut inner_txn)
+        .await?
+        .check_applied()?;
+    // The UUID and `status.pkey` check identifies the partition whose recorded
+    // allocation owner we can release, even after a rename. The
+    // `unique_ib_partition_status_pkey` index prevents another partition from
+    // committing that value until this deletion and release commit together.
+    let entity_id = partition_id.to_string();
+    services
+        .resource_pool_registry
+        .release_value(
+            pkey_pool,
+            &mut inner_txn,
+            u16::from(pkey),
+            model::resource_pool::OwnerType::IBPartition,
+            AllocationOwnerIds {
+                entity_id: &entity_id,
+                integrated_owner: IntegratedAllocationOwner::Recorded,
+            },
+            PKEY_ALLOCATION_SLOT,
+        )
+        .await
+        .map_err(pkey_release_error)?;
+    inner_txn.commit().await?;
+    Ok(())
+}
+
+/// Preserve the controller's database error category for binding and release SQL.
+fn pkey_release_error(error: ResourcePoolBackendError) -> StateHandlerError {
+    match error {
+        ResourcePoolBackendError::Database(error)
+        | ResourcePoolBackendError::Registry(ResourcePoolRegistryError::Database(error)) => {
+            error.into()
+        }
+        error => StateHandlerError::GenericError(error.into()),
+    }
+}
+
 /// Builds the UFM client for the state-handling arms that talk to the fabric
 /// manager.
 ///
@@ -370,7 +437,6 @@ mod tests {
     use state_controller::db_write_batch::DbWriteBatch;
 
     use super::*;
-    use crate::context::IBPartitionStateHandlerServices;
 
     /// Runs one `handle_object_state` call against counting fakes and returns
     /// how many UFM clients were built alongside the handler outcome.
@@ -380,16 +446,18 @@ mod tests {
     async fn run_handler(
         controller_state: IBPartitionControllerState,
         mut partition: IBPartition,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> (
         usize,
         Result<StateHandlerOutcome<IBPartitionControllerState>, StateHandlerError>,
     ) {
         let manager = Arc::new(CountingFabricManager::new());
         let mut services = IBPartitionStateHandlerServices {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: instrumentation.clone(),
             db_pool: PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
                 .expect("lazy pool"),
             ib_fabric_manager: manager.clone(),
+            resource_pool_registry: Arc::default(),
             ib_pools: IbPools {
                 pkey_pools: Arc::new(HashMap::new()),
             },
@@ -397,6 +465,8 @@ mod tests {
         let mut metrics = ();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + state_controller::config::IterationConfig::default().max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,
@@ -437,13 +507,17 @@ mod tests {
         };
         let partition = make_partition(None, false);
         let partition_id = partition.id.to_string();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("test runtime");
         let mut handler_result = None;
         let logs = capture_logs(|| {
-            handler_result = Some(runtime.block_on(run_handler(controller_state, partition)));
+            handler_result = Some(runtime.block_on(run_handler(
+                controller_state,
+                partition,
+                metrics.instrumentation(),
+            )));
         });
 
         let (builds, outcome) = handler_result.expect("handler ran");
@@ -520,6 +594,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Provisioning,
             make_partition(Some(0x101), false),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -540,6 +615,7 @@ mod tests {
                 cause: "some earlier failure".to_string(),
             },
             make_partition(Some(0x101), false),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -552,6 +628,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Ready,
             make_partition(Some(0x101), true),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 
@@ -570,6 +647,7 @@ mod tests {
         let (builds, outcome) = run_handler(
             IBPartitionControllerState::Deleting,
             make_partition(Some(0x101), true),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
 

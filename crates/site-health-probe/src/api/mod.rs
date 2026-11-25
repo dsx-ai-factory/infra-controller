@@ -40,7 +40,7 @@ use carbide_site_health_probe_api::{
     Family, Filter, MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo,
     TenantAllocation, Unit, UnitType, UnitsQuery, UnitsResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +51,12 @@ use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
 use crate::state_metrics::{Series, data_of, family_series, units_of, unix_seconds};
+
+/// `at` at the precision of the published sweep times, so a client gets the
+/// stored value back from the API time.
+fn api_time(at: SystemTime) -> DateTime<Utc> {
+    DateTime::<Utc>::from(at).trunc_subsecs(3)
+}
 
 /// Units per page unless the client asks for fewer.
 const DEFAULT_LIMIT: u32 = 100;
@@ -97,6 +103,9 @@ impl ApiState {
                 intervals.insert(family, readers.rest_inventory.interval);
             }
         }
+        if readers.nico_config.enabled {
+            intervals.insert(Family::ConfigNicoApi, readers.nico_config.interval);
+        }
         let metrics = state.metrics.as_ref().map(|metrics| MetricsInfo {
             contract_version: CONTRACT_VERSION,
             selector: metrics.selector.clone(),
@@ -106,7 +115,9 @@ impl ApiState {
             reader_intervals_seconds: intervals
                 .iter()
                 .filter(|(family, _)| {
-                    if DEVICE_FAMILIES.contains(family) {
+                    if **family == Family::ConfigNicoApi {
+                        readers.nico_config.enabled
+                    } else if DEVICE_FAMILIES.contains(family) {
                         readers.devices.enabled
                     } else {
                         readers.rest_inventory.enabled
@@ -124,12 +135,44 @@ impl ApiState {
                 && state.rest.fixture.is_none(),
             intervals,
             caps: Capabilities {
+                nico_config: readers.nico_config.enabled,
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
                 rest_fixture: readers.rest_inventory.enabled
                     && (state.rest.tenant.is_some() || state.rest.fixture.is_some()),
             },
             metrics,
         }
+    }
+
+    fn check_firmware(&self, needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
+        if !needs.contains(&Need::Firmware) {
+            return Ok(());
+        }
+        let unavailable = || ApiError::no_complete_sweep(Family::Host);
+        let config = crate::readers::nico_config::current(&self.store).ok_or_else(unavailable)?;
+        let content = crate::readers::nico_config::data(config.as_ref()).ok_or_else(unavailable)?;
+        let data = units_of(snap)
+            .filter(|d| d.compact_host_read)
+            .ok_or_else(unavailable)?;
+        let pinned = data.firmware_config.as_ref().ok_or_else(unavailable)?;
+        if pinned.revision != content.revision
+            || pinned.read_start > pinned.read_at
+            || snap.meta().process != config.meta().process
+            || !crate::readers::nico_config::fresh(
+                snap.meta(),
+                self.intervals
+                    .get(&Family::Host)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+            || self
+                .store
+                .last_attempt(Family::Host)
+                .is_none_or(|a| a.failure.is_some())
+        {
+            return Err(unavailable());
+        }
+        Ok(())
     }
 
     fn interval_seconds(&self, family: Family) -> f64 {
@@ -156,12 +199,13 @@ impl ApiState {
         let meta = snap.meta();
         let attempt = self.store.last_attempt(family);
         SweepInfo {
+            firmware_config: units_of(snap).and_then(|d| d.firmware_config.clone()),
             last_attempt_succeeded: attempt.as_ref().map(|a| a.failure.is_none()),
             last_attempt_error: attempt.and_then(|a| a.failure).map(|(_, e)| e),
             snapshot_id: meta.snapshot_id(),
             family,
-            sweep_start: DateTime::<Utc>::from(meta.start),
-            read_at: DateTime::<Utc>::from(meta.end),
+            sweep_start: api_time(meta.start),
+            read_at: api_time(meta.end),
             sweep_age_seconds: age_seconds(meta.end),
             sweep_interval_seconds: self.interval_seconds(family),
         }
@@ -170,8 +214,8 @@ impl ApiState {
     fn read_info(&self, family: Family, snap: &dyn AnySnapshot) -> ReadInfo {
         let meta = snap.meta();
         ReadInfo {
-            read_start: DateTime::<Utc>::from(meta.start),
-            read_at: DateTime::<Utc>::from(meta.end),
+            read_start: api_time(meta.start),
+            read_at: api_time(meta.end),
             read_age_seconds: age_seconds(meta.end),
             read_interval_seconds: self.interval_seconds(family),
             last_attempt_error: self
@@ -375,6 +419,7 @@ fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiErro
 fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
     for need in needs {
         match need {
+            Need::Firmware => {}
             Need::RestTotal(resource) => {
                 let available = data_of::<RestTotalsData>(snap)
                     .and_then(|d| d.totals.get(resource).copied())
@@ -454,6 +499,7 @@ async fn count(
         ));
     }
     let snap = api.current(spec.family)?;
+    api.check_firmware(&spec.needs, snap.as_ref())?;
     check_needs(&spec.needs, snap.as_ref())?;
     Ok(Json(CountResponse {
         count: count_series(&spec, snap.as_ref()),
@@ -528,6 +574,7 @@ fn list_units(api: &ApiState, filter: &Filter, page: Page) -> Result<UnitsRespon
         }
         None => (api.current(spec.family)?, None),
     };
+    api.check_firmware(&spec.needs, snap.as_ref())?;
     check_needs(&spec.needs, snap.as_ref())?;
     let all = units_of(snap.as_ref()).map_or(&[][..], |data| data.units.as_slice());
 
@@ -623,11 +670,9 @@ async fn units_query(
 }
 
 /// `/v1/config` parameters. `instanceType` selects the tenant allocation.
-/// Firmware targets wait for their tests (#8154): accepted, so client
-/// filters stay valid, while `nicoApi` stays null.
+/// Firmware filters apply only to the optional native config reader.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[expect(dead_code, reason = "no config reader serves the firmware filters yet")]
 struct ConfigQuery {
     vendor: Option<String>,
     model: Option<String>,
@@ -640,7 +685,50 @@ async fn config(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<ConfigResponse>, ApiError> {
     let (query, _) = split_query(raw.as_deref(), &[])?;
-    let query: ConfigQuery = parse_query(&query)?;
+    let mut query: ConfigQuery = parse_query(&query)?;
+    query.vendor = query
+        .vendor
+        .as_deref()
+        .map(carbide_site_health_probe_api::metrics::normalize_vendor);
+    let firmware_filter =
+        query.vendor.is_some() || query.model.is_some() || query.component.is_some();
+    let nico_api = if api.caps.nico_config {
+        match api.store.current(Family::ConfigNicoApi) {
+            Some(snap) => {
+                let data = crate::readers::nico_config::data(snap.as_ref())
+                    .ok_or_else(|| ApiError::no_complete_sweep(Family::ConfigNicoApi))?;
+                Some(carbide_site_health_probe_api::ConfigNicoApi {
+                    read: api.read_info(Family::ConfigNicoApi, snap.as_ref()),
+                    revision: Some(data.revision),
+                    runtime: data.runtime.clone(),
+                    site_explorer: None,
+                    firmware_targets: data
+                        .firmware_targets
+                        .iter()
+                        .filter(|t| {
+                            query.vendor.as_ref().is_none_or(|v| v == &t.vendor)
+                                && query.model.as_ref().is_none_or(|m| m == &t.model)
+                                && query.component.is_none_or(|c| c == t.component)
+                        })
+                        .cloned()
+                        .collect(),
+                })
+            }
+            None if firmware_filter => {
+                return Err(ApiError::no_complete_sweep(Family::ConfigNicoApi));
+            }
+            None => None,
+        }
+    } else {
+        if firmware_filter {
+            return Err(ApiError::unprocessable(
+                ErrorCode::FieldUnavailable,
+                Some("component"),
+                "native config reader is disabled".into(),
+            ));
+        }
+        None
+    };
     // The inventory reader's site check, with its own read times. No config
     // filter applies to it. With the reader off there is no check to wait
     // for: `restSite` is null, not an unknown check.
@@ -657,7 +745,7 @@ async fn config(
         None
     };
     Ok(Json(ConfigResponse {
-        nico_api: None,
+        nico_api,
         rest: api.store.current(Family::ConfigRest).and_then(|snap| {
             let allocation = data_of::<TenantAllocation>(snap.as_ref())?;
             if query

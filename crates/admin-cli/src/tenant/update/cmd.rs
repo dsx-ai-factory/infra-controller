@@ -40,7 +40,7 @@ pub(super) async fn update(
         })
         .await?
         .tenant
-        .ok_or(CarbideCliError::TenantNotFound(id.clone()))?;
+        .ok_or_else(|| CarbideCliError::TenantNotFound(id.clone()))?;
 
     // Core treats the profile as a replacement, so an omitted CLI flag must preserve it.
     // Match the fetched version to avoid restoring stale tenant state after a concurrent update.

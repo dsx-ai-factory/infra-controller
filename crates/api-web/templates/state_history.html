@@ -3,10 +3,15 @@
 {% block title %}{{ object_type }} State History {{ id }}{% endblock %}
 
 {% block content %}
-<div id="json"><a href="/admin/{{ object_url_path }}/{{ id }}/state-history.json">JSON</a></div>
-
-<h1>{{ object_type }} State History <a href="/admin/{{ object_url_path }}/{{ id }}">{{ id }}</a></h1>
+<div class="detail-page">
+<div class="entity-title-row">
+	<h1 class="entity-title">
+		<span class="entity-title-label">{{ object_type }} State History</span>
+		<a href="/admin/{{ object_url_path }}/{{ id }}"><code>{{ id }}</code></a>
+	</h1>
+	<div id="json"><a href="/admin/{{ object_url_path }}/{{ id }}/state-history.json">JSON</a></div>
+</div>
 
 {{ history|safe }}
-
+</div>
 {% endblock %}

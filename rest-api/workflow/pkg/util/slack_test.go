@@ -4,6 +4,7 @@
 package util
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func TestSlackClient_sendHttpRequest(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		// Mock response writes are best-effort if the client closes the connection.
-		_, _ = w.Write([]byte("ok"))
+		_, _ = io.WriteString(w, "ok")
 	}))
 
 	tests := []struct {

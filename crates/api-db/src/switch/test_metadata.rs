@@ -21,12 +21,13 @@ use model::metadata::Metadata;
 use model::switch::{NewSwitch, SwitchConfig};
 
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn test_switch_metadata_defaults(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {
@@ -59,7 +60,7 @@ async fn test_switch_metadata_defaults(
 async fn test_switch_metadata_from_expected(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let expected_metadata = Metadata {
@@ -88,7 +89,10 @@ async fn test_switch_metadata_from_expected(
 
     assert_eq!(switch.metadata.name, "My Switch");
     assert_eq!(switch.metadata.description, "Top-of-rack switch");
-    assert_eq!(switch.metadata.labels.get("role"), Some(&"tor".to_string()));
+    assert_eq!(
+        switch.metadata.labels.get("role").map(String::as_str),
+        Some("tor")
+    );
 
     txn.rollback().await?;
     Ok(())
@@ -96,7 +100,7 @@ async fn test_switch_metadata_from_expected(
 
 #[crate::sqlx_test]
 async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {
@@ -136,8 +140,12 @@ async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     assert_eq!(updated_switch.metadata.name, "Updated Switch");
     assert_eq!(updated_switch.metadata.description, "Updated description");
     assert_eq!(
-        updated_switch.metadata.labels.get("team"),
-        Some(&"network".to_string())
+        updated_switch
+            .metadata
+            .labels
+            .get("team")
+            .map(String::as_str),
+        Some("network")
     );
     assert_eq!(updated_switch.version.version_nr(), 2);
 
@@ -149,7 +157,7 @@ async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 async fn test_switch_metadata_version_conflict(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
 
     let new_switch = NewSwitch {

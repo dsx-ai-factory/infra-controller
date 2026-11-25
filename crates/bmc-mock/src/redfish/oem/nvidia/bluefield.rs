@@ -140,13 +140,17 @@ async fn get_oem_nvidia<C: Callbacks>(
     };
     use crate::redfish::schema::nvidia_computer_system::{Mode, NvidiaComputerSystem};
     let model = match &state {
-        BluefieldState::Bluefield3 { base_mac, .. } => NvidiaComputerSystem::new()
-            .mode(if state.nic_mode() {
-                Mode::NicMode
-            } else {
-                Mode::DpuMode
-            })
-            .base_mac(base_mac.to_string().replace(":", "")),
+        BluefieldState::Bluefield3 { base_mac, .. } => {
+            let mut base_mac = base_mac.to_string();
+            base_mac.retain(|character| character != ':');
+            NvidiaComputerSystem::new()
+                .mode(if state.nic_mode() {
+                    Mode::NicMode
+                } else {
+                    Mode::DpuMode
+                })
+                .base_mac(base_mac)
+        }
         BluefieldState::Bluefield4 => NvidiaComputerSystem::new(),
     };
     // This complex OEM resource carries an URI but no Id or Name on BlueField.

@@ -130,7 +130,7 @@ impl From<ExploredManagedHost> for rpc::site_explorer::ExploredManagedHost {
             dpu_bmc_ip: host
                 .dpus
                 .first()
-                .map_or("".to_string(), |d| d.bmc_ip.to_string()),
+                .map_or_else(String::new, |d| d.bmc_ip.to_string()),
             host_pf_mac_address: host
                 .dpus
                 .first()
@@ -282,12 +282,13 @@ impl From<EthernetInterface> for rpc::site_explorer::EthernetInterface {
 
 impl From<Chassis> for rpc::site_explorer::Chassis {
     fn from(chassis: Chassis) -> Self {
+        let serial_number = chassis.inventory_serial_number().map(str::to_owned);
         rpc::site_explorer::Chassis {
             id: chassis.id,
             manufacturer: chassis.manufacturer,
             model: chassis.model,
             part_number: chassis.part_number,
-            serial_number: chassis.serial_number,
+            serial_number,
             network_adapters: chassis
                 .network_adapters
                 .into_iter()
@@ -488,6 +489,25 @@ mod tests {
 
     const MACHINE_ID: &str = "fm100htv4fu8fpktl0e0qrg4dl58g2bc2g7naq0l6c15ruc22po1i5rfsq0";
     const NO_TIMESTAMP: &str = "no timestamp available";
+
+    #[test]
+    fn chassis_assembly_serial_survives_rpc_projection_of_new_and_legacy_reports() {
+        // Older stored reports already carry the selected tray serial on the chassis.
+        for json in [
+            serde_json::json!({"Id": "Chassis_0", "SerialNumber": "TRAY"}),
+            serde_json::json!({"Id": "Chassis_0", "SerialNumber": "BOARD", "Assemblies": [
+                {"MemberId": "1", "Model": "P5859 B01", "SerialNumber": "BOARD"},
+                {"MemberId": "0", "Model": "P4107", "SerialNumber": " TRAY "},
+            ]}),
+            serde_json::json!({"Id": "Chassis_0", "SerialNumber": " TRAY ", "Assemblies": [
+                {"MemberId": "0", "Model": "P4107", "SerialNumber": " \t "},
+            ]}),
+        ] {
+            let stored: Chassis = serde_json::from_value(json).unwrap();
+            let projected = rpc::site_explorer::Chassis::from(stored);
+            assert_eq!(projected.serial_number.as_deref(), Some("TRAY"));
+        }
+    }
 
     fn timestamp(second: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 23, 12, 0, second)

@@ -83,8 +83,7 @@ async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
         "host already has a pending maintenance operation"
     );
 
-    let mut txn = env.db_txn().await;
-    let machine = host.db_machine(&mut txn).await;
+    let machine = host.db_machine(&env.pool).await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert_eq!(
         machine
@@ -93,7 +92,6 @@ async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
             .map(|request| &request.operation),
         Some(&operation)
     );
-    txn.rollback().await?;
     assert!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
@@ -153,9 +151,8 @@ async fn admin_chassis_reset_rejects_live_instance_even_if_machine_state_is_read
         error.message(),
         "host is assigned to a tenant; a chassis reset is not allowed"
     );
-    let mut txn = env.db_txn().await;
     assert!(
-        host.db_machine(&mut txn)
+        host.db_machine(&env.pool)
             .await
             .machine_maintenance_requested
             .is_none()
@@ -216,8 +213,7 @@ async fn admin_chassis_reset_rejects_non_ready_hosts(
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(error.message(), "host state does not allow a chassis reset");
-        let mut txn = env.db_txn().await;
-        let machine = host.db_machine(&mut txn).await;
+        let machine = host.db_machine(&env.pool).await;
         assert_eq!(machine.current_state(), &state);
         assert!(machine.machine_maintenance_requested.is_none());
         assert!(machine.health_reports.maintenance_override().is_some());

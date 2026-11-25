@@ -149,7 +149,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::{SessionNotOwned, delete_by_mac, delete_session, find_by_owner, insert};
-    use crate::ConditionalWrite;
+    use crate::{ConditionalWrite, TransactionVending as _};
 
     const PER_SESSION_ROWS_MIGRATION: &str =
         include_str!("../migrations/20260824235713_bmc_redfish_sessions_per_session_rows.sql");
@@ -275,7 +275,7 @@ mod tests {
         );
 
         // The new key: same identity, same BMC, second session is fine now.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         insert(
             txn.as_mut(),
             "svc-new",
@@ -292,7 +292,7 @@ mod tests {
     // one-row-per-identity primary key the second insert conflicted.
     #[crate::sqlx_test]
     async fn one_identity_holds_many_sessions_oldest_first(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let bmc = mac(1);
         let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(txn.as_mut())
@@ -329,7 +329,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn delete_session_removes_one_row_and_tolerates_absence(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let bmc = mac(3);
 
         insert(txn.as_mut(), "svc", bmc, "/sessions/1")
@@ -363,7 +363,7 @@ mod tests {
     // revocation handle for the new owner's live session.
     #[crate::sqlx_test]
     async fn delete_session_is_a_noop_after_an_ownership_takeover(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let bmc = mac(7);
 
         insert(txn.as_mut(), "svc-old", bmc, "/sessions/1")
@@ -391,7 +391,7 @@ mod tests {
     // session ids after a reboot.
     #[crate::sqlx_test]
     async fn insert_takes_over_a_stale_row_for_a_reused_session_id(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let bmc = mac(6);
 
         insert(txn.as_mut(), "svc-old", bmc, "/sessions/1")
@@ -415,7 +415,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn delete_by_mac_returns_every_caller_row_for_that_bmc(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let bmc = mac(4);
         let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(txn.as_mut())

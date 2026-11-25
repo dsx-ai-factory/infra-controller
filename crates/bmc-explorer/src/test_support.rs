@@ -24,6 +24,7 @@ use std::time::Duration;
 use bmc_mock::test_support::TestBmc;
 use bmc_mock::test_support::axum_http_client::Error as TestBmcError;
 use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
+use carbide_hw_identification::host_serial::HostSerialRules;
 use model::site_explorer::EndpointExplorationReport;
 use nv_redfish::core::ODataId;
 use nv_redfish::{Bmc, ServiceRoot};
@@ -52,9 +53,11 @@ pub async fn detect_hw_type<B: Bmc>(
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<Option<hw::HwType>, Error<B>> {
-    let chassis_explore_config = build_chassis_explore_config(&root);
+    let chassis_explore_config =
+        build_chassis_explore_config(&root, config.collect_chassis_assembly);
     let explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
 
     if explored_chassis.is_bluefield2() {
         root = root.as_ref().clone().restrict_expand().into();
@@ -99,8 +102,9 @@ pub async fn explore_network_adapter_ports<B: Bmc>(
     root: &ServiceRoot<B>,
     linked_chassis_ids: &[ODataId],
 ) -> Result<Vec<model::site_explorer::Chassis>, Error<B>> {
-    let config = build_chassis_explore_config(root);
-    let mut explored_chassis = ExploredChassisCollection::explore(root, &config).await?;
+    let config = build_chassis_explore_config(root, &|_| false);
+    let mut explored_chassis =
+        ExploredChassisCollection::explore(root, &config, &|_: &B::Error| None).await?;
     explored_chassis
         .fetch_network_adapter_ports(linked_chassis_ids)
         .await;
@@ -173,6 +177,9 @@ fn explorer_config() -> Config<'static, TestBmc> {
         boot_interface_mac: None,
         error_classifier: &error_classifier,
         retry_timeout: Duration::from_millis(0),
+        collect_chassis_assembly: &|chassis| {
+            HostSerialRules::default().needs_chassis_assembly(&chassis.id)
+        },
         explore_drive_firmware: false,
     }
 }

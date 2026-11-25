@@ -98,7 +98,6 @@ struct ManagedHostRowDisplay {
     maintenance_reference: String,
     maintenance_start_time: String,
     dpus: Vec<AttachedDpuRowDisplay>,
-    dpf_enabled: bool,
     dpf_used_for_ingestion: bool,
 }
 
@@ -212,7 +211,6 @@ impl ManagedHostRowDisplay {
             maintenance_reference,
             maintenance_start_time,
             dpus: dpu_snapshots.into_iter().map_into().collect(),
-            dpf_enabled: host_snapshot.config.dpf.enabled,
             dpf_used_for_ingestion: host_snapshot.config.dpf.used_for_ingestion,
         }
     }
@@ -269,14 +267,6 @@ struct AttachedDpuRowDisplay {
     bmc_mac: String,
     oob_ip: String,
     oob_mac: String,
-}
-
-enum DpuProperty {
-    MachineId,
-    BmcIp,
-    BmcMac,
-    OobIp,
-    OobMac,
 }
 
 // derive PartialOrd will order them in the declared order, which for our purposes should be
@@ -354,31 +344,27 @@ impl GroupingKey {
 }
 
 impl ManagedHostRowDisplay {
-    fn dpu_properties(&self, property: DpuProperty) -> String {
-        let lines: Vec<String> = match property {
-            DpuProperty::MachineId => self
-                .dpus
-                .iter()
-                .map(|d| {
-                    filters::machine_link(d.machine_id.clone(), "machine")
-                        .unwrap_or("UNKNOWN".to_string())
-                })
-                .collect(),
-            DpuProperty::BmcIp => self
-                .dpus
-                .iter()
-                .map(|d| {
-                    format!(
-                        "<a href=\"/admin/explored-endpoint/{}\">{}</a>",
-                        d.bmc_ip, d.bmc_ip
-                    )
-                })
-                .collect(),
-            DpuProperty::BmcMac => self.dpus.iter().map(|d| d.bmc_mac.clone()).collect(),
-            DpuProperty::OobIp => self.dpus.iter().map(|d| d.oob_ip.clone()).collect(),
-            DpuProperty::OobMac => self.dpus.iter().map(|d| d.oob_mac.clone()).collect(),
-        };
-        lines.join("<br/>")
+    /// Total memory without the per-module breakdown, e.g. "512 GiB" from
+    /// "512 GiB (32 GiBx16)".
+    fn memory_total(&self) -> &str {
+        self.host_memory
+            .split_once(" (")
+            .map_or(self.host_memory.as_str(), |(total, _)| total)
+    }
+
+    /// The state bubble's tooltip: the full state, then the state handler's
+    /// reason. `None` for a short state without a reason, which the bubble
+    /// already shows whole.
+    fn state_title(&self) -> Option<String> {
+        // The bubble is 17 characters wide before it wraps or is cut.
+        const BUBBLE_CHARS: usize = 17;
+        if !self.state_reason.is_empty() {
+            Some(format!("{}: {}", self.state, self.state_reason))
+        } else if self.state.chars().count() > BUBBLE_CHARS {
+            Some(self.state.clone())
+        } else {
+            None
+        }
     }
 
     fn grouping_key(&self, cols: &[GroupingKey]) -> String {
@@ -434,24 +420,36 @@ pub(super) async fn show_html(
     let active_health_alerts_filter = params
         .remove("health-alerts-filter")
         .filter(|value| !value.is_empty())
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let active_maintenance_filter = params
         .remove("maintenance-filter")
-        .unwrap_or("all".to_string());
-    let active_vendor_filter = params.remove("vendor-filter").unwrap_or("all".to_string());
-    let active_model_filter = params.remove("model-filter").unwrap_or("all".to_string());
-    let active_state_filter = params.remove("state-filter").unwrap_or("all".to_string());
-    let active_gpu_filter = params.remove("gpu-filter").unwrap_or("all".to_string());
-    let active_ib_filter = params.remove("ib-filter").unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
+    let active_vendor_filter = params
+        .remove("vendor-filter")
+        .unwrap_or_else(|| "all".to_string());
+    let active_model_filter = params
+        .remove("model-filter")
+        .unwrap_or_else(|| "all".to_string());
+    let active_state_filter = params
+        .remove("state-filter")
+        .unwrap_or_else(|| "all".to_string());
+    let active_gpu_filter = params
+        .remove("gpu-filter")
+        .unwrap_or_else(|| "all".to_string());
+    let active_ib_filter = params
+        .remove("ib-filter")
+        .unwrap_or_else(|| "all".to_string());
     let active_mem_filter = params
         .remove("mem-filter")
         .and_then(|ms| ms.parse::<isize>().ok())
         .unwrap_or(-1);
     let active_time_in_state_above_sla_filter = params
         .remove("time-in-state-above-sla-filter")
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
 
-    let group_by_param = params.remove("group-by").unwrap_or("none".to_string());
+    let group_by_param = params
+        .remove("group-by")
+        .unwrap_or_else(|| "none".to_string());
     let group_by = GroupingKey::params_to_vec(&group_by_param);
 
     let pagination_params = PaginationParams {
@@ -506,7 +504,12 @@ pub(super) async fn show_html(
             continue;
         }
         if active_time_in_state_above_sla_filter != "all"
-            && active_time_in_state_above_sla_filter != m.time_in_state_above_sla.to_string()
+            && active_time_in_state_above_sla_filter
+                != if m.time_in_state_above_sla {
+                    "true"
+                } else {
+                    "false"
+                }
         {
             continue;
         }
@@ -549,7 +552,7 @@ pub(super) async fn show_html(
                 && !m
                     .health_probe_alerts
                     .iter()
-                    .any(|a| a.id.to_string() == active_health_alerts_filter)
+                    .any(|a| a.id.as_str() == active_health_alerts_filter)
             {
                 continue;
             }

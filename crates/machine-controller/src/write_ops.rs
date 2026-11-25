@@ -25,7 +25,6 @@ use db::ConditionalWrite::{Applied, NotApplied};
 use db::explored_endpoints::EndpointReportNotCurrent;
 use health_report::{HealthReport, HealthReportApplyMode};
 use model::machine::{MachineLastRebootRequested, MachineLastRebootRequestedMode};
-use sqlx::PgTransaction;
 use state_controller::CheckApplied as _;
 use state_controller::db_write_batch::WriteOp;
 use state_controller::state_handler::StateHandlerError;
@@ -120,7 +119,7 @@ pub enum MachineWriteOp {
 impl WriteOp for MachineWriteOp {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         use MachineWriteOp::*;
         match *self {

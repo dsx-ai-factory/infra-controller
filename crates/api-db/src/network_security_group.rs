@@ -27,6 +27,7 @@ use model::tenant::TenantOrganizationId;
 use sqlx::{PgConnection, Postgres};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 #[cfg(test)]
 mod test_explicit_columns;
@@ -66,7 +67,7 @@ pub async fn create(
 
     match sqlx::query_as::<Postgres, NetworkSecurityGroup>(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
         .bind(&metadata.description)
@@ -113,7 +114,7 @@ pub async fn find_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -155,7 +156,7 @@ pub async fn find_by_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -185,15 +186,15 @@ pub async fn find_by_ids(
 /// its results. This may or may not be acceptable depending on the use-case.
 ///          
 pub async fn find_objects_with_attachments(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     network_security_group_ids: Option<&[NetworkSecurityGroupId]>,
     tenant_organization_id: Option<&TenantOrganizationId>,
 ) -> Result<Vec<NetworkSecurityGroupAttachments>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(
         "SELECT
                   nsg.id as id,
-                  COALESCE(JSON_AGG(v.id) FILTER (WHERE v.id IS NOT NULL), '[]') as vpc_ids,
-                  COALESCE(JSON_AGG(i.id) FILTER (WHERE i.id IS NOT NULL), '[]') as instance_ids
+                  COALESCE(JSON_AGG(DISTINCT v.id) FILTER (WHERE v.id IS NOT NULL), '[]') as vpc_ids,
+                  COALESCE(JSON_AGG(DISTINCT i.id) FILTER (WHERE i.id IS NOT NULL), '[]') as instance_ids
               FROM
                   network_security_groups nsg
               LEFT OUTER JOIN vpcs v ON v.network_security_group_id=nsg.id AND v.deleted IS NULL
@@ -210,14 +211,14 @@ pub async fn find_objects_with_attachments(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND nsg.tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" GROUP BY nsg.id ");
 
     builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(builder.sql(), err))
 }
@@ -228,7 +229,7 @@ pub async fn find_objects_with_attachments(
 ///
 /// The caller holds the NSG row lock while inspecting and changing its policy.
 pub async fn find_retained_attachments(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: &NetworkSecurityGroupId,
 ) -> Result<NetworkSecurityGroupAttachments, DatabaseError> {
     let query = "SELECT $1::varchar AS id,
@@ -238,12 +239,15 @@ pub async fn find_retained_attachments(
                   WHERE network_security_group_id = $1), '[]') AS instance_ids";
     sqlx::query_as(query)
         .bind(id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Queries the DB for the NSG propagation status across sets of objects
+///
+/// VPC results include host interfaces using VPC policy and active service interfaces;
+/// instance results count only host interfaces using instance policy.
 ///
 /// * `txn`                        - A reference to an active DB transaction
 /// * `network_security_group_ids` - A list of NetworkSecurityGroupId values to use for
@@ -253,8 +257,8 @@ pub async fn find_retained_attachments(
 /// * `vpc_ids`                    - Optional list of VpcId to query for propagation status
 /// * `instance_ids`               - Optional list of InstanceId to query for propagation status
 ///          
-pub async fn get_propagation_status(
-    txn: &mut PgConnection,
+pub async fn get_propagation_status<DB>(
+    conn: &mut DB,
     network_security_group_ids: Option<&[NetworkSecurityGroupId]>,
     tenant_organization_id: Option<&TenantOrganizationId>,
     vpc_ids: Option<&[VpcId]>,
@@ -265,7 +269,10 @@ pub async fn get_propagation_status(
         Vec<NetworkSecurityGroupPropagationObjectStatus>,
     ),
     DatabaseError,
-> {
+>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut vpc_query_builder = sqlx::QueryBuilder::new(
         // Querying for VPC status is slightly more complicated because
         // instance records don't have a vpc_id column, so we need to
@@ -277,6 +284,33 @@ pub async fn get_propagation_status(
         // a future case where a machine has multiple DPUs within separate
         // VPCs.
         "
+        WITH selected_vpcs AS (
+            SELECT v.id, v.network_security_group_id, nsg.version AS network_security_group_version
+            FROM vpcs v
+            JOIN network_security_groups nsg ON nsg.id = v.network_security_group_id
+            WHERE TRUE",
+    );
+
+    if network_security_group_ids.is_some() {
+        vpc_query_builder.push(" AND nsg.id = ANY(");
+        vpc_query_builder.push_bind(network_security_group_ids);
+        vpc_query_builder.push(") ");
+    }
+
+    if vpc_ids.is_some() {
+        vpc_query_builder.push(" AND v.id = ANY(");
+        vpc_query_builder.push_bind(vpc_ids);
+        vpc_query_builder.push(") ");
+    }
+
+    if tenant_organization_id.is_some() {
+        vpc_query_builder.push(" AND nsg.tenant_organization_id = ");
+        vpc_query_builder.push_bind(tenant_organization_id);
+    }
+
+    // Reuse selected VPCs so host and service interfaces share the same request filters.
+    vpc_query_builder.push(
+        ")
         SELECT
         vpc_id::text as id,
         sum(interfaces_expected)::INT4 as interfaces_expected,
@@ -300,7 +334,7 @@ pub async fn get_propagation_status(
                         AND
                         ifco #> '{network_security_group}'->>'id' = v.network_security_group_id
                         AND
-                        ifco #> '{network_security_group}'->>'version' = nsg.version)::int
+                        ifco #> '{network_security_group}'->>'version' = v.network_security_group_version)::int
                 ), 0)::int as interfaces_applied
             FROM
                 instances i
@@ -309,7 +343,7 @@ pub async fn get_propagation_status(
             JOIN machines dpu ON dpu.id = mi.attached_dpu_machine_id
             /* network_status_observation is stored in dpu now. */
             LEFT OUTER JOIN jsonb_array_elements(dpu.network_status_observation #>'{instance_network_observation,interfaces}') ifco on ifco->>'internal_uuid' = ifc->>'internal_uuid'
-            JOIN vpcs v ON v.id = COALESCE(
+            JOIN selected_vpcs v ON v.id = COALESCE(
                 (ifc->>'vpc_id')::uuid,
                 (
                     SELECT network_segments.vpc_id
@@ -317,29 +351,42 @@ pub async fn get_propagation_status(
                     WHERE network_segments.id = (ifc->>'network_segment_id')::uuid
                 )
             )
-            JOIN network_security_groups nsg on nsg.id=v.network_security_group_id
             WHERE i.network_security_group_id IS NULL
-            AND i.deleted IS NULL"
+            AND i.deleted IS NULL
+            GROUP BY v.id, i.id
+
+            UNION ALL
+
+            SELECT
+                v.id as vpc_id, i.id as instance_id,
+                count(distinct (ifc->>'dpu_id', ifc->>'internal_uuid'))::int as interfaces_expected,
+                /*
+                 * Match each logical service interface on its reporting DPU without
+                 * multiplying applied counts when observations contain duplicate UUIDs.
+                 */
+                count(distinct (ifc->>'dpu_id', ifc->>'internal_uuid')) FILTER (
+                    WHERE ifco #>> '{network_security_group,source}' = 'VPC'
+                      AND ifco #>> '{network_security_group,id}' = v.network_security_group_id
+                      AND ifco #>> '{network_security_group,version}' = v.network_security_group_version
+                )::int as interfaces_applied
+            FROM instances i
+            CROSS JOIN LATERAL jsonb_array_elements(i.network_config->'service_interfaces') ifc
+            /*
+             * Instance NSGs override only host policy. Service interfaces keep
+             * selected-VPC policy until their attachment starts terminating.
+             */
+            JOIN LATERAL jsonb_array_elements(i.extension_services_config->'service_configs') attachment
+              ON attachment->>'id' = ifc->>'attachment_id'
+             AND attachment->>'removed' IS NULL
+            LEFT JOIN machines dpu ON dpu.id = ifc->>'dpu_id'
+            LEFT JOIN LATERAL jsonb_array_elements(
+                dpu.network_status_observation #> '{service_vpc_network_observation,interfaces}'
+            ) ifco ON ifco->>'internal_uuid' = ifc->>'internal_uuid'
+            JOIN selected_vpcs v ON v.id = (ifc->>'vpc_id')::uuid
+            WHERE i.deleted IS NULL
+            GROUP BY v.id, i.id
+        ) as prop_stats GROUP BY vpc_id",
     );
-
-    if network_security_group_ids.is_some() {
-        vpc_query_builder.push(" AND nsg.id = ANY(");
-        vpc_query_builder.push_bind(network_security_group_ids);
-        vpc_query_builder.push(") ");
-    }
-
-    if vpc_ids.is_some() {
-        vpc_query_builder.push(" AND v.id = ANY(");
-        vpc_query_builder.push_bind(vpc_ids);
-        vpc_query_builder.push(") ");
-    }
-
-    if tenant_organization_id.is_some() {
-        vpc_query_builder.push(" AND nsg.tenant_organization_id = ");
-        vpc_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
-    }
-
-    vpc_query_builder.push(" GROUP BY v.id, i.id) as prop_stats GROUP BY vpc_id");
 
     let mut instance_query_builder = sqlx::QueryBuilder::new("
         SELECT
@@ -398,7 +445,7 @@ pub async fn get_propagation_status(
 
     if tenant_organization_id.is_some() {
         instance_query_builder.push(" AND nsg.tenant_organization_id = ");
-        instance_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        instance_query_builder.push_bind(tenant_organization_id);
     }
 
     instance_query_builder.push(
@@ -407,13 +454,13 @@ pub async fn get_propagation_status(
 
     let vpcs = vpc_query_builder
         .build_query_as()
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|err| DatabaseError::query(vpc_query_builder.sql(), err))?;
 
     let instances = instance_query_builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(instance_query_builder.sql(), err))?;
 
@@ -485,7 +532,7 @@ pub async fn update(
         .bind(updated_by)
         .bind(id)
         .bind(expected_version)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(stateful_egress)
         .fetch_one(txn)
         .await
@@ -525,7 +572,7 @@ pub async fn soft_delete(
 
     match sqlx::query_as(query)
         .bind(network_security_group_id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_one(txn)
         .await
     {

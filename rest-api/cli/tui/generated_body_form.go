@@ -20,6 +20,16 @@ type generatedBodyFormPrompter interface {
 	Choice(label string, options []string, defaultValue string) (string, error)
 }
 
+// Sensitive objects keep their input policy throughout guided recursion, even
+// when child fields have generic names such as shared or compute.
+type sensitiveGeneratedBodyFormPrompter struct {
+	generatedBodyFormPrompter
+}
+
+func (p sensitiveGeneratedBodyFormPrompter) Text(label string, required bool) (string, error) {
+	return p.Secret(label, required)
+}
+
 type terminalGeneratedBodyFormPrompter struct{}
 
 var generatedBodySessionResourceTypes = map[string]struct{}{
@@ -278,6 +288,9 @@ func promptGeneratedBodyField(
 	prompter generatedBodyFormPrompter,
 ) (interface{}, bool, error) {
 	field = applyGeneratedBodyFieldPolicy(info, field)
+	if generatedSensitiveName(field.JSONName) {
+		prompter = sensitiveGeneratedBodyFormPrompter{generatedBodyFormPrompter: prompter}
+	}
 	label := generatedParameterLabel(field.JSONName)
 	descriptor, isResource := generatedBodyFieldResourceDescriptor(
 		s,

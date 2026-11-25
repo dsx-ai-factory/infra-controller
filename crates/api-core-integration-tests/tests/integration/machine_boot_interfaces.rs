@@ -117,12 +117,11 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     // boot interface `pick_boot_interface` selects, and we reuse its MAC to
     // seed a retained record (store 4).
     let primary_mac = {
-        let mut txn = env.db_txn().await;
-        let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
-            .await?
-            .remove(&host_id)
-            .expect("host should have interface rows");
-        txn.rollback().await?;
+        let interfaces =
+            db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[host_id])
+                .await?
+                .remove(&host_id)
+                .expect("host should have interface rows");
         interfaces
             .iter()
             .find(|i| i.primary_interface)
@@ -246,6 +245,9 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
         "a newly recorded selection source should report when it was selected",
     );
 
+    let primary_mac_text = primary_mac.to_string();
+    let predicted_mac_text = predicted_mac.to_string();
+
     // Store 1: the owned rows include the primary, and the primary is flagged.
     assert!(
         !report.machine_interfaces.is_empty(),
@@ -254,7 +256,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     let reported_primary = report
         .machine_interfaces
         .iter()
-        .find(|i| i.mac_address == primary_mac.to_string())
+        .find(|i| i.mac_address == primary_mac_text)
         .expect("the primary should appear among owned rows");
     assert!(
         reported_primary.primary_interface,
@@ -265,7 +267,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     let reported_prediction = report
         .predicted_interfaces
         .iter()
-        .find(|p| p.mac_address == predicted_mac.to_string())
+        .find(|p| p.mac_address == predicted_mac_text)
         .expect("the seeded prediction should be reported");
     assert!(reported_prediction.primary_interface);
     assert_eq!(
@@ -279,7 +281,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     let reported_explored = report
         .explored_endpoints
         .iter()
-        .find(|e| e.boot_interface_mac.as_deref() == Some(primary_mac.to_string().as_str()))
+        .find(|e| e.boot_interface_mac.as_deref() == Some(primary_mac_text.as_str()))
         .expect("the host's explored endpoint default should be reported");
     assert_eq!(
         reported_explored.boot_interface_id.as_deref(),
@@ -292,7 +294,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     let reported_retained = report
         .retained_interfaces
         .iter()
-        .find(|r| r.mac_address == primary_mac.to_string())
+        .find(|r| r.mac_address == primary_mac_text)
         .expect("the stale retained record should be surfaced");
     assert_eq!(reported_retained.boot_interface_id, "NIC.Retained.9-9-9");
     assert!(
@@ -303,7 +305,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     // Effective pick: the owned primary's MAC.
     assert_eq!(
         report.effective_boot_interface_mac.as_deref(),
-        Some(primary_mac.to_string().as_str()),
+        Some(primary_mac_text.as_str()),
         "the effective boot interface is the owned primary"
     );
     assert_eq!(
@@ -343,7 +345,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
         .expect("the default pick names an owned row");
     assert_ne!(
         default_row.network_segment_type.as_deref(),
-        Some(NetworkSegmentType::Underlay.to_string().as_str()),
+        Some("tor"),
         "the default pick never lands on an underlay row"
     );
 
@@ -353,8 +355,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
         .as_ref()
         .expect("the predicted pick is reported");
     assert_eq!(
-        predicted_pick.mac_address,
-        predicted_mac.to_string(),
+        predicted_pick.mac_address, predicted_mac_text,
         "the predicted pick is the declared-primary prediction"
     );
     assert_eq!(

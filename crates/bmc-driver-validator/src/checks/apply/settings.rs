@@ -22,6 +22,7 @@
 //! write, so settings checks do not share a restart.
 
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 use bmc_platform::{BiosStatus, ConsoleState, DriverOutcome, PlatformError};
@@ -232,10 +233,12 @@ async fn apply_until_in_effect(
         cx.trace(format!("apply again: {}", how(&again)));
         cx.take_effect(&again).await?;
         wait_in_effect(trace, &pending, None).await?;
-        applied.push_str(&format!(
+        write!(
+            applied,
             ", then applying again ({}) and a second restart",
             how(&again)
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     cx.trace("in effect; applying again, which must start no work");
     let state = format!("in effect {} after {applied}", took(started));

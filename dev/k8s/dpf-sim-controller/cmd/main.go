@@ -175,6 +175,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// NICo fails startup without a DPFOperatorConfig status.version, and no
+	// operator writes one on a simulated site.
+	if err = mgr.Add(&controller.OperatorConfigKeeper{Client: mgr.GetClient(), Namespace: dpfNamespace}); err != nil {
+		setupLog.Error(err, "unable to add the DPFOperatorConfig keeper")
+		os.Exit(1)
+	}
+
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
 

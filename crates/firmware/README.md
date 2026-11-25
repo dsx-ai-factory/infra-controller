@@ -110,13 +110,11 @@ bytes; that pressure blocks new reservations. Each open supplies the caller's
 current retained digests, which eviction protects together with readers and
 active transfers.
 
-Cache opens, checksum work, and transfers share the existing
-`FirmwareDownloader` worker pool. Reader admission has a separate fixed limit
-of 32, without a queue, so slow responses do not hold download workers. `Pending`
-asks callers to poll again; it does not queue another transfer. A failed attempt
-is reported before an explicit later poll retries it. Include the requested
-digest in the retained set: once an idle entry has no bytes or retention, its
-recorded failure may be dropped before any caller sees it.
+Cache opens, checksum checks and transfers share the `FirmwareDownloader`
+worker limit. A busy downloader returns `Pending` without queuing a waiter
+or consuming a stored failure. Keep the requested digest in the retained set
+on every open. An idle failure with no remaining bytes can be pruned when a
+later caller omits the digest.
 
 Construction registers a cache owner in the supplied `JoinSet<()>` and performs
 no filesystem work. Its caller must cancel the supplied token and drain the
@@ -133,6 +131,45 @@ a deliberate source security boundary: an approved origin cannot redirect a
 transfer to a different destination. Managed diagnostics identify the digest
 and bounded failure category without exposing source URL paths; the legacy
 URL downloader keeps its existing redirect and logging behavior.
+
+### Prepared cache opens
+
+Core builds containing [the NIC firmware cache reader change][cache-reader]
+use `prepare_open` for NIC artifact requests.
+It schedules a blocking worker using the caller's request permit.
+The cache takes downloader capacity only at handoff. If the worker is still queued
+then, `PreparedCacheOpen::open` returns `Pending` after successfully
+releasing the retention lock. That open starts no transfer. An abandoned preparation holds the
+permit until the cache owner reaps it.
+
+Core checks out a database connection before preparing the worker. Its
+five-second snapshot deadline includes checkout, lock acquisition and reading
+the saved operations. After handoff, a live database session holds the
+shared retention lock until physical open returns, even if the HTTP client
+disconnects. Waiting for
+the cache mutex, reconciling files on first use, inspecting files, removing
+partials and evicting files for a reservation can delay a writer that needs
+the exclusive retention lock. The snapshot deadline does not bound this work.
+Core then commits with a separate five-second deadline, including when the
+open found an active transfer or failed.
+
+After successful release, SHA-256 verification holds both a download worker
+and one of 32 reader leases shared across all digests. The worker becomes
+available after verification. Streaming continues under the reader lease. A physical read can outlive a
+disconnected client. Its open file counts against the byte budget until the
+last lease drops, even if the pathname was removed or replaced.
+
+If cached bytes fail verification, the cache takes the mutex again and
+removes the pathname only if it still refers to the opened inode. It
+returns `Pending` even if the pathname is already gone or points to a
+replacement. The next open needs fresh retention before it can reserve
+space for a replacement. A read, metadata or unlink error returns an I/O
+error. A checksum mismatch during an origin download instead records a
+transfer failure. A later admitted open reports that failure once before
+another open can retry. See the [Core route's retry responses][route-retries].
+
+[cache-reader]: https://github.com/dsx-ai-factory/infra-controller/pull/9513
+[route-retries]: ../../docs/operations/firmware-updates/configuration.md#scout-nic-firmware-delivery
 
 ## Consumers
 

@@ -29,6 +29,7 @@ use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentControllerState;
 use model::test_support::machine_snapshot::{dpu_hardware_info, host_hardware_info};
 
+use crate::TransactionVending as _;
 use crate::test_support::network_segment::admin_segment;
 
 #[crate::sqlx_test]
@@ -47,7 +48,7 @@ async fn load_by_machine_ids_preserves_shared_host_snapshot(
             MachineType::Dpu,
         )
     });
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for machine_id in [host_id].into_iter().chain(dpu_ids) {
         crate::machine::create(
             txn.as_mut(),
@@ -138,7 +139,7 @@ async fn load_by_instance_ids_preserves_selection_and_snapshot_options(
         )
     });
     let instance_ids = [1, 2, 3].map(|index| InstanceId::from(uuid::Uuid::from_u128(index)));
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for (host_id, instance_id) in host_ids.into_iter().zip(instance_ids) {
         crate::machine::create(
             txn.as_mut(),
@@ -296,7 +297,7 @@ async fn without_components_omits_only_component_lists(
         }),
         ..host_hardware_info()
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for (machine_id, hardware) in [(host_id, host_hardware), (dpu_id, dpu_hardware_info(0))] {
         crate::machine::create(
             txn.as_mut(),

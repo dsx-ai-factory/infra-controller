@@ -35,6 +35,7 @@ use common::api_fixtures::{
     create_test_env,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::hardware_info::{HardwareInfo, PciDeviceProperties, TpmEkCertificate};
@@ -261,7 +262,7 @@ async fn clear_scout_test_queue(
     host_machine_id: StableHostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .execute(pool)
         .await?;
     Ok(())
@@ -362,6 +363,7 @@ fn scout_test_allocation_request(
             network: Some(single_interface_network_config(segment_id)),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,
@@ -398,6 +400,7 @@ async fn allocated_host_for_secure_discovery(
             network: Some(single_interface_network_config(segment_id)),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,
@@ -406,9 +409,8 @@ async fn allocated_host_for_secure_discovery(
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
     let instance_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
@@ -418,7 +420,7 @@ async fn allocated_host_for_secure_discovery(
         panic!("allocated instance must have one tenant address")
     };
     let interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id])
+        db::machine_interface::find_by_machine_ids(&env.pool, &[managed_host.host().id])
             .await
             .unwrap();
     let admin_interface = interfaces[&managed_host.host().id]
@@ -429,7 +431,6 @@ async fn allocated_host_for_secure_discovery(
         })
         .expect("managed host must have an admin interface")
         .id;
-    txn.rollback().await.unwrap();
 
     (
         managed_host,
@@ -444,7 +445,7 @@ async fn test_machine_discovery_no_domain(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let machine_interface = db::machine_interface::validate_existing_mac_and_create(
         &mut txn,
@@ -480,7 +481,7 @@ async fn test_machine_discovery_with_domain(
     let env = create_test_env(pool).await;
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -598,7 +599,7 @@ async fn test_discover_dpu_by_source_ip(
         TestEnvOverrides::with_config(secure_discovery_config()),
     )
     .await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::define(
         &mut txn,
         model::resource_pool::common::LOOPBACK_IP_V6,
@@ -656,14 +657,10 @@ async fn test_discover_dpu_by_source_ip(
         dhcp_response.machine_interface_id
     );
     let dpu_machine_id = response.machine_id.expect("DPU should be created");
-    let mut txn = env.pool.begin().await?;
-    let dpu_machine = db::machine::find_one(
-        txn.as_mut(),
-        &dpu_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await?
-    .expect("DPU should exist");
+    let dpu_machine =
+        db::machine::find_one(&env.pool, &dpu_machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("DPU should exist");
     assert!(dpu_machine.network_config.loopback_ip.is_some());
     assert!(dpu_machine.network_config.loopback_ip_v6.is_some());
     Ok(())
@@ -672,7 +669,7 @@ async fn test_discover_dpu_by_source_ip(
 /// Define the IPv6 loopback pool as a small auto-assign prefix so DPU discovery
 /// can allocate an IPv6 underlay loopback alongside the default IPv4 pool.
 async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::resource_pool::define(
         &mut txn,
         model::resource_pool::common::LOOPBACK_IP_V6,
@@ -688,6 +685,96 @@ async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
     txn.commit().await.unwrap();
 }
 
+/// A saved IPv6 reservation can be locked before discovery attaches anything.
+/// That preparation conflict must remain retryable and preserve the owned address.
+#[crate::sqlx_test]
+async fn discovery_ipv6_ownership_contention_is_retryable(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    define_loopback_ipv6_pool(&env).await;
+    let config = env.managed_host_config();
+    let dpu = config.get_and_assert_single_dpu();
+    let interface = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
+    let id = dpu_discover_machine(&env, dpu, interface).await;
+    let (mut network, version) = db::machine::get_network_config(&env.pool, &id)
+        .await?
+        .take();
+    let owned = network
+        .loopback_ip_v6
+        .expect("initial native IPv6 allocation");
+
+    // Clear only the configuration. The existing native reservation must be
+    // looked up during preparation and reused after the blocker leaves.
+    network.loopback_ip_v6 = None;
+    let mut txn = env.pool.txn_begin().await?;
+    assert_eq!(
+        db::machine::try_update_network_config(&mut txn, &id, version, &network).await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    txn.commit().await?;
+    let bounded = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            env.pool
+                .connect_options()
+                .as_ref()
+                .clone()
+                .options([("lock_timeout", "100ms")]),
+        )
+        .await?;
+    let api = TestApiBuilder::new(
+        bounded.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(env.config.clone())
+    .with_resource_pool_registry(env.api.resource_pool_registry.clone())
+    .build();
+    let mut blocker = env.pool.txn_begin().await?;
+    let rows =
+        sqlx::query("SELECT id FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE")
+            .bind(model::resource_pool::common::LOOPBACK_IP_V6)
+            .bind(owned.to_string())
+            .fetch_all(blocker.as_mut())
+            .await?;
+    assert_eq!(rows.len(), 1);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        api.discover_machine(Request::new(MachineDiscoveryInfo {
+            machine_interface_id: Some(interface),
+            discovery_data: Some(DiscoveryData::Info(DiscoveryInfo::try_from(
+                HardwareInfo::from(dpu),
+            )?)),
+            create_machine: true,
+            ..Default::default()
+        })),
+    )
+    .await;
+    blocker.rollback().await?;
+    bounded.close().await;
+    let error = result?.expect_err("locked ownership must ask discovery to retry");
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(
+        db::machine::get_network_config(&env.pool, &id).await?.value,
+        network
+    );
+
+    // A fresh public discovery request restores the exact existing reservation.
+    assert_eq!(dpu_discover_machine(&env, dpu, interface).await, id);
+    assert_eq!(
+        db::machine::get_network_config(&env.pool, &id)
+            .await?
+            .loopback_ip_v6,
+        Some(owned)
+    );
+    Ok(())
+}
+
 /// Create a host expected machine carrying one DPU loopback reservation. Direct
 /// discovery resolves the reservation globally by DPU OS/admin MAC, so only the child
 /// row and its foreign-key parent need to exist.
@@ -698,7 +785,7 @@ async fn seed_reservation_host(
 ) {
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -797,7 +884,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     // Reservable (non-auto-assign) addresses the operator pins to this DPU.
     let reserved_v4 = Ipv4Addr::new(172, 30, 0, 10);
     let reserved_v6: Ipv6Addr = "2001:db8:1::10".parse()?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
         &mut txn,
@@ -836,7 +923,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     let asn = dpu_machine
         .asn
         .expect("prepared ASN attaches alongside declared IPv6");
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
         env.api
             .resource_pool_registry
@@ -866,7 +953,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
             .all(|address| *address != IpAddr::V4(reserved_v4))
     );
     // Changing intent does not readdress this live DPU on rediscovery.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut expected =
         db::expected_machine::find_by_bmc_mac_address(&mut *txn, "aa:bb:cc:dd:ee:10".parse()?)
             .await?
@@ -937,7 +1024,7 @@ async fn test_direct_discovery_retries_changed_loopback_reservation(
     let old_address = Ipv4Addr::new(172, 30, 0, 30);
     let new_address = Ipv4Addr::new(172, 30, 0, 31);
     let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         loopback_pool,
         &mut txn,
@@ -962,7 +1049,7 @@ async fn test_direct_discovery_retries_changed_loopback_reservation(
     // The Integrated preparation reads existing pool ownership after capturing
     // declaration intent. Wait for that query, then commit a replacement while
     // preparation is suspended, without relying on scheduler timing.
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *gate)
         .await?;
@@ -979,7 +1066,7 @@ async fn test_direct_discovery_retries_changed_loopback_reservation(
         result = &mut discovery => panic!("discovery bypassed the preparation gate: {result:?}"),
         _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT value FROM resource_pool") => {},
     }
-    let mut writer = env.pool.begin().await?;
+    let mut writer = env.pool.txn_begin().await?;
     let mut expected = db::expected_machine::find_by_bmc_mac_address(&mut *writer, host_bmc_mac)
         .await?
         .expect("reservation host exists");
@@ -1079,7 +1166,7 @@ async fn test_direct_discovery_does_not_use_another_mac_reservation(
 
     // A reservation for a different DPU OS/admin MAC.
     let reserved_v4 = Ipv4Addr::new(172, 30, 0, 20);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
         &mut txn,
@@ -1270,9 +1357,10 @@ async fn clear_dpu_loopback_ip(
 async fn machines_row_is_held(
     pool: &sqlx::PgPool,
     machine_id: &MachineId,
-) -> Result<bool, sqlx::Error> {
-    let mut probe = pool.begin().await?;
-    let result = sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE NOWAIT")
+) -> db::DatabaseResult<bool> {
+    let mut probe = pool.txn_begin().await?;
+    let query = "SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE NOWAIT";
+    let result = sqlx::query(query)
         .bind(machine_id)
         .fetch_one(probe.as_mut())
         .await;
@@ -1288,7 +1376,7 @@ async fn machines_row_is_held(
         {
             Ok(true)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(db::DatabaseError::query(query, error)),
     }
 }
 
@@ -1392,11 +1480,11 @@ async fn test_dpu_rediscovery_does_not_wait_on_admin_segment_locks(
 
     // Nothing is pending on the host, so the reconcile after the rediscovery
     // has no reason to wait on the gate either.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
     txn.commit().await?;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
 
     let rediscovered_machine_id = tokio::time::timeout(
@@ -1425,23 +1513,21 @@ async fn test_repeat_host_discovery_does_not_wait_on_admin_segment_locks(
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let mh = create_managed_host_with_config(&env, host_config.clone()).await;
-    let mut txn = env.pool.begin().await?;
-    let host_interface = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id])
+    let host_interface = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.id])
         .await?
         .remove(&mh.id)
         .unwrap_or_default()
         .into_iter()
         .find(|interface| interface.primary_interface)
         .expect("the ingested host should have a primary interface");
-    txn.commit().await?;
 
     // Nothing is pending on the host, so the reconcile after the rediscovery
     // has no reason to wait on the gate either.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
     txn.commit().await?;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
 
     let rediscovered_machine_id = tokio::time::timeout(
@@ -1476,7 +1562,7 @@ async fn test_first_host_discovery_requests_the_admin_segments_shared_before_its
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *gate)
@@ -1546,7 +1632,7 @@ async fn test_first_host_discovery_locks_host_rows_first_under_shared_segment_lo
     .fetch_one(&env.pool)
     .await?;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -1585,14 +1671,14 @@ async fn test_first_host_discovery_locks_host_rows_first_under_shared_segment_lo
         "a host's first discovery must hold every admin segment shared"
     );
 
-    let mut probe = env.pool.begin().await?;
+    let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
         .execute(&mut *probe)
         .await?;
     db::machine_interface::lock_all_admin_segments_for_allocation(&mut probe).await?;
     probe.rollback().await?;
 
-    let mut probe = env.pool.begin().await?;
+    let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
         .execute(&mut *probe)
         .await?;
@@ -1668,7 +1754,7 @@ async fn check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(
     let dpu_interface_id = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
     let expected_dpu_machine_id = from_hardware_info(&HardwareInfo::from(dpu))?;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut gate).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *gate)
@@ -1716,7 +1802,7 @@ async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flig
     let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
 
     // Park the rediscovery on its first row write, the caller interface row.
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -1748,7 +1834,7 @@ async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flig
         "a DPU rediscovery must hold no segment lock"
     );
 
-    let mut probe = env.pool.begin().await?;
+    let mut probe = env.pool.txn_begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
         .execute(&mut *probe)
         .await?;
@@ -1794,7 +1880,7 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
         .network_config
         .version;
 
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -1875,10 +1961,10 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
             .used;
     let dpu_before = dpu_machine(&env.pool, &dpu_machine_id).await?;
     let host_before = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
-    let mut setup = env.pool.begin().await?;
+    let mut setup = env.pool.txn_begin().await?;
     db::machine_topology::set_topology_update_needed(setup.as_mut(), &dpu_machine_id, true).await?;
     setup.commit().await?;
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -1930,17 +2016,24 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
             .used,
         used_before
     );
-    let mut probe = env.pool.begin().await?;
-    assert!(
-        db::machine::try_lock_by_id_for_update(&mut probe, &dpu_machine_id).await?,
-        "failed attachment must release its partial DPU lock"
-    );
+    let mut probe = env.pool.txn_begin().await?;
+    // SQLx queues rollback when the rejected discovery's transaction is dropped.
+    // Allow that rollback to finish, but fail if it keeps the DPU locked.
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(probe.as_mut())
+        .await?;
+    db::machine::lock_by_id_for_update(&mut probe, &dpu_machine_id)
+        .await
+        .expect("failed attachment must release its partial DPU lock");
     probe.rollback().await?;
 
     // Admin repair can now hold the interface and queue on the host; the
     // failed discovery must not retain a DPU lock that would block its fanout.
-    let repair =
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &host_machine_id);
+    let repair = db::machine_interface::reconcile_admin_addresses_after_commit(
+        &env.pool,
+        &host_machine_id,
+        &env.api.instrumentation,
+    );
     tokio::pin!(repair);
     tokio::select! {
         result = &mut repair => panic!("repair bypassed the held host: {result:?}"),
@@ -2026,7 +2119,7 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
     let member_dpu_id = DpuMachineId::try_from(member_id)?;
     let member_interface_id = dpu_discover_dhcp(&env, &member.oob_mac_address.to_string()).await;
     let new_link_id = dpu_discover_dhcp(&env, &member.host_mac_address.to_string()).await;
-    let mut setup = env.pool.begin().await?;
+    let mut setup = env.pool.txn_begin().await?;
     db::resource_pool::define(
         setup.as_mut(),
         LOOPBACK_IP_V6,
@@ -2128,7 +2221,7 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
     // A passes group admission before its fresh allocation INSERT waits here.
     // The separate segment gate stops B's post-commit address repair before
     // it can acquire interface or Machine locks needed by rollback probes.
-    let mut allocation_gate = env.pool.begin().await?;
+    let mut allocation_gate = env.pool.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool_allocations IN SHARE MODE")
         .execute(allocation_gate.as_mut())
         .await?;
@@ -2136,12 +2229,12 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
         .fetch_one(allocation_gate.as_mut())
         .await?;
     let mut allocation_gate = Some(allocation_gate);
-    let mut repair_gate = env.pool.begin().await?;
+    let mut repair_gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(repair_gate.as_mut()).await?;
     let repair_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(repair_gate.as_mut())
         .await?;
-    let mut member_gate = env.pool.begin().await?;
+    let mut member_gate = env.pool.txn_begin().await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
         .bind(member_id)
         .fetch_one(member_gate.as_mut())
@@ -2182,7 +2275,7 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
             })
             .await??,
         );
-        let mut probe = env.pool.begin().await?;
+        let mut probe = env.pool.txn_begin().await?;
         let host_held =
             !db::machine::try_lock_by_id_for_no_key_update(probe.as_mut(), &host_id).await?;
         let target_held =
@@ -2218,10 +2311,10 @@ async fn test_dpu_discovery_rolls_back_when_a_new_group_member_is_busy(
             "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
         )
         .bind(LOOPBACK_IP_V6)
-        .bind(target_id.to_string())
+        .bind(target_id)
         .fetch_one(&env.pool)
         .await?;
-        let mut probe = env.pool.begin().await?;
+        let mut probe = env.pool.txn_begin().await?;
         let released_locks = async {
             sqlx::query("SELECT id FROM machines WHERE id = ANY($1) FOR NO KEY UPDATE NOWAIT")
                 .bind([host_id, target_id].as_slice())
@@ -2430,7 +2523,7 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
             host_machine_id,
         );
         let new_link_id = dpu_discover_dhcp(&env, factory_mac).await;
-        let mut setup = env.pool.begin().await?;
+        let mut setup = env.pool.txn_begin().await?;
         db::machine_interface::set_primary_interface(&new_link_id, true, setup.as_mut()).await?;
         if busy_history {
             db::resource_pool::define(
@@ -2471,14 +2564,12 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
             busy_history
         );
         let pool_before = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
-        let mut read = env.pool.begin().await?;
         let history_before =
-            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
-        read.commit().await?;
+            find_by_object_ids(&env.pool, StateHistoryTableId::Machine, &machine_ids).await?;
 
         // Use the real history trigger or `update_reboot_requested_time`.
         // Association's KEY SHARE is compatible with that function's row lock.
-        let mut gate = env.pool.begin().await?;
+        let mut gate = env.pool.txn_begin().await?;
         if busy_history {
             db::state_history::persist(
                 gate.as_mut(),
@@ -2527,7 +2618,7 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
             .bind(dpu_machine_id)
             .fetch_one(&env.pool)
             .await?;
-            let mut probe = env.pool.begin().await?;
+            let mut probe = env.pool.txn_begin().await?;
             let history =
                 find_by_object_ids(probe.as_mut(), StateHistoryTableId::Machine, &machine_ids)
                     .await?;
@@ -2667,10 +2758,8 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
                 .used,
             pool_before.used + usize::from(busy_history)
         );
-        let mut read = env.pool.begin().await?;
         let history_after =
-            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
-        read.commit().await?;
+            find_by_object_ids(&env.pool, StateHistoryTableId::Machine, &machine_ids).await?;
         for id in machine_ids {
             assert_eq!(
                 history_after[&id.to_string()].len(),
@@ -2775,7 +2864,7 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
 
     // The host discovery parks on the host machines row with the host's
     // interface rows already locked for the rename.
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -2907,9 +2996,8 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     let response = env.api.discover_machine(request).await;
 
     assert_eq!(response.unwrap_err().code(), Code::PermissionDenied);
-    let mut txn = env.pool.begin().await?;
     let interface = db::machine_interface::find_one(
-        &mut *txn,
+        &env.pool,
         dhcp_response
             .machine_interface_id
             .expect("DHCP discovery must return an interface ID"),
@@ -2918,7 +3006,7 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     assert_eq!(interface.machine_id, None);
     assert!(
         db::machine::find_one(
-            &mut *txn,
+            &env.pool,
             &expected_machine_id,
             MachineSearchConfig {
                 include_dpus: true,
@@ -2942,8 +3030,7 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     let hardware_info = HardwareInfo::from(&host_config);
     let managed_host = create_managed_host_with_config(&env, host_config).await;
 
-    let mut txn = env.pool.begin().await?;
-    let host = managed_host.host().db_machine(&mut txn).await;
+    let host = managed_host.host().db_machine(&env.pool).await;
     let primary = host
         .status
         .interfaces
@@ -2960,7 +3047,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         .expect("two-DPU host must have a secondary interface");
     let secondary_device =
         host.get_device_locator_for_dpu_id(&secondary.attached_dpu_machine_id.unwrap())?;
-    txn.rollback().await?;
 
     let instance = managed_host
         .instance_builer(&env)
@@ -2970,9 +3056,8 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         ))
         .build()
         .await;
-    let mut txn = env.pool.begin().await?;
     let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
@@ -2981,7 +3066,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         panic!("instance must have one tenant address")
     };
     let tenant_ip = address.address;
-    txn.rollback().await?;
 
     // Release boots Scout over the tenant network before switching to the
     // admin network. Stop there, while the secondary PF still owns this IP.
@@ -3025,19 +3109,18 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     )
     .await;
 
-    let mut txn = env.pool.begin().await?;
-    let released_host = managed_host.host().db_machine(&mut txn).await;
+    let released_host = managed_host.host().db_machine(&env.pool).await;
     assert_eq!(released_host.current_state(), &discovery_state);
     assert_eq!(released_host.network_config.use_admin_network, Some(false));
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
     .await?;
     assert_eq!(retained_addresses.len(), 1);
     assert_eq!(retained_addresses[0].address, tenant_ip);
-    let released_secondary = db::machine_interface::find_one(txn.as_mut(), secondary.id).await?;
+    let released_secondary = db::machine_interface::find_one(&env.pool, secondary.id).await?;
     assert_eq!(
         released_secondary.machine_id,
         Some(managed_host.host().id.into())
@@ -3045,7 +3128,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     assert!(released_secondary.addresses.is_empty());
     assert_eq!(released_secondary.domain_id, None);
     assert!(!released_secondary.primary_interface);
-    txn.rollback().await?;
 
     let pxe = env
         .api
@@ -3072,7 +3154,7 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     );
 
     let custom_user_data = "#cloud-config\nsecondary-interface-override";
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_boot_override::create(
         txn.as_mut(),
         secondary.id,
@@ -3225,11 +3307,9 @@ async fn test_secure_discovery_from_instance_address_rejects_missing_or_foreign_
         allocated_host_for_secure_discovery(&env).await;
 
     let foreign_host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
     let foreign_interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[foreign_host.host().id]).await?;
+        db::machine_interface::find_by_machine_ids(&env.pool, &[foreign_host.host().id]).await?;
     let foreign_interface_id = foreign_interfaces[&foreign_host.host().id][0].id;
-    txn.rollback().await?;
 
     let secure_api = secure_api_for(&env);
 
@@ -3271,7 +3351,7 @@ async fn test_secure_discovery_rejects_duplicate_overlay_address_owners(
     let (managed_host, hardware_info, instance_ip, admin_interface_id) =
         allocated_host_for_secure_discovery(&env).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let other_owner = common::overlay_address::seed_overlay_address_owner(
         txn.as_mut(),
         "secure-discovery-other-owner",
@@ -3312,7 +3392,7 @@ async fn test_secure_discovery_rejects_unrelated_underlay_and_overlay_owners(
     let (managed_host, hardware_info, _, admin_interface_id) =
         allocated_host_for_secure_discovery(&env).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let admin_interface = db::machine_interface::find_one(txn.as_mut(), admin_interface_id).await?;
     let admin_ip = admin_interface
         .addresses
@@ -3382,9 +3462,8 @@ async fn test_secure_discovery_accepts_zero_dpu_host_inband_owner(
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await?;
     let interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id]).await?;
+        db::machine_interface::find_by_machine_ids(&env.pool, &[managed_host.host().id]).await?;
     let host_inband_interface = interfaces[&managed_host.host().id]
         .iter()
         .find(|interface| {
@@ -3397,14 +3476,13 @@ async fn test_secure_discovery_accepts_zero_dpu_host_inband_owner(
         .first()
         .copied()
         .expect("HostInband interface should have an address");
-    let owners = db::instance_address::find_all_by_address(txn.as_mut(), host_ip).await?;
+    let owners = db::instance_address::find_all_by_address(&env.pool, host_ip).await?;
     let [owner] = owners.as_slice() else {
         panic!("HostInband address should have one overlay owner")
     };
     assert_eq!(owner.instance_id, instance.id);
     assert_eq!(owner.segment_id, host_inband_interface.segment_id);
     let expected_interface_id = host_inband_interface.id;
-    txn.rollback().await?;
 
     let response = secure_api_for(&env)
         .discover_machine(discovery_request_from(&hardware_info, None, host_ip))
@@ -3502,9 +3580,7 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
-    let mut txn = env.pool.begin().await?;
-    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
-    txn.commit().await?;
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
     let predicted_machine_id = HostMachineId::try_from(
         host_interface
             .machine_id
@@ -3593,9 +3669,7 @@ async fn test_secure_discovery_rejects_stable_host_identity_mismatch_without_mut
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
-    let mut txn = env.pool.begin().await?;
-    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
-    txn.commit().await?;
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
     let remote_ip = host_interface.addresses[0];
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
 
@@ -3642,7 +3716,7 @@ async fn test_secure_discovery_rejects_stable_host_identity_mismatch_without_mut
     let response = env.api.discover_machine(mismatching_request).await;
 
     assert_eq!(response.unwrap_err().code(), Code::PermissionDenied);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     assert_eq!(host_interface.machine_id, Some(expected_machine_id));
     let topology_count: (i64,) =
@@ -3717,7 +3791,7 @@ async fn test_discovery_ip_lookup_rejects_missing_mapping(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let missing_address = "203.0.113.253".parse().unwrap();
     let missing = db::machine_interface::find_for_update_by_ip(&mut txn, missing_address).await;
     assert!(matches!(
@@ -3909,7 +3983,7 @@ async fn test_scout_pci_reconciliation_serializes_with_instance_allocation(
     // Queue reconciliation first behind a locked Machine row, then queue allocation behind it.
     let (reconciliation_host_config, reconciliation_host_id, reconciliation_interfaces) =
         create_scout_test_host(&env, BootInterfaceSelectionSource::RedfishChassisId).await?;
-    let mut reconciliation_machine_blocker = env.pool.begin().await?;
+    let mut reconciliation_machine_blocker = env.pool.txn_begin().await?;
     let reconciliation_blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *reconciliation_machine_blocker)
         .await?;
@@ -3975,7 +4049,7 @@ async fn test_scout_pci_reconciliation_serializes_with_instance_allocation(
         create_scout_test_host(&env, BootInterfaceSelectionSource::RedfishSerialNumber).await?;
     let allocation_before = load_scout_pci_selection_state(&env.pool, allocation_host_id).await?;
 
-    let mut allocation_machine_blocker = env.pool.begin().await?;
+    let mut allocation_machine_blocker = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *allocation_machine_blocker)
         .await?;

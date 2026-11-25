@@ -9,6 +9,7 @@ use std::time::Duration;
 use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolBackendError};
 use carbide_site_explorer::dpu_asn::{DPU_ASN_SLOT, update_dpu_asns};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use db::resource_pool::remote;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
@@ -49,7 +50,8 @@ async fn remote_dpu_asn_backfill_owning_cancellation_keeps_partial_progress(
 
 /// Stop with committed progress and a held reply, then verify both survive correctly.
 async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyre::Result<()> {
-    tokio::time::timeout(Duration::from_secs(120), Box::pin(async move {
+    let wall_deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let exercise = Box::pin(async move {
         let mut fixture = RemotePoolFixture::start_with_values(
             database,
             &[RemotePool {
@@ -80,7 +82,7 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
             )
         });
         machine_ids.sort();
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         for machine_id in machine_ids {
             db::machine::create(
                 &mut txn,
@@ -94,6 +96,8 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
         }
         txn.commit().await?;
 
+        // Freeze time across real PostgreSQL I/O as well as provider replies.
+        tokio::time::pause();
         let cancel = CancellationToken::new();
         let pause = &fixture.provider.allocate_pause;
         pause.pause_next.store(true, Ordering::SeqCst);
@@ -139,12 +143,9 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
             }
 
             if matches!(boundary, StopBoundary::PassBudget) {
-                // Six nine-second replies consume 54 seconds of the
-                // pass, each below the provider's ten-second deadline.
-                // Only Tokio advances; PostgreSQL still uses wall time.
-                tokio::time::pause();
+                // Six nine-second replies consume exactly 54 seconds of
+                // the pass, each below the provider's ten-second deadline.
                 tokio::time::advance(Duration::from_secs(9)).await;
-                tokio::time::resume();
             }
             // Rearm before releasing this reply so the next allocation
             // cannot finish before we observe its reservation.
@@ -154,7 +155,10 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
 
         let active = asn_receipt(&fixture, machine_ids[6]).await?;
         assert_eq!(active.state, AllocationState::Pending, "{boundary:?}");
-        assert!(matches!(&active.source, AllocationSource::Remote { result: None, .. }));
+        assert!(matches!(
+            &active.source,
+            AllocationSource::Remote { result: None, .. }
+        ));
         assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 7);
         assert_eq!(fixture.provider.local.provisioned_count(), 7);
         assert!(!pause.dropped.is_cancelled());
@@ -162,11 +166,8 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
         match boundary {
             StopBoundary::PassBudget => {
                 // The seventh provider wait is still below ten seconds
-                // when the enclosing one-minute pass expires. Resume
-                // wall time before cancellation writes reach PostgreSQL.
-                tokio::time::pause();
+                // when the enclosing one-minute pass expires.
                 tokio::time::advance(Duration::from_secs(7)).await;
-                tokio::time::resume();
             }
             StopBoundary::OwningCancellation => cancel.cancel(),
         }
@@ -195,8 +196,14 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
         assert_eq!(cancelled.source, active.source);
         assert_eq!(cancelled.state, AllocationState::CancelRequested);
         tokio::time::timeout(Duration::from_secs(15), pause.dropped.cancelled()).await?;
-        assert_eq!(db::machine::get_asn(&fixture.env.pool, &machine_ids[6]).await?, None);
-        assert_eq!(db::machine::get_asn(&fixture.env.pool, &machine_ids[7]).await?, None);
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &machine_ids[6]).await?,
+            None
+        );
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &machine_ids[7]).await?,
+            None
+        );
         assert!(
             remote::latest_for_owner_slot(
                 &fixture.env.pool,
@@ -220,12 +227,26 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
         assert_eq!(fixture.provider.local.provisioned_count(), 6);
         for (machine_id, saved, asn) in committed {
             assert_eq!(asn_receipt(&fixture, machine_id).await?, saved);
-            assert_eq!(db::machine::get_asn(&fixture.env.pool, &machine_id).await?, Some(asn));
+            assert_eq!(
+                db::machine::get_asn(&fixture.env.pool, &machine_id).await?,
+                Some(asn)
+            );
         }
         drop(backfill);
+        tokio::time::resume();
         fixture.stop().await
-    }))
-    .await?
+    });
+    tokio::select! {
+        result = exercise => result,
+        () = async {
+            // Stay runnable so Tokio cannot auto-advance while SQL or RPC I/O
+            // is pending. Poll inline so no test-owned task outlives the test.
+            loop {
+                assert!(std::time::Instant::now() < wall_deadline, "{boundary:?}: backfill test stalled");
+                tokio::task::yield_now().await;
+            }
+        } => unreachable!("clock guard never completes"),
+    }
 }
 
 /// Reload the original ASN request so cleanup cannot silently switch identities.

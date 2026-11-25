@@ -294,8 +294,9 @@ mod tests {
             r#"{"access_token":"t","expires_in":"7200"}"#,
         )
         .unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("expires_in") || err.to_string().contains("invalid type"),
+            message.contains("expires_in") || message.contains("invalid type"),
             "{err}"
         );
     }

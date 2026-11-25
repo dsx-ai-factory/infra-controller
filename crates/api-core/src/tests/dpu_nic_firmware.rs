@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 use std::collections::HashSet;
-use std::string::ToString;
 use std::time::Duration;
 
 use carbide_instrument::testing::MetricsCapture;
@@ -23,6 +22,7 @@ use carbide_machine_controller::health_report::create_host_update_health_report_
 use common::api_fixtures::{
     TestEnv, create_managed_host, create_managed_host_multi_dpu, create_test_env,
 };
+use db::TransactionVending as _;
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use model::machine::LoadSnapshotOptions;
@@ -48,7 +48,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .try_acquire_lock("test-dpu-firmware-admission".into())
         .await?;
     let managed_host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     managed_host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
@@ -60,12 +60,6 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     };
 
     let snapshots = get_all_snapshots(&env).await;
-
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
 
     let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
@@ -88,7 +82,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     );
 
     // Check if health override is placed
-    let managed_host = managed_host.snapshot(&mut txn).await;
+    let managed_host = managed_host.snapshot(&mut env.db_reader()).await;
 
     for dpu in managed_host.dpu_snapshots.iter() {
         let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
@@ -114,7 +108,7 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         create_managed_host(&env).await,
         create_managed_host(&env).await,
     ];
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for host in &hosts {
         host.update_nic_firmware_version(&mut txn).await?;
     }
@@ -129,7 +123,7 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
     let snapshots = get_all_snapshots(&env).await;
 
     // Lock both candidates so the first admission waits regardless of map order.
-    let mut writer = env.pool.begin().await?;
+    let mut writer = env.pool.txn_begin().await?;
     for host in &hosts {
         db::machine::lock_by_id_for_update(writer.as_mut(), &host.dpu().id.into()).await?;
     }
@@ -157,9 +151,8 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         HashSet::from([hosts[0].id.into(), hosts[1].id.into()])
     );
 
-    let mut txn = env.pool.begin().await?;
     for host in &hosts {
-        let dpu = host.dpu().db_machine(&mut txn).await;
+        let dpu = host.dpu().db_machine(&env.pool).await;
         let request = dpu
             .reprovision_requested
             .expect("both classic requests must be persisted");
@@ -171,7 +164,6 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         assert!(request.update_firmware);
         assert!(request.started_at.is_none());
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -192,7 +184,7 @@ async fn test_start_updates_with_multidpu(
     let dpu_ids = host.status.unwrap().associated_dpu_machine_ids;
     let dpu_machine_id = dpu_ids[0];
     let dpu_machine_id2 = dpu_ids[1];
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     update_nic_firmware_version(&mut txn, &dpu_machine_id, "11.10.1000").await?;
     update_nic_firmware_version(&mut txn, &dpu_machine_id2, "11.10.1000").await?;
     txn.commit().await?;
@@ -207,12 +199,6 @@ async fn test_start_updates_with_multidpu(
 
     let snapshots = get_all_snapshots(&env).await;
 
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-
     let dpus_started = dpu_nic_firmware_update
         .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
@@ -221,7 +207,7 @@ async fn test_start_updates_with_multidpu(
     assert!(dpus_started.contains(&mh.host().id));
 
     // Check if health override is placed
-    let managed_host = mh.snapshot(&mut txn).await;
+    let managed_host = mh.snapshot(&mut env.db_reader()).await;
 
     for dpu in managed_host.dpu_snapshots.iter() {
         let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
@@ -242,7 +228,7 @@ async fn test_get_updates_in_progress(
         .try_acquire_lock("test-dpu-firmware-admission".into())
         .await?;
     let managed_host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     managed_host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
@@ -257,7 +243,7 @@ async fn test_get_updates_in_progress(
 
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Failed to create transaction");
 
@@ -289,7 +275,7 @@ async fn test_check_for_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         create_managed_host(&env).await,
         create_managed_host(&env).await,
     ];
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for m in &machines {
         m.update_nic_firmware_version(&mut txn).await?;
     }
@@ -337,7 +323,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
         .try_acquire_lock("test-dpu-firmware-admission".into())
         .await?;
     let mh = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     mh.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
 
@@ -355,21 +341,21 @@ async fn test_wrong_version_failures_count_once_per_outcome(
 
     let land_on_version = |version: &'static str, env: &TestEnv| {
         let pool = env.pool.clone();
-        let dpu_id = mh.dpu().id.to_string();
+        let dpu_id = mh.dpu().id;
         let host_id = mh.id;
         async move {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let query = r#"UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data,Info,dpu_info,firmware_version}', $1, false)
      WHERE machine_id=$2"#;
             sqlx::query::<_>(query)
                 .bind(sqlx::types::Json(version))
-                .bind(&dpu_id)
+                .bind(dpu_id)
                 .execute(&mut *txn)
                 .await
                 .unwrap();
             let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
             sqlx::query(query)
-                .bind(&dpu_id)
+                .bind(dpu_id)
                 .execute(&mut *txn)
                 .await
                 .unwrap();
@@ -403,7 +389,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
 
     // The update "finishes" on a version outside the configured set.
     land_on_version("0.0.0-wrong", &env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     dpu_nic_firmware_update
         .clear_completed_updates(&mut txn)
         .await?;
@@ -416,7 +402,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
     // A later pass sees the desired version: markers and the reported memory
     // both clear.
     land_on_version("24.42.1000", &env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     dpu_nic_firmware_update
         .clear_completed_updates(&mut txn)
         .await?;
@@ -434,7 +420,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
         )
         .await?;
     land_on_version("0.0.1-wrong", &env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     dpu_nic_firmware_update
         .clear_completed_updates(&mut txn)
         .await?;
@@ -460,12 +446,12 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
     // finished: the DPU is back with a firmware version outside the configured
     // set, its reprovisioning flag is cleared, and the in-update marker is still
     // on the host.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.id).await?;
     update_nic_firmware_version(&mut txn, &mh.dpu().id, "0.0.0-from-bfb").await?;
     let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
     sqlx::query(query)
-        .bind(mh.dpu().id.to_string())
+        .bind(mh.dpu().id)
         .execute(&mut *txn)
         .await?;
     db::machine::insert_health_report(
@@ -482,7 +468,8 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
         !env.config
             .dpu_config
             .dpu_nic_firmware_update_versions
-            .contains(&"0.0.0-from-bfb".to_string()),
+            .iter()
+            .any(|version| version == "0.0.0-from-bfb"),
         "the version the BFB landed must be off the NIC firmware allowlist",
     );
 
@@ -495,7 +482,7 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
     };
 
     let metrics = MetricsCapture::for_registry(env.test_meter.registry());
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     dpu_nic_firmware_update
         .clear_completed_updates(&mut txn)
         .await?;
@@ -528,7 +515,7 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
 impl TestManagedHost {
     pub(in crate::tests) async fn update_nic_firmware_version(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
     ) -> CarbideResult<()> {
         update_nic_firmware_version(txn, &self.dpu().id, "11.10.1000").await
     }
@@ -542,7 +529,7 @@ async fn stale_work_lock_cannot_admit_dpu_firmware(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
@@ -572,15 +559,13 @@ async fn stale_work_lock_cannot_admit_dpu_firmware(
         .await
         .expect_err("the previous worker must not admit a DPU update");
     assert!(matches!(error, crate::CarbideError::FailedPrecondition(_)));
-    let mut txn = env.pool.begin().await?;
-    let retained = host.snapshot(&mut txn).await;
+    let retained = host.snapshot(&mut env.db_reader()).await;
     assert!(
         retained
             .dpu_snapshots
             .iter()
             .all(|dpu| dpu.reprovision_requested.is_none())
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -603,7 +588,7 @@ async fn outstanding_dpu_read_failure_is_returned(
         config: std::sync::Arc::new(config),
         dpf: None,
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("SELECT 1 / 0")
         .execute(txn.as_mut())
         .await
@@ -625,7 +610,7 @@ async fn dpu_admission_keeps_work_lock_ownership_until_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
@@ -645,7 +630,7 @@ async fn dpu_admission_keeps_work_lock_ownership_until_commit(
     let updating_hosts = HashSet::new();
 
     // Pause the real writer after its fence, before it can save the request.
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(blocker.as_mut(), &host.dpu().id.into()).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())
@@ -678,14 +663,12 @@ async fn dpu_admission_keeps_work_lock_ownership_until_commit(
     .expect("admission and takeover must finish after the DPU row is released");
     assert_eq!(admitted?, HashSet::from([host.id.into()]));
     assert_eq!(taken_over?.rows_affected(), 1);
-    let mut txn = env.pool.begin().await?;
-    let dpu = host.dpu().db_machine(&mut txn).await;
+    let dpu = host.dpu().db_machine(&env.pool).await;
     assert!(
         dpu.reprovision_requested
             .expect("the request must commit before ownership changes")
             .update_firmware
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -697,7 +680,7 @@ async fn contended_dpu_admission_releases_another_work_manager(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     host.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
     let updater = DpuNicFirmwareUpdate {
@@ -724,7 +707,7 @@ async fn contended_dpu_admission_releases_another_work_manager(
         &mut tasks,
         env.pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let work_key = "contended-dpu-admission";
@@ -735,7 +718,7 @@ async fn contended_dpu_admission_releases_another_work_manager(
         .await?;
     let snapshots = get_all_snapshots(&env).await;
     let updating = HashSet::new();
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(blocker.as_mut(), &host.dpu().id.into()).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())
@@ -779,15 +762,13 @@ async fn contended_dpu_admission_releases_another_work_manager(
         .await?;
     assert_eq!(limit, "0");
     blocker.commit().await?;
-    let mut txn = env.pool.begin().await?;
     assert!(
         host.dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await?;
     drop(work_lock);
     drop(contender);
     writer_pool.close().await;

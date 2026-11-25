@@ -18,13 +18,13 @@
 use std::collections::HashSet;
 
 use carbide_uuid::switch::SwitchId;
-use db::DatabaseError;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_switch::ExpectedSwitch;
 use model::site_explorer::{EndpointType, ExploredManagedSwitch};
 use sqlx::{PgConnection, PgPool};
 
-use super::Config;
+use super::{Config, is_preingestion_complete};
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
@@ -40,18 +40,10 @@ impl SwitchCreator {
         expected_endpoint_index: &ExploredEndpointIndex,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
-
         let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+            db::explored_endpoints::find_all_preingestion_complete(&self.database_connection)
+                .await?;
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
         let managed_switches = explored_endpoints
             .iter()
             .filter(|ep| {
@@ -159,25 +151,23 @@ impl SwitchCreator {
         Ok(())
     }
 
+    /// Creates a switch only after every allocated address on its BMC interface
+    /// has an explored endpoint with completed preingestion. Returns false while
+    /// any alias is unexplored or unfinished, or the switch already exists.
     pub async fn create_managed_switch(
         &self,
         explored_managed_switch: &ExploredManagedSwitch,
         expected_switch: &ExpectedSwitch,
         pool: &PgPool,
     ) -> SiteExplorerResult<bool> {
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin create_managed_switch", e))?;
+        let mut txn = pool.txn_begin().await?;
 
         let created = self
             .create_switch(&mut txn, explored_managed_switch, expected_switch)
             .await?
             .is_some();
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit create_managed_switch", e))?;
+        txn.commit().await?;
 
         Ok(created)
     }
@@ -194,13 +184,23 @@ impl SwitchCreator {
         // exploration cycles (e.g. "NA" on the first read, a real value on
         // the second) and produces a different `SwitchId` second time round.
         if let Some(existing) =
-            db::switch::find_by_bmc_mac_address(txn, expected_switch.bmc_mac_address).await?
+            db::switch::find_by_bmc_mac_address(&mut *txn, expected_switch.bmc_mac_address).await?
         {
             tracing::warn!(
                 bmc_mac_address = %expected_switch.bmc_mac_address,
                 existing_switch_id = %existing.id,
                 "Switch already exists for this BMC MAC; skipping discovery",
             );
+            return Ok(None);
+        }
+
+        if !is_preingestion_complete(
+            txn,
+            expected_switch.bmc_mac_address,
+            explored_managed_switch.bmc_ip,
+        )
+        .await?
+        {
             return Ok(None);
         }
 
@@ -217,7 +217,7 @@ impl SwitchCreator {
 
         tracing::info!(%switch_id, "switch ID generated");
 
-        let existing_switch = db::switch::find_by_id(txn, &switch_id).await?;
+        let existing_switch = db::switch::find_by_id(&mut *txn, &switch_id).await?;
 
         if let Some(_existing_switch) = existing_switch {
             tracing::warn!(

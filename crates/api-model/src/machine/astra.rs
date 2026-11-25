@@ -250,9 +250,9 @@ pub fn astra_dpu_pci_address_for_physical_ifname(physical_ifname: &str) -> Optio
         .map(|mapping| mapping.dpu_pci_address)
 }
 
-/// Return the cage index for a NIC index in Astra.
+/// Return the cage index for a NIC index in Astra. Cages are not in NIC
+/// order: CX-4 and CX-5 are on cage 7, CX-6 and CX-7 on cage 5.
 ///
-/// Cage index is `((nic_index / 2) * 2) + 1`.
 /// This is the table for CX9 label to MPO label mapping.
 ///      CX9 label   MPO label
 ///      CX-0        C1-1

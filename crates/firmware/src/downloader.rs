@@ -19,6 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -225,11 +226,13 @@ pub(crate) enum DownloadFinished {
 /// errors or exposing the credentials in their URLs.
 fn redacted_error_chain(error: &(dyn Error + 'static)) -> String {
     let chain: Vec<_> = std::iter::successors(Some(error), |&error| error.source()).collect();
-    let mut message = chain
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ");
+    let mut message = String::new();
+    for (index, error) in chain.iter().enumerate() {
+        if index > 0 {
+            message.push_str(": ");
+        }
+        write!(message, "{error}").expect("writing to a String cannot fail");
+    }
     // Custom redirect policies can return another reqwest error with its own URL.
     // Keep the typed sources intact and redact each URL when presenting them.
     let mut urls: Vec<_> = chain
@@ -1078,11 +1081,13 @@ async fn download_and_publish(
     // No await after verification: a cancelled owner cannot leave behind a
     // blocking worker that publishes the file after a new attempt starts.
     std::fs::rename(&staged.path, &staged.attempt.filename)
-        .wrap_err(format!(
-            "unable to rename {} to {}",
-            staged.path.display(),
-            staged.attempt.filename.display()
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "unable to rename {} to {}",
+                staged.path.display(),
+                staged.attempt.filename.display()
+            )
+        })
         .map_err(fail(DownloadOutcome::Io))?;
     staged.published = true;
     Ok(())
@@ -1173,10 +1178,12 @@ async fn download(
         .get(url)
         .send()
         .await
-        .wrap_err(format!(
-            "FirmwareDownloader got error trying to download {}",
-            loggable_url(url)
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "FirmwareDownloader got error trying to download {}",
+                loggable_url(url)
+            )
+        })
         .map_err(fail(DownloadOutcome::Fetch))?;
     if !res.status().is_success() {
         return Err(fail(DownloadOutcome::Status)(eyre!(
@@ -1216,32 +1223,33 @@ fn verify_sha256(filename: &Path, checksum: &str) -> Result<(), Report> {
         return Ok(());
     }
 
-    let mut file = std::fs::File::open(filename)?;
-    verify_sha256_file(&mut file, &checksum)
-}
-
-/// Binds bytes to their expected SHA-256 identity and detects corruption. This
-/// is not publisher authentication or a substitute for firmware signatures.
-/// Reads from the file's current position and leaves its cursor at EOF.
-pub(crate) fn verify_sha256_file(file: &mut File, checksum: &str) -> Result<(), Report> {
-    let mut context = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let read = std::io::Read::read(file, &mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        context.update(&buffer[..read]);
-    }
-
-    let checksum_actual = hex::encode(context.finalize());
-
+    let file = std::fs::File::open(filename)?;
+    let checksum_actual = hex::encode(sha256_file::<std::io::Error>(&file, || Ok(()))?);
     if checksum_actual != checksum {
         return Err(eyre!(
             "checksum mismatch: expected {checksum} downloaded {checksum_actual}"
         ));
     }
     Ok(())
+}
+
+/// Check the caller's lifecycle before each read from the current position.
+/// A blocking read already in progress must finish. The digest identifies
+/// the bytes without authenticating their publisher.
+pub(crate) fn sha256_file<E: From<std::io::Error>>(
+    mut file: impl std::io::Read,
+    mut before_read: impl FnMut() -> Result<(), E>,
+) -> Result<[u8; 32], E> {
+    let mut context = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        before_read()?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(context.finalize().into());
+        }
+        context.update(&buffer[..read]);
+    }
 }
 
 #[cfg(test)]

@@ -4,14 +4,17 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -282,7 +285,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 	tests := []struct {
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		user               *cdbm.User
 		expectedErr        bool
 		expectedStatus     int
@@ -292,7 +295,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesnt bind",
 			reqOrgName:     ipOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -300,7 +303,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -308,7 +311,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when infrastructureProvider not specified in req body",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -316,7 +319,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when infrastructureProvider is invalid uuid",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody3),
+			reqBody:        errBody3,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -324,7 +327,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when org has no infrastructure provider",
 			reqOrgName:     ipOrg3,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -332,7 +335,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when infrastructure in request does not match that in org",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody4),
+			reqBody:        errBody4,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -340,7 +343,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when neither tenant id nor tenant org is specified in req body",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody2),
+			reqBody:        errBody2,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -348,7 +351,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant id specified but not valid uuid",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody5),
+			reqBody:        errBody5,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -356,7 +359,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant id specified but not found",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errBody6),
+			reqBody:        errBody6,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -364,7 +367,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:               "success case when tenant id specified",
 			reqOrgName:         ipOrg1,
-			reqBody:            string(okBody1),
+			reqBody:            okBody1,
 			user:               ipu,
 			expectedErr:        false,
 			expectedStatus:     http.StatusCreated,
@@ -374,7 +377,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant account already exists for infrastructure provider, tenant",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -382,7 +385,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:             "success case when tenant org specified and Tenant exists",
 			reqOrgName:       ipOrg1,
-			reqBody:          string(okBody2),
+			reqBody:          okBody2,
 			user:             ipu,
 			expectedErr:      false,
 			expectedStatus:   http.StatusCreated,
@@ -391,7 +394,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:             "success case when tenant org specified and Tenant does not exist",
 			reqOrgName:       ipOrg1,
-			reqBody:          string(okBody3),
+			reqBody:          okBody3,
 			user:             ipu,
 			expectedErr:      false,
 			expectedStatus:   http.StatusCreated,
@@ -400,7 +403,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 		{
 			name:             "success when infrastructureProviderId is omitted (inferred from org)",
 			reqOrgName:       ipOrg1,
-			reqBody:          string(okBodyInferIP),
+			reqBody:          okBodyInferIP,
 			user:             ipu,
 			expectedErr:      false,
 			expectedStatus:   http.StatusCreated,
@@ -413,7 +416,7 @@ func TestTenantAccountHandler_Create(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -544,7 +547,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tests := []struct {
 		name           string
 		reqOrgName     string
-		reqBody        string
+		reqBody        []byte
 		user           *cdbm.User
 		tnID           string
 		taID           string
@@ -562,7 +565,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           nil,
 			tnID:           tn1.ID.String(),
 			taID:           ta1.ID.String(),
@@ -573,7 +576,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when tenantContactId is invalid uuid",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           "someB*d(uuid",
@@ -584,7 +587,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "BadBody",
+			reqBody:        []byte("BadBody"),
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           ta1.ID.String(),
@@ -595,7 +598,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody json doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           ta1.ID.String(),
@@ -606,7 +609,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when tenantContactId in request does not match requesting user",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBody2),
+			reqBody:        errBody2,
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           ta1.ID.String(),
@@ -617,7 +620,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified org does not have tenant",
 			reqOrgName:     tnOrg4,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           ta1.ID.String(),
@@ -628,7 +631,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:            "error when specified org does not have matching tenant in tenant account",
 			reqOrgName:      tnOrg1,
-			reqBody:         string(okBody1),
+			reqBody:         okBody1,
 			user:            tnUser,
 			tnID:            tn1.ID.String(),
 			taID:            ta2.ID.String(),
@@ -640,7 +643,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:                   "error when unlinked tenant account was issued to another org",
 			reqOrgName:             tnOrg1,
-			reqBody:                string(okBody1),
+			reqBody:                okBody1,
 			user:                   tnUser,
 			tnID:                   tn1.ID.String(),
 			taID:                   taForeign.ID.String(),
@@ -654,7 +657,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:                   "success case links unlinked tenant account to the org's tenant",
 			reqOrgName:             tnOrg5,
-			reqBody:                string(okBody1),
+			reqBody:                okBody1,
 			user:                   tnUser,
 			tnID:                   tn5.ID.String(),
 			taID:                   taUnlinked.ID.String(),
@@ -667,7 +670,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified tenant account doesnt exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnUser,
 			tnID:           tn1.ID.String(),
 			taID:           uuid.New().String(),
@@ -678,7 +681,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "error when specified tenant account is not in Invited status",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnUser,
 			tnID:           tn3.ID.String(),
 			taID:           ta3.ID.String(),
@@ -689,7 +692,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:               "success case when tenantContactId specified in body",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody2),
+			reqBody:            okBody2,
 			user:               tnUser,
 			tnID:               tn1.ID.String(),
 			taID:               ta1.ID.String(),
@@ -701,7 +704,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		{
 			name:           "success case when tenantContactId id not specified in body",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnUser,
 			tnID:           tn2.ID.String(),
 			taID:           ta2.ID.String(),
@@ -716,7 +719,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -733,6 +736,12 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 				dbSession: dbSession,
 				tc:        tempClient,
 				cfg:       cfg,
+			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.taID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
 			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
@@ -763,7 +772,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 				assert.Equal(t, ip.ID.String(), rsp.InfrastructureProviderID)
 				assert.Equal(t, tc.tnID, *rsp.TenantID)
 				assert.Equal(t, cdbm.TenantAccountStatusReady, rsp.Status)
-				assert.NotEqual(t, rsp.Updated.String(), tc.ta.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 			}
 
 			if tc.verifyChildSpanner {
@@ -813,7 +822,7 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 		require.NoError(t, err)
 
 		e := echo.New()
-		req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(body))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 		ec := e.NewContext(req, rec)
@@ -1499,7 +1508,6 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			queryIncludeRelations2:        cutil.GetPtr(cdbm.IPBlockRelationName),
 			pageNumber:                    cutil.GetPtr(1),
 			pageSize:                      cutil.GetPtr(10),
-			orderBy:                       cutil.GetPtr("TEST_ASC"),
 			expectedErr:                   true,
 			expectedStatus:                http.StatusBadRequest,
 			expectedCnt:                   0,
@@ -1757,10 +1765,10 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1790,14 +1798,13 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			err := gatah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
-			if tc.expectedErr {
-				return
-			}
-
 			if rec.Code != tc.expectedStatus {
 				t.Errorf("response %v", rec.Body.String())
 			}
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedErr {
+				return
+			}
 
 			resp := []model.APITenantAccount{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)

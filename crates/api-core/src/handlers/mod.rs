@@ -30,6 +30,7 @@ pub(super) mod compute_allocation;
 pub(super) mod credential;
 pub(super) mod credential_rotation;
 pub(super) mod db;
+pub(super) mod dhcp_option_set;
 pub(super) mod dns;
 pub(super) mod domain;
 pub(super) mod dpa;

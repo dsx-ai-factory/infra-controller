@@ -65,7 +65,7 @@ impl RpcTryFrom<(CreateRemediationRequest, String)> for NewRemediation {
             rpc_request.retries
         };
 
-        let script = rpc_request.script.to_string();
+        let script = rpc_request.script;
         if script.len() > MAXIMUM_SCRIPT_LENGTH {
             return Err(RpcDataConversionError::InvalidArgument(format!(
                 "script must not exceed length: {MAXIMUM_SCRIPT_LENGTH}"
@@ -237,6 +237,9 @@ mod tests {
         assert!(!status.succeeded);
         let metadata = status.metadata.unwrap();
         assert_eq!(metadata.name, "test");
-        assert_eq!(metadata.labels.get("status"), Some(&"failed".to_string()));
+        assert_eq!(
+            metadata.labels.get("status").map(String::as_str),
+            Some("failed")
+        );
     }
 }

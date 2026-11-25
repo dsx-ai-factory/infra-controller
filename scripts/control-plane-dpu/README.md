@@ -88,7 +88,8 @@ Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When
 and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` is optional.
 `fnn.routeTargetsToImport` is optional only for a site with no tenant routing profile in
 use and `siteControllerRoutesAsn` equal to `datacenterAsn`; otherwise it must list every
-active profile's common tag and, when the ASNs differ, `<siteControllerRoutesAsn>:50100`
+active profile's common tag and, when the ASNs differ,
+`<siteControllerRoutesAsn>:<fnn.commonSiteControllerRouteTarget>`
 (see the field notes below). No other field supplies these imports.
 
 Optional: `installWithLeafPassword: true` — for datacenters that enforce BGP TCP MD5
@@ -172,11 +173,14 @@ detect and apply the real MAC automatically at the end of provisioning.
 What the build does with each value:
 
 - `datacenterAsn` — the ASN half of every route target the datacenter originates; the three
-  fixed imports (`:900`, `:50400`, `:50100`) are rendered as `<datacenterAsn>:<n>`.
+  built-in imports are rendered as `<datacenterAsn>:<n>`, using the configured `fnn`
+  route-target numbers (the samples use `900`, `50400`, and `50100`).
 - `siteControllerRoutesAsn` — the ASN under which the site controllers' routes are exported
-  (`<siteControllerRoutesAsn>:50100`). It may equal `datacenterAsn`. If it differs, add
-  `<siteControllerRoutesAsn>:50100` to `fnn.routeTargetsToImport`, because the fixed `:50100`
-  import is rendered under `datacenterAsn`.
+  as `<siteControllerRoutesAsn>:<fnn.commonSiteControllerRouteTarget>`. It may equal
+  `datacenterAsn`. If it differs, add that full target to `fnn.routeTargetsToImport`,
+  because the built-in controller import uses `datacenterAsn`.
+  For example, with `siteControllerRoutesAsn: 4200100000` and
+  `fnn.commonSiteControllerRouteTarget: 45100`, add `4200100000:45100`.
 - `bgpAsnStart` — site controller node *n* (its `nodeId`) gets DPU ASN `bgpAsnStart + n`; the
   host side of every `/31` peers as `bgpAsnStart`.
 - `forgeDpuLoopbackPrefix` — one `/32` per node, the DPU's VTEP address. It must lie in the same
@@ -189,8 +193,9 @@ What the build does with each value:
 - `fnn.controlPlaneVni` — the L3VNI of the control-plane VRF, one per site, from the NICo VNI
   block and in no tenant pool.
 - `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
-  `fnn.commonAdminNetworkTarget` — the numbers of the three fixed imports (`900`, `50100`,
-  `50400`); the second is also the export number.
+  `fnn.commonAdminNetworkTarget` — the numbers of the three built-in imports (the samples
+  use `900`, `50100`, and `50400`); the controller route-target number also controls the
+  export. Use the configured values when constructing full route targets.
 - `fnn.routeTargetsToImport` — additional full route targets (`<asn>:<n>`) to import, for jump
   hosts, rack devices, storage management and the tenant profiles' common tags. Never the site
   controllers' own out-of-band segment (`:901`) or a tenant's native target. It is a map keyed

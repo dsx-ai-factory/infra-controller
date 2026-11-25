@@ -890,6 +890,20 @@ The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its
 
 The site worker sets the `site` namespace retention to `temporal.siteNamespace.retention` on startup, `72h` by default. That's how long failed, canceled, terminated, and timed out workflows are kept. An hourly cron deletes successful inventory workflows sooner, once they are older than `temporal.siteNamespace.successfulInventoryRetention`, `24h` by default. It has to be shorter than a nonzero `temporal.siteNamespace.retention`, otherwise the cloud and site workers exit on startup. Set either value to `0` to turn it off. If Temporal rejects the retention update, the worker logs a warning and starts anyway. If the cron can't be started, the worker exits before it polls, so the pod restarts and tries again. Temporal only applies a new retention to workflows that close after the change.
 
+Each worker pod runs at most `worker.maxConcurrentActivityExecutionSize` activities at once. The default is `128` for each pod of the cloud worker and of the site worker, and a set value applies to both workers. It accepts `1` to `1000`, and a value outside that range makes the cloud worker and the site worker exit on startup.
+
+### Worker resources and sizing
+
+The `nico-rest-workflow` Helm chart defaults the site worker to limits of `2000m` CPU and `2Gi` memory, and the cloud worker to `500m` and `512Mi`. The chart sets `GOMEMLIMIT` on each worker to 85 percent of its `resources.limits.memory`, rounded down to whole MiB, and sets none when that limit is absent or is not a whole number of `Mi` or `Gi`, such as `1.5Gi` or `2G`. At the defaults, it sets `1740MiB` on the site worker and `435MiB` on the cloud worker. A `GOMEMLIMIT` key in `extraEnv`, `siteWorker.extraEnv`, or `cloudWorker.extraEnv` replaces the derived value, and the worker's key wins over the shared key. Quote the value, for example `"1500MiB"`, or `"off"` for no limit.
+
+The Kustomize base in `base/workflow/deployment.yaml` gives both workers limits of `500m` CPU and `512Mi` memory and does not set `GOMEMLIMIT`, so set the site worker limits and `GOMEMLIMIT` in an overlay.
+
+On a [simulated site of 1,112 racks (20,016 hosts)](../../docs/development/machine-a-tron-scale-testing.md#20000-host-simulated-fleet) with the default 3-minute inventory schedule, one site worker pod at the chart's default limits finished every cycle of about 1,300 page workflows, whether `worker.maxConcurrentActivityExecutionSize` was `32` or `128`, with none longer than 30 seconds, and with the setting at `32` its working set stayed under 200 MiB from a fresh start. At `500m` CPU and `1Gi` with the setting at `32`, one pod did not keep up and was killed for memory five times in 12 minutes, and three pods finished every cycle. At `1000m` CPU and `2Gi` with the setting at `128`, one pod was CPU-bound and its working set reached about 1.8 GiB.
+
+When one pod at the default limits started with a whole cycle of page workflows open, its working set peaked at 1.42 to 1.65 GiB in the first minute. Without `GOMEMLIMIT`, 2 of 7 such starts were killed for memory and recovered after one restart, and with `GOMEMLIMIT=1740MiB`, none of 6 was killed. At such a start, each open page workflow holds one page of inventory, and `worker.maxConcurrentActivityExecutionSize` limits running activities, not open page workflows, so with more hosts or more sites, raise `siteWorker.resources.limits.memory` or add site worker replicas.
+
+On a 1-minute schedule, one pod at the chart defaults completed 7,454 of 7,459 page workflows in an 8-minute window, with 5 still running at its end, none longer than 10 seconds, an average of 1.0 CPU cores, and a working set under 200 MiB. At that schedule the Site Agent published machine inventory every 2 minutes, because one machine collection run took longer than a minute at this size. Each steady-state configuration was measured once, over about four cycles, and real hardware (larger pages), more than one site, and the cloud worker under load were not measured.
+
 ### Secrets mounted at runtime
 
 | Secret | Description |

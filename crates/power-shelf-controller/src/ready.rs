@@ -19,11 +19,11 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
+use model::machine::PowerState;
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
 };
-use sqlx::PgTransaction;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -57,7 +57,12 @@ pub async fn handle_ready(
     }
 
     if state.decommission_requested {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_power_shelf::clear_decommission_requested(txn.as_mut(), *power_shelf_id).await?;
         return Ok(
             StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
@@ -88,7 +93,12 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -106,7 +116,12 @@ pub async fn handle_ready(
                 "unknown initiator for power shelf reprovisioning request: {}",
                 req.initiator
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -124,7 +139,12 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request has no power-shelf-relevant activities; clearing request"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -162,7 +182,7 @@ pub async fn handle_ready(
 ///
 /// On a successful response, the observed power state for this power shelf is
 /// persisted to the `power_shelves.status` column and the in-memory `state`
-/// is updated to match. The returned `PgTransaction` (if any) carries that
+/// is updated to match. The returned `db::Transaction` (if any) carries that
 /// status write so the caller can attach it to the `Ready` outcome and have
 /// the state-controller framework commit it alongside the usual outcome
 /// bookkeeping.
@@ -170,7 +190,7 @@ async fn poll_power_state(
     power_shelf_id: &PowerShelfId,
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
-) -> Option<PgTransaction<'static>> {
+) -> Option<db::Transaction<'static>> {
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         tracing::debug!(
             power_shelf_id = %power_shelf_id,
@@ -206,7 +226,6 @@ async fn poll_power_state(
         }
     };
 
-    let rack_id_str = rack_id.to_string();
     let results = match component_manager
         .power_shelf
         .get_power_state(std::slice::from_ref(&endpoint))
@@ -216,7 +235,7 @@ async fn poll_power_state(
         Err(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state transport error",
@@ -227,20 +246,28 @@ async fn poll_power_state(
 
     match interpret_power_state_poll(results) {
         PowerStatePollOutcome::Observed(observed_power_state) => {
-            let observed_power_state = observed_power_state.to_string().to_lowercase();
+            let observed_power_state = match observed_power_state {
+                PowerState::Off => "off",
+                PowerState::On => "on",
+                PowerState::PoweringOff => "poweringoff",
+                PowerState::PoweringOn => "poweringon",
+                PowerState::Paused => "paused",
+                PowerState::Reset => "reset",
+                PowerState::Unknown => "unknown",
+            };
             tracing::info!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 power_state = %observed_power_state,
                 "Power shelf get power state succeeded",
             );
-            persist_observed_power_state(power_shelf_id, state, ctx, &observed_power_state).await
+            persist_observed_power_state(power_shelf_id, state, ctx, observed_power_state).await
         }
         PowerStatePollOutcome::BackendError(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state returned an error result",
@@ -267,7 +294,7 @@ async fn poll_power_state(
 }
 
 /// Stamp the observed power state into `state.status` and persist it via
-/// `db_power_shelf::update`. Returns the open `PgTransaction` so the caller
+/// `db_power_shelf::update`. Returns the open `db::Transaction` so the caller
 /// can attach it to the `Ready` outcome.
 ///
 /// Status persistence is best-effort: if the DB write fails, the in-memory
@@ -278,7 +305,20 @@ async fn persist_observed_power_state(
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     observed_power_state: &str,
-) -> Option<PgTransaction<'static>> {
+) -> Option<db::Transaction<'static>> {
+    if state
+        .status
+        .as_ref()
+        .is_some_and(|s| s.power_state == observed_power_state)
+    {
+        tracing::debug!(
+            power_shelf_id = %power_shelf_id,
+            power_state = %observed_power_state,
+            "PowerShelf status power_state unchanged; skipping DB write",
+        );
+        return None;
+    }
+
     let new_status = match state.status.as_ref() {
         Some(existing) => PowerShelfStatus {
             shelf_name: existing.shelf_name.clone(),
@@ -292,22 +332,9 @@ async fn persist_observed_power_state(
         },
     };
 
-    if state
-        .status
-        .as_ref()
-        .is_some_and(|s| s.power_state == new_status.power_state)
-    {
-        tracing::debug!(
-            power_shelf_id = %power_shelf_id,
-            power_state = %new_status.power_state,
-            "PowerShelf status power_state unchanged; skipping DB write",
-        );
-        return None;
-    }
-
     let previous_status = state.status.replace(new_status);
 
-    let mut txn = match ctx.services.db_pool.begin().await {
+    let mut txn = match ctx.services.db_pool.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             state.status = previous_status;

@@ -29,7 +29,7 @@ func (m *ManagerImpl) createResetTasks(ctx context.Context, req *operation.Reque
 	tasks := make([]taskdef.Task, 0, len(ids))
 	err := m.taskStore.RunInTransaction(ctx, func(txCtx context.Context) error {
 		for _, id := range ids {
-			current := newTaskForRack(req, racks[id])
+			current := newTaskForRack(txCtx, req, racks[id])
 			err := m.lockRackAndResolveConflict(txCtx, req, racks[id], &current)
 			if err != nil {
 				return err

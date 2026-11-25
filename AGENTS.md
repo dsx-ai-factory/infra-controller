@@ -14,12 +14,17 @@ for repository, PR, issue, and source links.
 Follow the user's requested outcome and applicable instructions. Read the nearest
 `AGENTS.md` for each affected component and the relevant sections of
 [STYLE_GUIDE.md](STYLE_GUIDE.md) before changing Rust, Go, or protobuf code.
+For files under `rest-api/`, [REST API guidance](rest-api/AGENTS.md) takes
+precedence wherever it conflicts with this guide.
 Explicit exceptions here, including test selection below, narrow the style guide.
 For repository conventions, follow `STYLE_GUIDE.md` over conflicting user-global
 `AGENTS.md` guidance. Explicit task instructions still take precedence.
 
 Follow [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines) for scope,
-reuse, evidence, and verification. Preserve others' work. Do not edit any
+evidence, and verification. When implementing review feedback, follow
+[reuse before adding code](CONTRIBUTING.md#reuse-before-adding-code). Before
+adding a guard or fallback, trace the input from its boundary. If that boundary
+already rejects it, preserve the rejection there. Preserve others' work. Do not edit any
 `AGENTS.md` file or `STYLE_GUIDE.md` unless the user requests those changes.
 Never commit secrets or local environment files; keep local secrets in
 gitignored `.local_envrc` and follow [secret scanning](CONTRIBUTING.md#secret-scanning).
@@ -82,10 +87,8 @@ Clippy treats warnings as errors. `make help` lists top-level entrypoints,
 including `make core/check-isolated-package-builds`. REST uses `make rest-build`,
 `make rest-test`, `make rest-lint`, `make rest-fmt`, `make rest-helm-lint`,
 `make rest-docker-build-local`, `make rest-kind-reset`, or `make rest-api/<target>`.
-Run Go service tests through these Make targets, which start required PostgreSQL
-and mock Core/Flow gRPC services. Do not run `go test` directly: Site Agent tests
-can retry every `40s` until the `10m` timeout instead of failing promptly. See
-[REST testing](rest-api/AGENTS.md#testing) for module-specific targets.
+Run Go service tests through the module-specific Make targets in
+[REST testing](rest-api/AGENTS.md#testing), which manage their prerequisites.
 
 Use the stable toolchain for ordinary builds/tests. `format-nightly`,
 `check-format-nightly`, and `carbide-lints` use the pinned nightly task setup.
@@ -127,6 +130,9 @@ different assertions, use a local case table with each check beside its inputs.
 Use the narrowest Rust visibility required by actual callers. Do not widen
 production APIs just for tests or to silence dead-code warnings; see
 [visibility](STYLE_GUIDE.md#visibility).
+
+Use `DbReader` for read-only database functions. See
+[read-only database queries](STYLE_GUIDE.md#read-only-database-queries).
 
 REST response fields preserve empty values. Use `omitempty` only for date-gated
 attribute removal or opt-in `includeRelation` expansions; see the scoped REST

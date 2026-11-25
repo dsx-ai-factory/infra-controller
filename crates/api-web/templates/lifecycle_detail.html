@@ -1,21 +1,36 @@
 <h2>Lifecycle</h2>
-<table class="detailsview">
-	<tr>
-		<th>State</th>
-		<td>{{ state_display|safe }}</td>
-	</tr>
-	{% if let Some(associated_instance_id) = associated_instance_id %}
-	<tr><th>Instance</th><td><a href="/admin/instance/{{ associated_instance_id }}">{{ associated_instance_id }}</a></td></tr>
-	{% endif %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>State</h4>
+			<dl>
+				<dt>Current</dt>
+				<dd>{{ state_display|safe }}</dd>
+				<dt>SLA</dt>
+				<dd>{% if state_sla.is_empty() %}None{% else %}{{ state_sla }}{% endif %}</dd>
+				<dt>Version</dt>
+				<dd>{{ version|config_version|safe }}</dd>
+				{% if let Some(last_reboot) = last_reboot %}
+				<dt>Last Reboot</dt>
+				<dd>{{ last_reboot }}</dd>
+				{% endif %}
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>State Handler</h4>
+			<div class="entity-summary-block">
+				{% if state_reason.is_some() %}
+				{{ state_reason|controller_state_reason_fmt|safe }}
+				{% else %}
+				<span class="text-muted">No outcome reported.</span>
+				{% endif %}
+			</div>
+		</div>
+	</div>
 	{% if let Some(json_state) = json_state %}
-	<tr>
-		<th>JSON State</th>
-		<td><div style="overflow: auto;"><pre><code>{{ json_state|pretty_json }}</code></pre></div></td>
-	</tr>
+	<details class="entity-summary-details">
+		<summary>JSON state</summary>
+		<pre><code>{{ json_state|pretty_json }}</code></pre>
+	</details>
 	{% endif %}
-	<tr><th>State Version</th><td>{{ version|config_version|safe }}</td></tr>
-	<tr><th>Time in state</th><td>{{ time_in_state }}</td></tr>
-	<tr><th>State SLA</th><td>{{ state_sla }}</td></tr>
-	<tr><th>Time in State is above SLA</th><td>{{ time_in_state_above_sla }}</td></tr>
-	<tr><th>State Handler Outcome</th><td>{{ state_reason|controller_state_reason_fmt|safe }}</td></tr>
-</table>
+</section>

@@ -1,51 +1,72 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
-{% block title %}VPC Detail{% endblock %}
+{% block title %}VPC {{ id }}{% endblock %}
+{% block entity_label %}VPC{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>VPC Detail</h1>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Tenancy</h4>
+			<dl>
+				<dt>Tenant</dt>
+				<dd><a href="/admin/tenant/{{ tenant_organization_id }}">{{ tenant_organization_id }}</a></dd>
+				<dt>Keyset</dt>
+				<dd>{% if tenant_keyset_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/tenant_keyset/{{ tenant_organization_id }}/{{ tenant_keyset_id }}">{{ tenant_keyset_id }}</a>{% endif %}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Network</h4>
+			<dl>
+				<dt>Virtualization</dt>
+				<dd>{{ network_virtualization_type }}</dd>
+				<dt>Routing Profile</dt>
+				<dd>{{ routing_profile_type }}</dd>
+				<dt>VNI</dt><dd>{{ vni }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
-<table class="detailsview">
-	<tr><th>Id</th><td>{{ id }}</td></tr>
-	<tr><th>Tenant</th><td><a href="/admin/tenant/{{ tenant_organization_id }}">{{ tenant_organization_id }}</a></td></tr>
-	<tr><th>Keyset ID</th><td><a href="/admin/tenant_keyset/{{ tenant_organization_id }}/{{ tenant_keyset_id }}">{{ tenant_keyset_id }}</a></td></tr>
-	<tr><th>Network Virtualization</th><td>{{ network_virtualization_type }}</td></tr>
-	<tr><th>Routing Profile Type</th><td>{{ routing_profile_type }}</td></tr>
-	<tr><th>VNI</th><td>{{ vni }}</td></tr>
-</table>
-
-<h2>Routing Profile Overrides</h2>
-{% if has_routing_profile_overrides %}
-<div style="overflow: auto;"><pre><code>{{ routing_profile_overrides }}</code></pre></div>
-{% else %}
-<p>None</p>
-{% endif %}
-
-<h2>Current Effective Routing Profile</h2>
-{% if has_effective_routing_profile %}
-<div style="overflow: auto;"><pre><code>{{ effective_routing_profile }}</code></pre></div>
-{% else %}
-<p>Not applicable or unavailable from the current API configuration.</p>
-{% endif %}
+<h2>Routing Profile</h2>
+<section class="entity-summary">
+	<div class="entity-summary-table">
+		<h4>Overrides</h4>
+		{% if has_routing_profile_overrides %}
+		<pre class="entity-summary-pre"><code>{{ routing_profile_overrides }}</code></pre>
+		{% else %}
+		<p class="entity-summary-empty">None</p>
+		{% endif %}
+	</div>
+	<div class="entity-summary-table">
+		<h4>Current Effective Profile</h4>
+		{% if has_effective_routing_profile %}
+		<pre class="entity-summary-pre"><code>{{ effective_routing_profile }}</code></pre>
+		{% else %}
+		<p class="entity-summary-empty">Not applicable or unavailable from the current API configuration.</p>
+		{% endif %}
+	</div>
+</section>
 
 <h2>Metadata</h2>
 {{ metadata_detail|safe }}
 
 <h2>VPC Peerings</h2>
-{% if peerings.is_empty() %}
-<p>No VPC peerings found.</p>
-{% else %}
-<table class="sortable overview">
-	<thead>
-		<tr><th>Peering ID</th><th>Peer VPC</th></tr>
-	</thead>
-	<tbody>
+<section class="entity-summary">
+	{% if peerings.is_empty() %}
+	<p class="entity-summary-empty">No VPC peerings.</p>
+	{% else %}
+	<div class="data-table-scroll">
+	<table class="data-table">
+		<thead><tr><th>Peering ID</th><th>Peer VPC</th></tr></thead>
+		<tbody>
 		{% for peering in peerings %}
-		<tr><td>{{ peering.id }}</td><td><a href="/admin/vpc/{{ peering.peer_vpc_id }}">{{ peering.peer_vpc_id }}</a></td></tr>
+			<tr><td>{{ peering.id }}</td><td><a href="/admin/vpc/{{ peering.peer_vpc_id }}">{{ peering.peer_vpc_id }}</a></td></tr>
 		{% endfor %}
-	</tbody>
-</table>
-{% endif %}
-
+		</tbody>
+	</table>
+	</div>
+	{% endif %}
+</section>
 {% endblock %}

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue};
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -496,7 +496,7 @@ impl WorkLock {
     /// Keep the transaction short and free of external I/O. A replica that
     /// tries to acquire this key waits for the fence in its single manager
     /// loop, which also delays that replica's unrelated lock commands.
-    pub async fn fence_transaction(&self, txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+    pub async fn fence_transaction(&self, txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
         let query = r#"
 SELECT true
 FROM work_locks
@@ -827,7 +827,7 @@ mod tests {
     async fn command_dispatch_errors_distinguish_capacity_and_shutdown() {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             keepalive_interval: Duration::from_secs(60),
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -867,10 +867,10 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_work_lock_suppresses_in_flight_lock_lost() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: metrics.instrumentation().clone(),
             keepalive_interval: Duration::from_secs(60),
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -931,7 +931,7 @@ mod tests {
                 &mut join_set,
                 pool,
                 Default::default(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .await
             .unwrap();
@@ -979,7 +979,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("start work lock manager");
@@ -1019,7 +1019,7 @@ mod tests {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let manager = WorkLockManagerHandle {
-            instrumentation: carbide_instrument::Instrumentation::global(),
+            instrumentation: carbide_instrument::Instrumentation::noop(),
             keepalive_interval: keepalive_config.interval,
             cmd_tx,
             command_slots: Arc::new(Semaphore::new(COMMAND_BUFFER_SIZE)),
@@ -1053,7 +1053,7 @@ mod tests {
             pool,
             cmd_rx,
             keepalive_config.timeout,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         ));
 
         keepalive_reply_rx
@@ -1080,15 +1080,12 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn release_is_not_dropped_when_command_queue_is_full(pool: PgPool) {
-        // Dropping the lock with every command slot reserved can race a keepalive dispatch
-        // failure, so isolate process-global metric deltas through teardown.
-        let _metrics_guard = MetricsCapture::start();
         let mut join_set = JoinSet::new();
         let manager = start(
             &mut join_set,
             pool,
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -1116,9 +1113,6 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn test_db_failure(pool: PgPool) {
-        // Tests that can emit WorkLock failures hold this guard through teardown
-        // so process-global counter deltas stay isolated.
-        let _metrics_guard = MetricsCapture::start();
         let mut join_set = JoinSet::new();
         let manager = start(
             &mut join_set,
@@ -1128,7 +1122,7 @@ mod tests {
                 interval: Duration::from_millis(100),
                 timeout: Duration::from_millis(500),
             },
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -1169,10 +1163,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
     // Use tokio::test instead of sqlx::test here because we don't need to run migrations/etc
     #[tokio::test]
     async fn test_read_only_connection_is_replaced() {
-        // Use a fast acquire timeout so that the test isn't too slow if it fails.
-        let pool = sqlx::pool::PoolOptions::new()
-            .acquire_timeout(Duration::from_secs(1))
-            .connect(&env::var("DATABASE_URL").unwrap())
+        let pool = PgPool::connect(&env::var("DATABASE_URL").unwrap())
             .await
             .unwrap();
 
@@ -1219,7 +1210,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
                 &mut join_set,
                 main_pool,
                 Default::default(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             ),
         )
         .await
@@ -1234,7 +1225,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
 
     #[crate::sqlx_test]
     async fn test_expiry(pool: PgPool) {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut join_set = JoinSet::new();
         let manager = start(
             &mut join_set,
@@ -1244,7 +1235,7 @@ WHERE datname = $1 AND pid <> pg_backend_pid()"#,
                 interval: Duration::from_millis(500),
                 timeout: Duration::from_millis(100),
             },
-            carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation().clone(),
         )
         .await
         .unwrap();

@@ -23,8 +23,8 @@ use model::address_selection_strategy::AddressSelectionStrategy;
 use model::network_segment::NetworkSegmentControllerState;
 
 use crate as db;
-use crate::DatabaseError;
 use crate::test_support::network_segment::admin_segment;
+use crate::{DatabaseError, TransactionVending as _};
 
 fn test_machine_id() -> MachineId {
     MachineId::new(
@@ -38,7 +38,7 @@ fn test_machine_id() -> MachineId {
 async fn prevent_duplicate_mac_addresses(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let network_segment = db::network_segment::persist(
         admin_segment("ADMIN_TEST", "192.0.2.0/24", "192.0.2.1", 3),
         &mut txn,
@@ -58,7 +58,7 @@ async fn prevent_duplicate_mac_addresses(
     .await?;
 
     let machine_id = test_machine_id();
-    db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface, None).await?;
+    db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface).await?;
 
     let duplicate_interface = db::machine_interface::create(
         &mut txn,

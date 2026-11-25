@@ -17,7 +17,6 @@
 
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
-use sqlx::PgTransaction;
 
 use crate::state_handler::StateHandlerError;
 
@@ -52,7 +51,7 @@ pub struct DbWriteBatch {
 pub trait WriteOp: Send {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut ::db::Transaction<'t>,
     ) -> Result<(), StateHandlerError>;
 }
 
@@ -65,7 +64,7 @@ impl std::fmt::Debug for DbWriteBatch {
 }
 
 pub type WriteOpFn = Box<
-    dyn for<'t> FnOnce(&'t mut PgTransaction) -> BoxFuture<'t, Result<(), StateHandlerError>>
+    dyn for<'t> FnOnce(&'t mut ::db::Transaction) -> BoxFuture<'t, Result<(), StateHandlerError>>
         + Send
         + Sync
         + 'static,
@@ -75,7 +74,7 @@ pub type WriteOpFn = Box<
 impl WriteOp for WriteOpFn {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut ::db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         (*self)(txn).await
     }
@@ -90,7 +89,7 @@ impl DbWriteBatch {
         self.writes.push(Box::new(op));
     }
 
-    pub async fn apply_all(self, txn: &mut PgTransaction<'_>) -> Result<(), StateHandlerError> {
+    pub async fn apply_all(self, txn: &mut ::db::Transaction<'_>) -> Result<(), StateHandlerError> {
         for w in self.writes {
             w.apply(txn).await?;
         }

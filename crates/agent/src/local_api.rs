@@ -92,19 +92,19 @@ fn prepare_socket_dir(dir: &std::path::Path, socket_path: &str) -> eyre::Result<
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 
     let Some(metadata) = optional_symlink_metadata(dir)
-        .wrap_err(format!("inspecting socket directory {}", dir.display()))?
+        .wrap_err_with(|| format!("inspecting socket directory {}", dir.display()))?
     else {
         // Ancestors keep their normal modes; only the socket directory itself
         // is created restricted, and created that way from the first instant
         // rather than chmod-ed after the fact.
         if let Some(ancestor) = dir.parent() {
             std::fs::create_dir_all(ancestor)
-                .wrap_err(format!("creating socket directory {}", ancestor.display()))?;
+                .wrap_err_with(|| format!("creating socket directory {}", ancestor.display()))?;
         }
         return std::fs::DirBuilder::new()
             .mode(0o700)
             .create(dir)
-            .wrap_err(format!("creating socket directory {}", dir.display()));
+            .wrap_err_with(|| format!("creating socket directory {}", dir.display()));
     };
 
     // `symlink_metadata` does not follow the final component, so this catches a
@@ -134,15 +134,16 @@ fn prepare_socket_dir(dir: &std::path::Path, socket_path: &str) -> eyre::Result<
     }
 
     let socket_name = std::path::Path::new(socket_path).file_name();
-    for entry in
-        std::fs::read_dir(dir).wrap_err(format!("reading socket directory {}", dir.display()))?
+    for entry in std::fs::read_dir(dir)
+        .wrap_err_with(|| format!("reading socket directory {}", dir.display()))?
     {
-        let entry = entry.wrap_err(format!("reading socket directory {}", dir.display()))?;
+        let entry =
+            entry.wrap_err_with(|| format!("reading socket directory {}", dir.display()))?;
         let name = entry.file_name();
         if socket_name == Some(name.as_os_str()) {
             if !entry
                 .file_type()
-                .wrap_err(format!("inspecting socket path {}", entry.path().display()))?
+                .wrap_err_with(|| format!("inspecting socket path {}", entry.path().display()))?
                 .is_socket()
             {
                 eyre::bail!(
@@ -162,10 +163,12 @@ fn prepare_socket_dir(dir: &std::path::Path, socket_path: &str) -> eyre::Result<
         }
     }
 
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).wrap_err(format!(
-        "restricting socket directory permissions on {}",
-        dir.display()
-    ))
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).wrap_err_with(|| {
+        format!(
+            "restricting socket directory permissions on {}",
+            dir.display()
+        )
+    })
 }
 
 /// `symlink_metadata`, with "does not exist" as `Ok(None)` rather than an error.
@@ -191,7 +194,7 @@ fn remove_stale_socket(socket_path: &str) -> eyre::Result<()> {
 
     let path = std::path::Path::new(socket_path);
     let Some(metadata) = optional_symlink_metadata(path)
-        .wrap_err(format!("inspecting socket path {socket_path}"))?
+        .wrap_err_with(|| format!("inspecting socket path {socket_path}"))?
     else {
         return Ok(());
     };
@@ -203,7 +206,7 @@ fn remove_stale_socket(socket_path: &str) -> eyre::Result<()> {
         );
     }
 
-    std::fs::remove_file(path).wrap_err(format!("removing stale socket {socket_path}"))
+    std::fs::remove_file(path).wrap_err_with(|| format!("removing stale socket {socket_path}"))
 }
 
 /// Binds the local API socket and serves until the process exits. The socket
@@ -223,9 +226,9 @@ pub(crate) async fn serve(minter: Arc<NodeJwtMinter>, socket_path: &str) -> eyre
     remove_stale_socket(socket_path)?;
 
     let listener = tokio::net::UnixListener::bind(socket_path)
-        .wrap_err(format!("binding agent local API socket {socket_path}"))?;
+        .wrap_err_with(|| format!("binding agent local API socket {socket_path}"))?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
-        .wrap_err(format!("restricting socket permissions on {socket_path}"))?;
+        .wrap_err_with(|| format!("restricting socket permissions on {socket_path}"))?;
     tracing::info!(target: "node_auth", socket = %socket_path, "node-auth: serving agent local API (node tokens)");
 
     tonic::transport::Server::builder()

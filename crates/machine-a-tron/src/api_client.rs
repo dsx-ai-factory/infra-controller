@@ -302,9 +302,9 @@ impl ApiClient {
         let mut machine_discovery_info = crate::discovery_info::for_machine(machine_info);
         if matches!(machine_info, MachineInfo::Host(_)) {
             machine_discovery_info.tpm_ek_certificate =
-                Some(BASE64_STANDARD.encode(tpm_ek_certificate.ok_or(
-                    ClientApiError::ConfigError("No TPM EK certificate waa supplied".to_string()),
-                )?))
+                Some(BASE64_STANDARD.encode(tpm_ek_certificate.ok_or_else(|| {
+                    ClientApiError::ConfigError("No TPM EK certificate waa supplied".to_string())
+                })?))
         }
         let discovery_reporter = match machine_info {
             MachineInfo::Host(_) => rpc::MachineDiscoveryReporter::Scout,
@@ -372,6 +372,7 @@ impl ApiClient {
                 astra_config_status: None,
                 lldp: None,
                 lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -924,10 +925,10 @@ mod force_delete_tests {
         });
 
         let client_config = CarbideClientConfig::default();
-        let client = CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ));
+        let client = CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        );
         let result = ApiClient(client)
             .force_delete_machine("simulated-machine".to_string())
             .await;

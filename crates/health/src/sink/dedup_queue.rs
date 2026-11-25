@@ -51,7 +51,7 @@ pub(super) enum SaveOutcome {
 pub(crate) struct DedupQueue<K: Eq + Hash + Clone, V> {
     state: Mutex<QueueState<K, V>>,
     capacity: Option<NonZeroUsize>,
-    bounded_len: AtomicUsize,
+    len: AtomicUsize,
     notify: Notify,
 }
 
@@ -63,7 +63,7 @@ impl<K: Eq + Hash + Clone, V> DedupQueue<K, V> {
                 ready: VecDeque::new(),
             }),
             capacity: None,
-            bounded_len: AtomicUsize::new(0),
+            len: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -76,7 +76,7 @@ impl<K: Eq + Hash + Clone, V> DedupQueue<K, V> {
                 ready: VecDeque::new(),
             }),
             capacity: Some(capacity),
-            bounded_len: AtomicUsize::new(0),
+            len: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -113,9 +113,8 @@ impl<K: Eq + Hash + Clone, V> DedupQueue<K, V> {
                 state.ready.push_back(key);
             }
 
-            if outcome == SaveOutcome::Inserted && self.capacity.is_some() {
-                self.bounded_len
-                    .store(state.values.len(), Ordering::Release);
+            if outcome == SaveOutcome::Inserted {
+                self.len.store(state.values.len(), Ordering::Release);
             }
         }
 
@@ -136,10 +135,7 @@ impl<K: Eq + Hash + Clone, V> DedupQueue<K, V> {
         let mut state = self.state.lock().expect("dedup queue mutex poisoned");
         while let Some(key) = state.ready.pop_front() {
             if let Some(value) = state.values.remove(&key) {
-                if self.capacity.is_some() {
-                    self.bounded_len
-                        .store(state.values.len(), Ordering::Release);
-                }
+                self.len.store(state.values.len(), Ordering::Release);
 
                 return Some((key, value));
             }
@@ -151,11 +147,9 @@ impl<K: Eq + Hash + Clone, V> DedupQueue<K, V> {
         self.notify.notified().await;
     }
 
-    /// Returns a lock-free snapshot of the number of entries in a bounded queue.
-    ///
-    /// Unbounded queues do not track their depth and return zero.
+    /// Returns a lock-free snapshot of the number of queued entries.
     pub(super) fn len(&self) -> usize {
-        self.bounded_len.load(Ordering::Acquire)
+        self.len.load(Ordering::Acquire)
     }
 }
 
@@ -171,11 +165,15 @@ mod tests {
         queue.save_latest("a".into(), 2);
         queue.save_latest("b".into(), 3);
 
+        assert_eq!(queue.len(), 2);
+
         let mut count = 0;
         while queue.pop().is_some() {
             count += 1;
         }
+
         assert_eq!(count, 2);
+        assert_eq!(queue.len(), 0);
     }
 
     #[test]

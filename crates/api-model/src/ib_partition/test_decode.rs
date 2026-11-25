@@ -19,7 +19,6 @@ use std::num::TryFromIntError;
 
 use carbide_instrument::testing::{MetricsCapture, capture_logs};
 use carbide_uuid::infiniband::IBPartitionId;
-use sqlx::FromRow;
 use sqlx::error::BoxDynError;
 
 use super::{IBPartition, InvalidPartitionKeyError};
@@ -126,8 +125,9 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
         .await
         .expect("fetch projected IB partition");
 
-        let metrics = MetricsCapture::start();
-        let error = IBPartition::from_row(&row).expect_err(case.scenario);
+        let metrics = MetricsCapture::owned();
+        let error =
+            IBPartition::from_row(&row, metrics.instrumentation()).expect_err(case.scenario);
         let sqlx::Error::ColumnDecode { index, source } = error else {
             panic!("{}: expected ColumnDecode, got {error:?}", case.scenario);
         };
@@ -212,9 +212,11 @@ async fn ib_partition_decodes_byte_mtu_and_reports_unknown_values(pool: sqlx::Pg
         .await
         .expect("fetch projected IB partition");
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let unrelated_metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            let partition = IBPartition::from_row(&row).expect(case.scenario);
+            let partition =
+                IBPartition::from_row(&row, metrics.instrumentation()).expect(case.scenario);
             assert_eq!(
                 partition.config.mtu,
                 Some(case.expected_mtu),
@@ -226,6 +228,12 @@ async fn ib_partition_decodes_byte_mtu_and_reports_unknown_values(pool: sqlx::Pg
             metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
             case.fallback_count,
             "{}",
+            case.scenario,
+        );
+        assert_eq!(
+            unrelated_metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
+            0.0,
+            "{}: decoding must not record in another destination",
             case.scenario,
         );
         if case.fallback_count == 0.0 {
@@ -241,5 +249,18 @@ async fn ib_partition_decodes_byte_mtu_and_reports_unknown_values(pool: sqlx::Pg
                 Some(case.stored_mtu.to_string().as_str())
             );
         }
+        IBPartition::from_row(&row, unrelated_metrics.instrumentation()).expect(case.scenario);
+        assert_eq!(
+            unrelated_metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
+            case.fallback_count,
+            "{}: decoding into the second destination",
+            case.scenario,
+        );
+        assert_eq!(
+            metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
+            case.fallback_count,
+            "{}: the first destination must remain unchanged",
+            case.scenario,
+        );
     }
 }

@@ -40,7 +40,8 @@ use component_manager::config::SwitchMtlsService;
 use component_manager::mock::MockNvSwitchManager;
 use db::db_read::DbReader;
 use db::{
-    ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack, switch as db_switch,
+    ObjectColumnFilter, TransactionVending as _, expected_rack as db_expected_rack,
+    rack as db_rack, switch as db_switch,
 };
 use health_report::HealthAlertClassification;
 use librms::RackManagerError;
@@ -285,7 +286,7 @@ async fn set_machine_host_reprovision_state(
     machine_id: &MachineId,
     reprovision_state: model::machine::HostReprovisionState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let machine = db::machine::find_one(
         txn.as_mut(),
         machine_id,
@@ -313,7 +314,7 @@ async fn set_machine_power_states(
     desired_power_state: model::power_manager::PowerState,
     actual_power_state: model::power_manager::PowerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let power_options = db::power_options::get_by_ids(&[*machine_id], txn.as_mut())
         .await?
         .pop()
@@ -436,7 +437,7 @@ async fn test_rack_firmware_health_lifecycle(
         assert!(matches!(result, db::ConditionalWrite::Applied(())));
     }
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-    let first = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let first = get_db_rack(&env.pool, &rack_id).await;
     let report = &first.health_reports.merges["rack-firmware"];
     assert_eq!(report.alerts.len(), 2);
     assert_eq!(report.alerts[0].id.as_str(), "RackFirmwareMismatch");
@@ -485,7 +486,7 @@ async fn test_rack_firmware_health_lifecycle(
         assert!(matches!(result, db::ConditionalWrite::Applied(())));
         drop(connection);
         run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         if expected_components > 0 {
             let evidence = &rack.health_reports.merges["rack-firmware"].alerts;
             assert_eq!(evidence.len(), expected_components);
@@ -556,8 +557,7 @@ async fn attach_switches_with_nvos_credentials(
     let mut expected_switches = Vec::with_capacity(configs.len());
     for config in configs {
         let expected_switch = env.test_harness.create_expected_switch(config.into()).await;
-        let mut conn = env.pool.acquire().await?;
-        expected_switches.push(expected_switch.db_record(conn.as_mut()).await);
+        expected_switches.push(expected_switch.db_record(&env.pool).await);
     }
     attach_switches(env.api.as_ref(), rack_id, expected_switches, count).await
 }
@@ -608,7 +608,7 @@ async fn create_ready_rack_with_switches(
 
     let switch_ids = attach_switches_with_nvos_credentials(env, &rack_id, count).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
     let updated = db_rack::try_update_controller_state(
         txn.as_mut(),
@@ -678,6 +678,8 @@ async fn test_expected_no_definition_stays_parked(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -691,7 +693,7 @@ async fn test_expected_no_definition_stays_parked(
     // `handle_created` also returns `Wait`, so a bare `Wait { .. }` would keep passing if
     // an unresolvable profile ever started resolving -- which is the whole thing this test
     // is here to catch. (`StateHandlerOutcome` has no `Debug`, since it holds a
-    // `PgTransaction`, so pull the reason out rather than formatting the outcome.)
+    // `db::Transaction`, so pull the reason out rather than formatting the outcome.)
     let reason = match &outcome {
         StateHandlerOutcome::Wait { reason, .. } => reason.as_str(),
         _ => panic!("expected the handler to wait, not advance"),
@@ -737,6 +739,8 @@ async fn test_created_waits_for_missing_switches(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -803,7 +807,7 @@ async fn test_missing_compute_component_health_tracks_host_inventory(
         .await?;
         assert!(!host.dpu_snapshots.is_empty());
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         if host_count == 1 {
             let report = &rack.health_reports.merges["rack-component-inventory"];
             let [alert] = report.alerts.as_slice() else {
@@ -876,7 +880,7 @@ async fn test_missing_component_health_is_persisted_only_on_rack(
 
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let report = rack
         .health_reports
         .merges
@@ -963,7 +967,7 @@ async fn test_missing_component_health_is_persisted_only_on_rack(
     )
     .await?;
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-    let updated = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let updated = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         updated.health_reports.merges["rack-component-inventory"].alerts, report.alerts,
         "reconciliation must remove the old classification without resetting alert age"
@@ -1000,13 +1004,13 @@ async fn test_missing_component_health_clears_after_recovery(
     .await?;
 
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-    let first = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let first = get_db_rack(&env.pool, &rack_id).await;
     let first_alert_since = first.health_reports.merges["rack-component-inventory"].alerts[0]
         .in_alert_since
         .expect("alert timestamp should be set");
 
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-    let repeated = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let repeated = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         repeated.health_reports.merges["rack-component-inventory"].alerts[0].in_alert_since,
         Some(first_alert_since),
@@ -1015,7 +1019,7 @@ async fn test_missing_component_health_clears_after_recovery(
 
     attach_switch_with_nvos_credentials(&env, &rack_id).await?;
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
-    let recovered = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let recovered = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         !recovered
             .health_reports
@@ -1046,7 +1050,7 @@ async fn test_component_health_preserves_unresolved_profile(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let initial = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let initial = get_db_rack(&env.pool, &rack_id).await;
     let report = &initial.health_reports.merges["rack-component-inventory"];
 
     for profile in [Some("UnknownProfile"), None] {
@@ -1056,7 +1060,7 @@ async fn test_component_health_preserves_unresolved_profile(
             .execute(&pool)
             .await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(
             &rack.health_reports.merges["rack-component-inventory"], report,
             "unresolved profile {profile:?} must preserve the existing report"
@@ -1069,7 +1073,7 @@ async fn test_component_health_preserves_unresolved_profile(
         .await?;
     attach_switch_with_nvos_credentials(&env, &rack_id).await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         !rack
             .health_reports
@@ -1137,7 +1141,7 @@ async fn test_component_health_waits_for_successful_handler(
         )
         .await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(rack.controller_state.value, maintenance);
         assert!(matches!(
             rack.controller_state_outcome,
@@ -1154,7 +1158,7 @@ async fn test_component_health_waits_for_successful_handler(
         );
         let history_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM rack_health_history WHERE object_id = $1")
-                .bind(rack_id.to_string())
+                .bind(rack_id.as_str())
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(history_count, iteration as i64);
@@ -1166,7 +1170,7 @@ async fn test_component_health_waits_for_successful_handler(
         )
         .await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(
             rack.health_reports
                 .merges
@@ -1175,7 +1179,7 @@ async fn test_component_health_waits_for_successful_handler(
             "a subsequent successful handler must reconcile the report",
         );
         let histories = db::health_history::find_by_object_ids(
-            pool.acquire().await?.as_mut(),
+            &pool,
             db::health_history::HealthHistoryTableId::Rack,
             std::slice::from_ref(&rack_id),
             None,
@@ -1221,7 +1225,7 @@ async fn test_ready_rack_reports_deleted_component(
 
     run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Ready).await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let report = &rack.health_reports.merges["rack-component-inventory"];
     assert_eq!(report.alerts.len(), 1);
     assert_eq!(report.alerts[0].target.as_deref(), Some("switch"));
@@ -1262,13 +1266,15 @@ async fn test_expected_zero_topology_transitions_to_discovering(
 
     create_expected_rack(&pool, &rack_id, "Empty").await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1324,7 +1330,7 @@ async fn test_expected_more_discovered_than_expected_transitions(
     let switch_ids = attach_switches_with_nvos_credentials(&env, &rack_id, 2).await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, RackState::Discovering);
 
     for switch_id in switch_ids {
@@ -1336,7 +1342,7 @@ async fn test_expected_more_discovered_than_expected_transitions(
         .await;
     }
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance { .. }
@@ -1379,6 +1385,8 @@ async fn test_discovering_waits_for_missing_switches(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1432,13 +1440,13 @@ async fn test_ingestion_ignores_compute_and_power_shelf_counts(
     let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, RackState::Discovering);
     assert!(!rack.config.ingestion_in_progress);
 
     // The switch is present but still in its initial state.
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, RackState::Discovering);
     assert!(!rack.config.ingestion_in_progress);
     assert!(matches!(
@@ -1463,7 +1471,7 @@ async fn test_ingestion_ignores_compute_and_power_shelf_counts(
     )
     .await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -1492,7 +1500,7 @@ async fn test_ingestion_ignores_compute_and_power_shelf_counts(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Validating {
@@ -1534,13 +1542,15 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
     let cfg = RackConfig::default();
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1553,7 +1563,7 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
         txn.commit().await?;
     }
     assert!(
-        get_db_rack(env.db_reader().as_mut(), &rack_id)
+        get_db_rack(&env.pool, &rack_id)
             .await
             .config
             .ingestion_in_progress
@@ -1598,13 +1608,15 @@ async fn test_error_state_does_nothing(
     )
     .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1655,13 +1667,15 @@ async fn test_maintenance_completed_transitions_to_validation(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -1677,7 +1691,7 @@ async fn test_maintenance_completed_transitions_to_validation(
         txn.commit().await?;
     }
     assert!(
-        !get_db_rack(env.db_reader().as_mut(), &rack_id)
+        !get_db_rack(&env.pool, &rack_id)
             .await
             .config
             .ingestion_in_progress
@@ -1726,7 +1740,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
         model::power_manager::PowerState::On,
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -1754,7 +1768,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
     txn.commit().await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(rack.controller_state.value,
         RackState::Error { ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired, .. }
             if cause.contains("desired power state is Off") && cause.contains(&off_id.to_string())
@@ -1766,7 +1780,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
             .unwrap();
         assert!(machine.machine_maintenance_requested.is_none());
     }
-    let options = db::power_options::get_by_ids(&[off_id], pool.acquire().await?.as_mut()).await?;
+    let options = db::power_options::get_by_ids(&[off_id], &pool).await?;
     assert_eq!(
         options[0].desired_power_state,
         model::power_manager::PowerState::Off
@@ -1781,7 +1795,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let resumed = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let resumed = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(resumed.controller_state.value, rack.controller_state.value);
     assert_eq!(
         resumed.controller_state.version,
@@ -1815,7 +1829,7 @@ async fn test_nmx_configuration_skips_empty_inventory_and_rejects_invalid_topolo
         if switch_count > 0 {
             attach_switches_with_nvos_credentials(&env, &rack_id, switch_count).await?;
         }
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::update(
             txn.as_mut(),
             &rack_id,
@@ -1840,7 +1854,7 @@ async fn test_nmx_configuration_skips_empty_inventory_and_rejects_invalid_topolo
         .await?;
         txn.commit().await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         if switch_count == 0 {
             assert_eq!(
                 rack.controller_state.value,
@@ -1916,7 +1930,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         ))
         .await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::set_machine_maintenance_requested(
         txn.as_mut(),
         machine_ids[0],
@@ -1954,7 +1968,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
     txn.commit().await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -1966,7 +1980,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
     ));
     let configured_state = rack.controller_state.clone();
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, configured_state.value);
     assert_eq!(rack.controller_state.version, configured_state.version);
     assert!(matches!(
@@ -2001,7 +2015,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
     let operator_request = machine_a
         .machine_maintenance_requested
         .expect("operator request should remain");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert_eq!(
         db::machine::clear_machine_maintenance_requested(
             txn.as_mut(),
@@ -2021,7 +2035,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         .execute(&pool)
         .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, configured_state.value);
     assert_eq!(rack.controller_state.version, configured_state.version);
     assert!(matches!(
@@ -2041,7 +2055,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         .await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -2077,7 +2091,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
 
     // Simulate successful power-control calls: these clear requests but do not
     // prove that the hosts have booted.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for machine_id in machine_ids {
         let machine = db::machine::find_one(
             txn.as_mut(),
@@ -2097,6 +2111,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
             db::ConditionalWrite::Applied(())
         );
     }
+
     txn.commit().await?;
 
     // Missing, stale, and boundary-equal reports cannot satisfy the barrier.
@@ -2112,7 +2127,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
             .execute(&pool)
             .await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(rack.controller_state.value, restart_state.value);
         assert_eq!(rack.controller_state.version, restart_state.version);
     }
@@ -2127,7 +2142,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         post_lock_verification_retry_count: 0,
         boot_config_state: model::machine::ReadyBootConfigState::Prepare,
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(txn.as_mut(), &machine_ids[1], &boot_configuring).await?;
     txn.commit().await?;
 
@@ -2140,7 +2155,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
             ))
             .await?;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         if index == 0 {
             assert_eq!(rack.controller_state.value, restart_state.value);
             assert_eq!(rack.controller_state.version, restart_state.version);
@@ -2156,9 +2171,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         }
     }
 
-    let configured_state = get_db_rack(env.db_reader().as_mut(), &rack_id)
-        .await
-        .controller_state;
+    let configured_state = get_db_rack(&env.pool, &rack_id).await.controller_state;
     let mut responses = Vec::new();
     for id in [Some(rack_id.to_string()), None] {
         responses.push(
@@ -2210,7 +2223,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
             .unwrap();
         assert!(machine.machine_maintenance_requested.is_none());
     }
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Validating {
@@ -2247,7 +2260,7 @@ async fn test_existing_nmx_job_completes_without_inserting_resets(
             },
         ))
         .await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -2272,7 +2285,7 @@ async fn test_existing_nmx_job_completes_without_inserting_resets(
     txn.commit().await?;
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -2305,7 +2318,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
     let legacy = serde_json::from_value(serde_json::json!({
         "PowerSequence": { "rack_power": "PowerReset" }
     }))?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(
         txn.as_mut(),
         &host_b.host_snapshot.id,
@@ -2332,7 +2345,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
     .await?;
     txn.commit().await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let expected_ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
     let RackState::Maintenance {
         maintenance_state:
@@ -2402,7 +2415,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
         );
     }
     env.run_rack_controller_iteration().await;
-    let resumed = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let resumed = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(resumed.controller_state.value, rack.controller_state.value);
     assert_eq!(
         resumed.controller_state.version,
@@ -2431,7 +2444,7 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
     .await;
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(
         txn.as_mut(),
         &ids[1],
@@ -2488,7 +2501,7 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
         .await?;
     txn.commit().await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Error { .. }
@@ -2523,13 +2536,15 @@ async fn test_ready_with_no_labels_stays_ready(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2569,13 +2584,15 @@ async fn test_firmware_upgrade_start_skips_without_json(
     .await;
     let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2764,7 +2781,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler = RackStateHandler::default();
 
     let mut services = env.rack_state_handler_services();
@@ -2772,6 +2789,8 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -2784,7 +2803,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
         txn.commit().await?;
     }
     assert!(
-        get_db_rack(env.db_reader().as_mut(), &rack_id)
+        get_db_rack(&env.pool, &rack_id)
             .await
             .config
             .ingestion_in_progress
@@ -2908,7 +2927,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     assert!(requests[0].component_filters.is_empty());
     assert!(!requests[0].force_update);
 
-    let durable = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let durable = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         durable
             .firmware_upgrade_job
@@ -2983,12 +3002,14 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
         .await
         .map_err(|error| eyre::eyre!("failed to set maintenance access token: {}", error))?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3022,7 +3043,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
             .is_empty()
     );
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(rack.config.maintenance_requested.is_none());
     let machine = db::machine::find_one(
         &pool,
@@ -3122,12 +3143,14 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3236,12 +3259,14 @@ async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
         .await
         .map_err(|error| eyre::eyre!("failed to set maintenance access token: {}", error))?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3322,7 +3347,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         ..Default::default()
     };
     let initiator = format!("rack-{rack_id}");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let config = RackConfig {
         maintenance_requested: Some(scope),
         ..Default::default()
@@ -3362,12 +3387,14 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3394,7 +3421,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     assert!(cause.contains(&blocked_host.host_snapshot.id.to_string()));
     assert!(!cause.contains(&active_host.host_snapshot.id.to_string()));
 
-    let rack_before_transition = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack_before_transition = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         rack_before_transition
             .config
@@ -3405,7 +3432,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         txn.commit().await?;
     }
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(rack.config.maintenance_requested.is_none());
     let job = rack
         .firmware_upgrade_job
@@ -3487,7 +3514,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
         },
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xb1).await;
     set_switch_state(
         txn.as_mut(),
@@ -3595,12 +3622,14 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3620,7 +3649,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
         txn.commit().await?;
     }
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(rack.config.maintenance_requested.is_none());
     assert!(!rack.config.maintenance_termination_requested);
     assert_eq!(
@@ -3651,13 +3680,11 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
     assert!(active_machine.host_reprovision_requested.is_some());
     assert!(active_machine.rack_fw_details.is_none());
 
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
-        .await?
-        .unwrap();
+    let switch = db_switch::find_by_id(&pool, &switch_id).await?.unwrap();
     assert!(switch.switch_reprovisioning_requested.is_none());
     assert!(switch.firmware_upgrade_status.is_none());
     assert!(switch.nvos_update_status.is_none());
-    let power_shelf = db::power_shelf::find_by_id(pool.acquire().await?.as_mut(), &power_shelf_id)
+    let power_shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .unwrap();
     assert!(power_shelf.power_shelf_reprovisioning_requested.is_none());
@@ -3679,7 +3706,7 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
             nvos_update: NvosUpdateState::WaitForComplete,
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_state(
         txn.as_mut(),
         &switch_id,
@@ -3742,12 +3769,14 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
     .await?;
     txn.commit().await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -3766,14 +3795,12 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
         txn.commit().await?;
     }
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.nvos_update_job.unwrap().status.as_deref(),
         Some("failed")
     );
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
-        .await?
-        .unwrap();
+    let switch = db_switch::find_by_id(&pool, &switch_id).await?.unwrap();
     assert!(switch.switch_reprovisioning_requested.is_none());
     assert!(switch.nvos_update_status.is_none());
 
@@ -3879,7 +3906,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     .await?;
     queue_ingestion_firmware_batch(&env, "original", &original.host_snapshot.id.to_string()).await;
     env.run_rack_controller_iteration().await;
-    let empty = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let empty = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(empty.controller_state.value, waiting);
     assert!(empty.firmware_upgrade_job.unwrap().machines.is_empty());
     assert!(
@@ -3895,7 +3922,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);
     let mut original_job = rack.firmware_upgrade_job.unwrap();
     // Persist the predecessor's MAC-only device representation as well.
@@ -3906,11 +3933,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         Some(&original_job),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -3936,7 +3963,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
@@ -3969,7 +3996,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
@@ -4008,16 +4035,16 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         original_before.rack_fw_details.unwrap().status,
         RackFirmwareUpgradeState::InProgress
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
         if err.contains("desired power state is off")
@@ -4067,7 +4094,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         })
         .await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
@@ -4085,7 +4112,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
 
     queue_ingestion_firmware_batch(&env, "late", &late.host_snapshot.id.to_string()).await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);
     let job = rack.firmware_upgrade_job.unwrap();
     assert_eq!(job.job_id.as_deref(), Some("original"));
@@ -4112,10 +4139,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     let admitted_at = status.started_at;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4142,10 +4168,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     assert!(status.is_current_for(requested_at));
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
@@ -4156,7 +4181,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -4222,7 +4247,7 @@ async fn ingestion_reopens_firmware_workflow(
     let completed = RackState::Maintenance {
         maintenance_state: RackMaintenanceState::Completed,
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -4246,7 +4271,7 @@ async fn ingestion_reopens_firmware_workflow(
     txn.commit().await?;
     queue_ingestion_firmware_batch(&env, "late", &late.host_snapshot.id.to_string()).await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -4270,7 +4295,7 @@ async fn ingestion_reopens_firmware_workflow(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -4291,11 +4316,11 @@ async fn ingestion_reopens_firmware_workflow(
             .unwrap()
             .return_to_completed
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4330,7 +4355,7 @@ async fn ingestion_reopens_firmware_workflow(
     .await?;
     queue_ingestion_firmware_batch(&env, "later", &later.host_snapshot.id.to_string()).await;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let job = rack.firmware_upgrade_job.unwrap();
     assert!(job.return_to_completed);
     assert_eq!(job.machines.len(), 2);
@@ -4380,10 +4405,9 @@ async fn ingestion_reopens_firmware_workflow(
         (later.host_snapshot.id, "later-child"),
     ] {
         env.rms_sim
-            .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-                status: rms::ReturnCode::Success as i32,
+            .set_firmware_job_status(rms::JobStatus {
                 job_id: child.to_string(),
-                job_state: rms::FirmwareJobState::Completed as i32,
+                execution_state: rms::JobExecutionState::Completed as i32,
                 ..Default::default()
             })
             .await;
@@ -4395,7 +4419,7 @@ async fn ingestion_reopens_firmware_workflow(
         .await?;
     }
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(rack.controller_state.value, completed);
     assert!(rack.config.ingestion_in_progress);
     assert!(
@@ -4410,7 +4434,7 @@ async fn ingestion_reopens_firmware_workflow(
     );
     assert!(rack.nvos_update_job.is_none());
     let shelves = db::power_shelf::find_by(
-        pool.acquire().await?.as_mut(),
+        &pool,
         ObjectColumnFilter::List(db::power_shelf::IdColumn, &[late_shelf, foreign_shelf]),
     )
     .await?;
@@ -4421,7 +4445,7 @@ async fn ingestion_reopens_firmware_workflow(
     );
 
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Validating {
@@ -4490,18 +4514,18 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some(FirmwareProgressState::InProgress),
@@ -4524,6 +4548,8 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4585,13 +4611,13 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         failed_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
@@ -4622,7 +4648,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         }],
         ..Default::default()
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -4635,13 +4661,15 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     db_rack::update_firmware_upgrade_job(txn.as_mut(), &rack_id, Some(&job)).await?;
     txn.commit().await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4689,7 +4717,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         ),
     }
 
-    let rack_before_transition = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack_before_transition = get_db_rack(&env.pool, &rack_id).await;
     assert!(
         rack_before_transition
             .config
@@ -4700,7 +4728,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         txn.commit().await?;
     }
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(rack.config.maintenance_requested.is_none());
     assert_eq!(
         rack.firmware_upgrade_job.unwrap().status,
@@ -4783,28 +4811,27 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host_a.host_snapshot.id.to_string(),
+            node_id: Some(host_a.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
         .await;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some(FirmwareProgressState::InProgress),
@@ -4838,6 +4865,8 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -4905,17 +4934,16 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
         .await?;
@@ -4935,7 +4963,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
         .await?;
@@ -4982,7 +5010,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
 }
 
 /// test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails
-/// verifies that a response-level lookup failure from GetFirmwareJobStatus does
+/// verifies that a NOT_FOUND lookup failure from GetJobStatus does
 /// not mark the device failed and instead keeps the rack waiting while the
 /// machine remains in WaitingForRackFirmwareUpgrade.
 #[sqlx_test]
@@ -5004,17 +5032,14 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Failure as i32,
-            job_id: "child-job-1".to_string(),
-            state_description: "Job not found".to_string(),
-            error_message: "Job not found: child-job-1".to_string(),
-            ..Default::default()
-        })
+        .queue_get_job_status_response(Err(
+            tonic::Status::not_found("job not found: child-job-1").into()
+        ))
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some(FirmwareProgressState::InProgress),
@@ -5037,6 +5062,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -5059,7 +5086,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         "Expected Wait while RMS job lookup is unavailable"
     );
 
-    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let persisted_rack = get_db_rack(&env.pool, &rack_id).await;
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
@@ -5067,7 +5094,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
     assert_eq!(
         job.machines[0].error_message.as_deref(),
-        Some("Job not found: child-job-1")
+        Some("job not found: child-job-1")
     );
 
     Ok(())
@@ -5099,7 +5126,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
         .set_firmware_job_error("child-job-1", "mock transport failure")
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some(FirmwareProgressState::InProgress),
@@ -5122,6 +5149,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -5144,7 +5173,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
         "Expected Wait while RMS polling has a transport error"
     );
 
-    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let persisted_rack = get_db_rack(&env.pool, &rack_id).await;
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
@@ -5208,7 +5237,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5253,19 +5282,18 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     txn.commit().await?;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: job_id.to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: switch_id.to_string(),
+            node_id: Some(switch_id.to_string()),
             ..Default::default()
         })
         .await;
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5283,7 +5311,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
         Some(FirmwareProgressState::Completed)
     );
 
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await?
         .expect("switch should exist");
 
@@ -5339,7 +5367,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5381,7 +5409,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5419,7 +5447,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5486,7 +5514,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
         Some(stale_token)
     );
 
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await?
         .expect("switch should exist");
 
@@ -5520,6 +5548,7 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
     let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
 
     let scope = MaintenanceScope {
+        requested_at: Some(chrono::Utc::now()),
         machine_ids: vec![host.host_snapshot.id],
         activities: vec![MaintenanceActivity::NvosUpdate {
             config_json: r#"{"Id":"nvos"}"#.to_string(),
@@ -5527,7 +5556,17 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
+    db_rack::update_nvos_update_job(
+        txn.as_mut(),
+        &rack_id,
+        Some(&NvosUpdateJob {
+            job_id: Some("preceding-nvos".into()),
+            status: Some("failed".into()),
+            ..Default::default()
+        }),
+    )
+    .await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5567,7 +5606,11 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
+    assert_eq!(
+        rack.nvos_update_job.as_ref().unwrap().job_id.as_deref(),
+        Some("preceding-nvos")
+    );
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5619,15 +5662,40 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
+    let requested_at = chrono::Utc::now();
 
     db_rack::update(
         txn.as_mut(),
         &rack_id,
         &RackConfig {
-            maintenance_requested: Some(MaintenanceScope::default()),
+            maintenance_requested: Some(MaintenanceScope {
+                requested_at: Some(requested_at),
+                ..Default::default()
+            }),
             ..Default::default()
         },
+    )
+    .await?;
+
+    db_rack::update_firmware_upgrade_job(
+        txn.as_mut(),
+        &rack_id,
+        Some(&FirmwareUpgradeJob {
+            firmware_id: Some("fw-current".into()),
+            started_at: Some(requested_at),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    db_rack::update_nvos_update_job(
+        txn.as_mut(),
+        &rack_id,
+        Some(&NvosUpdateJob {
+            job_id: Some("old-nvos-job".into()),
+            firmware_id: "fw-old".into(),
+            ..Default::default()
+        }),
     )
     .await?;
 
@@ -5663,7 +5731,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("missing profile SOT should fail an enrolled NVOS phase");
@@ -5671,6 +5739,16 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     assert!(cause.contains("firmware object is unavailable"));
     assert!(rack.config.maintenance_requested.is_none());
+    assert!(
+        rack.nvos_update_job
+            .as_ref()
+            .unwrap()
+            .request
+            .as_ref()
+            .unwrap()
+            .failure
+            .is_some()
+    );
 
     assert!(
         env.rms_sim
@@ -5679,7 +5757,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
             .is_empty()
     );
 
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await?
         .expect("switch should exist");
 
@@ -5690,6 +5768,46 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
         }
     ));
 
+    let retained = rack.nvos_update_job.as_ref().unwrap();
+    assert!(retained.job_id.is_none());
+    assert!(retained.firmware_id.is_empty());
+    assert_eq!(
+        retained.request.as_ref().unwrap().target_version.as_deref(),
+        Some("fw-current")
+    );
+    // A later compute-only job replaces the rack hardware job, not this result.
+    db_rack::update_firmware_upgrade_job(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&FirmwareUpgradeJob {
+            firmware_id: Some("later-compute-firmware".into()),
+            started_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        }),
+    )
+    .await?;
+
+    let status = env
+        .api
+        .get_component_firmware_status(Request::new(
+            rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
+                target: Some(
+                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
+                        rpc::forge::SwitchIdList {
+                            ids: vec![switch_id],
+                        },
+                    ),
+                ),
+            },
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(
+        status.statuses[0].state,
+        rpc::forge::FirmwareUpdateState::FwStateFailed as i32
+    );
+    assert_eq!(status.statuses[0].target_version, "fw-current");
     Ok(())
 }
 
@@ -5724,12 +5842,40 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
 
+    let unresolved = SwitchId::from(uuid::Uuid::new_v4());
+    db_switch::create(
+        pool.acquire().await?.as_mut(),
+        &model::switch::NewSwitch {
+            id: unresolved,
+            config: model::switch::SwitchConfig {
+                name: "unresolved-switch".into(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: Some(rack_id.clone()),
+            slot_number: Some(1),
+            tray_index: Some(1),
+        },
+    )
+    .await?;
+
+    let requested_at = chrono::Utc::now();
     let config = RackConfig {
         maintenance_requested: Some(MaintenanceScope {
-            switch_ids: vec![switch_id],
-            activities: vec![MaintenanceActivity::NvosUpdate {
-                config_json: r#"{"Id":"fw-nvos-default"}"#.to_string(),
-            }],
+            requested_at: Some(requested_at),
+            switch_ids: vec![switch_id, unresolved],
+            activities: vec![
+                MaintenanceActivity::FirmwareUpgrade {
+                    firmware_version: None,
+                    components: vec![],
+                    force_update: false,
+                },
+                MaintenanceActivity::NvosUpdate {
+                    config_json: r#"{"Id":"fw-nvos-default"}"#.to_string(),
+                },
+            ],
             ..Default::default()
         }),
         ..Default::default()
@@ -5737,6 +5883,16 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     let mut txn = pool.acquire().await?;
     db_rack::update(&mut txn, &rack_id, &config).await?;
+    db_rack::update_firmware_upgrade_job(
+        &mut txn,
+        &rack_id,
+        Some(&FirmwareUpgradeJob {
+            firmware_id: Some("fw-hardware".into()),
+            started_at: Some(requested_at),
+            ..Default::default()
+        }),
+    )
+    .await?;
 
     crate::fixtures::rack::set_rack_controller_state(
         &mut txn,
@@ -5786,6 +5942,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
                     job_id: "nvos-job-1".to_string(),
                     ..Default::default()
                 }),
+                object_id: "fw-nvos-default".into(),
                 ..Default::default()
             },
         )
@@ -5793,7 +5950,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5835,9 +5992,25 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(rack.nvos_update_job.is_some());
+    let retained = rack.nvos_update_job.as_ref().unwrap();
+    assert_eq!(retained.firmware_id, "fw-nvos-default");
+    assert_eq!(
+        retained.request.as_ref().unwrap().target_version.as_deref(),
+        Some("fw-hardware")
+    );
+    assert_eq!(
+        rack.nvos_update_job
+            .as_ref()
+            .unwrap()
+            .request
+            .as_ref()
+            .unwrap()
+            .switch_ids,
+        vec![switch_id]
+    );
 
     assert!(matches!(
         rack.controller_state.value,
@@ -5872,9 +6045,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
             .all(|request| request.access_token.as_deref() == Some("token"))
     );
 
-    let mut txn = pool.acquire().await?;
-
-    let switch = db_switch::find_by_id(&mut txn, &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await?
         .expect("switch should exist");
 
@@ -5921,7 +6092,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::create(
         txn.as_mut(),
@@ -5959,7 +6130,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(rack.config.maintenance_requested.is_none());
 
@@ -6051,12 +6222,13 @@ async fn test_compute_reset_policy_after_nvos(
         let config = RackConfig {
             ingestion_in_progress: ingestion,
             maintenance_requested: activities.map(|activities| MaintenanceScope {
+                requested_at: Some(chrono::Utc::now()),
                 activities,
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::update(txn.as_mut(), &rack_id, &config).await?;
         let job = NvosUpdateJob {
             job_id: Some("policy-parent".into()),
@@ -6097,7 +6269,7 @@ async fn test_compute_reset_policy_after_nvos(
             })
             .await;
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(
             rack.controller_state.value,
             RackState::Maintenance {
@@ -6106,6 +6278,12 @@ async fn test_compute_reset_policy_after_nvos(
             "{scenario}"
         );
         assert_eq!(rack.config.ingestion_in_progress, ingestion, "{scenario}");
+        if rack.config.maintenance_requested.is_some() {
+            assert!(
+                rack.nvos_update_job.as_ref().unwrap().request.is_some(),
+                "{scenario}"
+            );
+        }
         if success {
             assert_eq!(
                 rack.nvos_update_job.unwrap().status.as_deref(),
@@ -6124,7 +6302,7 @@ async fn test_compute_reset_policy_after_nvos(
             // The success boundary was committed before admission. Resuming it
             // queues the batch without returning to RMS or repeating the update.
             env.run_rack_controller_iteration().await;
-            let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+            let rack = get_db_rack(&env.pool, &rack_id).await;
             assert!(
                 matches!(rack.controller_state.value,
                 RackState::Maintenance { maintenance_state: RackMaintenanceState::PowerSequence {
@@ -6152,9 +6330,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
-    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
-        .await?
-        .unwrap();
+    let switch = db_switch::find_by_id(&pool, &switch_id).await?.unwrap();
 
     let started_at = chrono::Utc::now();
     let job_id = "nvos-job-1";
@@ -6189,7 +6365,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
     txn.commit().await?;
@@ -6204,7 +6380,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         })
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let handler_instance = RackStateHandler::default();
 
     let mut services = env.rack_state_handler_services();
@@ -6212,6 +6388,8 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -6233,7 +6411,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
 
     assert!(matches!(outcome, StateHandlerOutcome::Wait { .. }));
 
-    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let persisted_rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         &persisted_rack.nvos_update_job.as_ref().unwrap().switches[0].password_update,
@@ -6247,7 +6425,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         )))
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
@@ -6258,7 +6436,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     }
 
     assert_eq!(
-        get_db_rack(env.db_reader().as_mut(), &rack_id)
+        get_db_rack(&env.pool, &rack_id)
             .await
             .nvos_update_job
             .unwrap()
@@ -6267,7 +6445,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         model::rack::NvosPasswordUpdateState::NotStarted
     );
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
@@ -6287,7 +6465,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         }))
         .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
@@ -6307,7 +6485,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         }
     ));
 
-    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let persisted_rack = get_db_rack(&env.pool, &rack_id).await;
 
     let persisted_job = persisted_rack
         .nvos_update_job
@@ -6321,9 +6499,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         model::rack::NvosPasswordUpdateState::Completed
     );
 
-    let mut txn = pool.acquire().await?;
-
-    let switch = db_switch::find_by_id(&mut txn, &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await?
         .expect("switch should exist");
 
@@ -6358,7 +6534,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     let mut switches = Vec::with_capacity(switch_ids.len());
 
     for (index, switch_id) in switch_ids.iter().enumerate() {
-        let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), switch_id)
+        let switch = db_switch::find_by_id(&pool, switch_id)
             .await?
             .expect("switch should exist");
 
@@ -6377,7 +6553,10 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     }
 
     let config = RackConfig {
-        maintenance_requested: Some(MaintenanceScope::default()),
+        maintenance_requested: Some(MaintenanceScope {
+            requested_at: Some(chrono::Utc::now()),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -6386,7 +6565,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
@@ -6427,7 +6606,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -6467,7 +6646,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     }
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let RackState::Error {
         cause,
         recovery_policy,
@@ -6488,6 +6667,58 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
         model::rack::RackErrorRecoveryPolicy::MaintenanceRequestRequired
     );
     assert!(rack.config.maintenance_requested.is_none());
+    assert!(
+        rack.nvos_update_job
+            .as_ref()
+            .unwrap()
+            .request
+            .as_ref()
+            .unwrap()
+            .failure
+            .is_some()
+    );
+
+    let statuses = env
+        .api
+        .get_component_firmware_status(Request::new(
+            rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
+                target: Some(
+                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
+                        rpc::forge::SwitchIdList {
+                            ids: switch_ids.clone(),
+                        },
+                    ),
+                ),
+            },
+        ))
+        .await?
+        .into_inner()
+        .statuses;
+    assert_eq!(statuses.len(), 2);
+    for (id, expected) in [
+        (
+            switch_ids[0],
+            rpc::forge::FirmwareUpdateState::FwStateFailed,
+        ),
+        (
+            switch_ids[1],
+            rpc::forge::FirmwareUpdateState::FwStateCompleted,
+        ),
+    ] {
+        let id = id.to_string();
+        let status = statuses
+            .iter()
+            .find(|status| {
+                status
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.component_id.as_deref())
+                    == Some(id.as_str())
+            })
+            .unwrap();
+        assert_eq!(status.state, expected as i32);
+    }
 
     let response = env
         .api
@@ -6522,27 +6753,41 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     )
     .await;
 
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+    let (rack_id, switch_ids) = create_ready_rack_with_switches(&env, &pool, 3).await?;
+    let switch_id = switch_ids[1];
     let password_job_id = "password-job-1";
 
     let config = RackConfig {
-        maintenance_requested: Some(MaintenanceScope::default()),
+        maintenance_requested: Some(MaintenanceScope {
+            requested_at: Some(chrono::Utc::now()),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
     let job = NvosUpdateJob {
-        switches: vec![NvosUpdateSwitchStatus {
-            node_id: switch_id.to_string(),
-            status: "completed".to_string(),
-            password_update: NvosPasswordUpdateState::InProgress {
-                job_id: password_job_id.to_string(),
-            },
-            ..Default::default()
-        }],
+        // The third inventory switch was not part of the submitted job.
+        switches: switch_ids
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(index, id)| NvosUpdateSwitchStatus {
+                node_id: id.to_string(),
+                status: "completed".into(),
+                password_update: NvosPasswordUpdateState::InProgress {
+                    job_id: if index == 0 {
+                        "completed-peer".into()
+                    } else {
+                        password_job_id.into()
+                    },
+                },
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
@@ -6562,6 +6807,15 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     env.rms_sim
         .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
             job_states: vec![rms::JobStatus {
+                job_id: "completed-peer".into(),
+                execution_state: rms::JobExecutionState::Completed as i32,
+                ..Default::default()
+            }],
+        }))
+        .await;
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
                 job_id: password_job_id.to_string(),
                 execution_state: rms::JobExecutionState::Failed as i32,
                 ..Default::default()
@@ -6571,7 +6825,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("failed NVOS password recovery should transition the rack to Error");
@@ -6583,7 +6837,83 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     );
 
     assert!(rack.config.maintenance_requested.is_none());
+    assert!(
+        rack.nvos_update_job
+            .as_ref()
+            .unwrap()
+            .request
+            .as_ref()
+            .unwrap()
+            .failure
+            .is_some()
+    );
 
+    assert_eq!(
+        rack.nvos_update_job
+            .as_ref()
+            .unwrap()
+            .request
+            .as_ref()
+            .unwrap()
+            .switch_ids,
+        switch_ids[..2]
+    );
+    let unsubmitted = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_ids[2])
+        .await?
+        .unwrap();
+    assert!(unsubmitted.nvos_update_status.is_none());
+
+    let peer = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_ids[0])
+        .await?
+        .unwrap();
+    assert!(matches!(
+        peer.nvos_update_status.unwrap().status,
+        SwitchNvosUpdateState::Completed
+    ));
+    assert!(matches!(
+        rack.nvos_update_job.as_ref().unwrap().switches[0].password_update,
+        NvosPasswordUpdateState::Completed
+    ));
+    let completed = env
+        .api
+        .get_component_firmware_status(Request::new(
+            rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
+                target: Some(
+                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
+                        rpc::forge::SwitchIdList {
+                            ids: vec![switch_ids[0]],
+                        },
+                    ),
+                ),
+            },
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(
+        completed.statuses[0].state,
+        rpc::forge::FirmwareUpdateState::FwStateCompleted as i32
+    );
+    let status = env
+        .api
+        .get_component_firmware_status(Request::new(
+            rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
+                target: Some(
+                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
+                        rpc::forge::SwitchIdList {
+                            ids: vec![switch_id],
+                        },
+                    ),
+                ),
+            },
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(
+        status.statuses[0].state,
+        rpc::forge::FirmwareUpdateState::FwStateFailed as i32
+    );
     Ok(())
 }
 
@@ -6783,7 +7113,7 @@ async fn run_configure_nmx_cluster_v2_workflow(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let rack = get_db_rack(&env.pool, rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -6799,7 +7129,7 @@ async fn run_configure_nmx_cluster_v2_workflow(
     env.run_rack_controller_iteration().await;
 
     if primary_telemetry_configured {
-        let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+        let rack = get_db_rack(&env.pool, rack_id).await;
 
         assert!(matches!(
             rack.controller_state.value,
@@ -6821,7 +7151,7 @@ async fn run_configure_nmx_cluster_v2_workflow(
     env.rms_sim
         .queue_get_job_status_response(Ok(rms::GetJobStatusResponse::default()))
         .await;
-    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let rack = get_db_rack(&env.pool, rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -6835,7 +7165,7 @@ async fn run_configure_nmx_cluster_v2_workflow(
         "configuration success must not re-query or resubmit the V2 job"
     );
 
-    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let rack = get_db_rack(&env.pool, rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Validating {
@@ -6847,7 +7177,7 @@ async fn run_configure_nmx_cluster_v2_workflow(
 }
 
 async fn assert_persisted_switch_certificate_job(env: &TestEnv, rack_id: &RackId) {
-    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let rack = get_db_rack(&env.pool, rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -6994,13 +7324,11 @@ async fn assert_configure_nmx_cluster_v2_results(
 
     assert_node_set_contains_switches(fabric_manager_status_request.nodes.as_ref(), switch_ids);
 
-    let mut txn = pool.acquire().await?;
-
-    let primary_switch = db_switch::find_by_id(&mut txn, &primary_switch_id)
+    let primary_switch = db_switch::find_by_id(pool, &primary_switch_id)
         .await?
         .expect("primary switch should exist");
 
-    let secondary_switch = db_switch::find_by_id(&mut txn, &secondary_switch_id)
+    let secondary_switch = db_switch::find_by_id(pool, &secondary_switch_id)
         .await?
         .expect("secondary switch should exist");
 
@@ -7117,7 +7445,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7128,9 +7456,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
         }
     ));
 
-    let mut txn = pool.acquire().await?;
-
-    let primary_switch = db_switch::find_by_id(&mut txn, primary_switch_id)
+    let primary_switch = db_switch::find_by_id(&pool, primary_switch_id)
         .await?
         .ok_or_else(|| eyre::eyre!("expected primary switch {}", primary_switch_id))?;
 
@@ -7141,8 +7467,6 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
         )
     })?;
 
-    drop(txn);
-
     env.api
         .credential_manager()
         .delete_credentials(&CredentialKey::SwitchNvosAdmin { bmc_mac_address })
@@ -7151,7 +7475,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7294,7 +7618,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
     env.run_rack_controller_iteration().await;
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(rack.config.maintenance_requested.is_none());
 
@@ -7325,7 +7649,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7379,7 +7703,7 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7398,7 +7722,7 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7480,7 +7804,7 @@ async fn test_configure_nmx_cluster_retries_certificate_batch_rejected_before_di
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7495,7 +7819,7 @@ async fn test_configure_nmx_cluster_retries_certificate_batch_rejected_before_di
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7548,7 +7872,7 @@ async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7675,7 +7999,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7783,17 +8107,13 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
         .first()
         .ok_or_else(|| eyre::eyre!("expected at least one switch fixture"))?;
 
-    let mut txn = pool.acquire().await?;
-
-    let switch = db_switch::find_by_id(&mut txn, switch_id)
+    let switch = db_switch::find_by_id(&pool, switch_id)
         .await?
         .ok_or_else(|| eyre::eyre!("expected switch {}", switch_id))?;
 
     let bmc_mac_address = switch
         .bmc_mac_address
         .ok_or_else(|| eyre::eyre!("expected switch {} to have a BMC MAC", switch_id))?;
-
-    drop(txn);
 
     env.api
         .credential_manager()
@@ -7803,7 +8123,7 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -7831,7 +8151,7 @@ async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
         return Err(eyre::eyre!("expected exactly two switch fixtures").into());
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let expected = db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &[*primary_switch_id])
         .await?
@@ -7955,7 +8275,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     sqlx::query(
         "DELETE FROM machine_interface_addresses WHERE interface_id IN (
@@ -7970,7 +8290,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     txn.commit().await?;
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(rack.controller_state.value, RackState::Error {
         certificate_failure: None,
@@ -8003,7 +8323,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut bmc_mac_addresses = Vec::with_capacity(switch_ids.len());
 
     for switch_id in &switch_ids {
@@ -8132,7 +8452,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
 
     env.run_rack_controller_iteration().await;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
 
     assert!(matches!(
         rack.controller_state.value,
@@ -8183,7 +8503,7 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
 
     drop(txn);
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
 
@@ -8192,6 +8512,8 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
     let mut db_writes = DbWriteBatch::default();
 
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8247,13 +8569,15 @@ async fn test_configure_nmx_cluster_transitions_to_completed(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8316,13 +8640,15 @@ async fn test_ready_topology_changed_transitions_to_discovering(
     };
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8375,13 +8701,15 @@ async fn test_ready_reprovision_requested_transitions_to_maintenance(
     };
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8394,7 +8722,7 @@ async fn test_ready_reprovision_requested_transitions_to_maintenance(
         txn.commit().await?;
     }
     assert!(
-        !get_db_rack(env.db_reader().as_mut(), &rack_id)
+        !get_db_rack(&env.pool, &rack_id)
             .await
             .config
             .ingestion_in_progress
@@ -8436,13 +8764,15 @@ async fn test_validation_failed_transitions_to_error(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8535,13 +8865,15 @@ async fn test_ready_with_failed_switch_transitions_to_error(
     )
     .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8558,10 +8890,11 @@ async fn test_ready_with_failed_switch_transitions_to_error(
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
-                assert!(
-                    cause.contains("switch"),
-                    "Error cause should mention failing switch, got: {}",
-                    cause
+                assert_eq!(
+                    cause,
+                    format!(
+                        "component(s) reported terminal failure: 1 switch(es) in Error: [{switch_id}]"
+                    )
                 );
             }
             other => panic!("Expected Transition to Error, got {:?}", other),
@@ -8583,8 +8916,9 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
     let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
 
     let rack_id = new_rack_id();
+    let power_shelf_id;
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::create(
             txn.as_mut(),
             &rack_id,
@@ -8593,7 +8927,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
             None,
         )
         .await?;
-        let power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xa1).await;
+        power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xa1).await;
         set_power_shelf_state(
             txn.as_mut(),
             &power_shelf_id,
@@ -8615,13 +8949,15 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
         txn.commit().await?;
     }
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8638,10 +8974,11 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
-                assert!(
-                    cause.contains("power shelf"),
-                    "Error cause should mention failing power shelf, got: {}",
-                    cause
+                assert_eq!(
+                    cause,
+                    format!(
+                        "component(s) reported terminal failure: 1 power shelf/shelves in Error: [{power_shelf_id}]"
+                    )
                 );
             }
             other => panic!("Expected Transition to Error, got {:?}", other),
@@ -8670,13 +9007,15 @@ async fn test_ready_with_all_healthy_components_waits(
     )
     .await;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -8698,6 +9037,124 @@ async fn test_ready_with_all_healthy_components_waits(
     Ok(())
 }
 
+async fn check_public_rack_state(
+    env: &TestEnv,
+    rack_id: &RackId,
+    expected: &RackState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let detail = env
+        .api
+        .get_rack(Request::new(rpc::forge::GetRackRequest {
+            id: Some(rack_id.to_string()),
+        }))
+        .await?
+        .into_inner();
+    let list = env
+        .api
+        .get_rack(Request::new(rpc::forge::GetRackRequest { id: None }))
+        .await?
+        .into_inner();
+    let by_ids = env
+        .api
+        .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+            rack_ids: vec![rack_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    let listed = list
+        .rack
+        .iter()
+        .find(|rack| rack.id.as_ref() == Some(rack_id))
+        .unwrap();
+    for rack in [&detail.rack[0], listed, &by_ids.racks[0]] {
+        assert_eq!(rack.rack_state, expected.to_string());
+        let lifecycle = rack.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
+        assert_eq!(
+            serde_json::from_str::<RackState>(&lifecycle.state)?,
+            *expected
+        );
+    }
+    Ok(())
+}
+
+/// Refresh persisted failures as machines fail and recover, without rewriting unchanged state.
+#[sqlx_test]
+async fn test_component_error_refreshes_machine_failures(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::machine::{FailureCause, FailureDetails, FailureSource, ManagedHostState};
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    crate::fixtures::rack::set_rack_controller_state(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        RackState::Ready,
+    )
+    .await?;
+
+    for (scenario, failed) in [
+        ("first machine fails", [true, false]),
+        ("second machine fails", [true, true]),
+        ("unchanged failures", [true, true]),
+        ("first machine recovers", [false, true]),
+        ("all machines recover", [false, false]),
+    ] {
+        let previous = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let mut failed_ids = Vec::new();
+        for (host, failed) in [&host_a, &host_b].into_iter().zip(failed) {
+            let id = host.host_snapshot.id;
+            let state = if failed {
+                failed_ids.push(id.to_string());
+                ManagedHostState::Failed {
+                    machine_id: id.into(),
+                    retry_count: 0,
+                    details: FailureDetails {
+                        cause: FailureCause::MachineValidation {
+                            err: "DcgmFullLong is failed".to_string(),
+                        },
+                        source: FailureSource::Scout,
+                        failed_at: chrono::Utc::now(),
+                    },
+                }
+            } else {
+                ManagedHostState::Ready
+            };
+            db::machine::update_state(pool.acquire().await?.as_mut(), &id, &state).await?;
+        }
+        failed_ids.sort_unstable();
+        let expected = if failed_ids.is_empty() {
+            RackState::Ready
+        } else {
+            RackState::Error {
+                cause: format!(
+                    "component(s) reported terminal failure: {} machine(s) in Failed: [{}]",
+                    failed_ids.len(),
+                    failed_ids.join(", "),
+                ),
+                certificate_failure: None,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            }
+        };
+
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(rack.controller_state.value, expected, "{scenario}");
+        assert_eq!(
+            rack.controller_state.version == previous.controller_state.version,
+            previous.controller_state.value == expected,
+            "{scenario}: only changed failures should advance the state version",
+        );
+        check_public_rack_state(&env, &rack_id, &expected).await?;
+    }
+
+    Ok(())
+}
+
 /// Reconcile and reload both directions without changing an assigned machine.
 #[sqlx_test]
 async fn test_component_error_recovers_with_assigned_machine(
@@ -8706,46 +9163,6 @@ async fn test_component_error_recovers_with_assigned_machine(
     use model::machine::{InstanceState, ManagedHostState};
     use model::power_shelf::PowerShelfControllerState;
     use model::switch::{InitializingState, SwitchControllerState};
-
-    async fn check_public_state(
-        env: &TestEnv,
-        rack_id: &RackId,
-        expected: &RackState,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let detail = env
-            .api
-            .get_rack(Request::new(rpc::forge::GetRackRequest {
-                id: Some(rack_id.to_string()),
-            }))
-            .await?
-            .into_inner();
-        let list = env
-            .api
-            .get_rack(Request::new(rpc::forge::GetRackRequest { id: None }))
-            .await?
-            .into_inner();
-        let by_ids = env
-            .api
-            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
-                rack_ids: vec![rack_id.clone()],
-            }))
-            .await?
-            .into_inner();
-        let listed = list
-            .rack
-            .iter()
-            .find(|rack| rack.id.as_ref() == Some(rack_id))
-            .unwrap();
-        for rack in [&detail.rack[0], listed, &by_ids.racks[0]] {
-            assert_eq!(rack.rack_state, expected.to_string());
-            let lifecycle = rack.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
-            assert_eq!(
-                serde_json::from_str::<RackState>(&lifecycle.state)?,
-                *expected
-            );
-        }
-        Ok(())
-    }
 
     let mut config = config_with_rack_profiles();
     config
@@ -8813,7 +9230,7 @@ async fn test_component_error_recovers_with_assigned_machine(
         .await?;
     env.run_rack_controller_iteration().await;
     assert_eq!(
-        get_db_rack(env.db_reader().as_mut(), &rack_id)
+        get_db_rack(&env.pool, &rack_id)
             .await
             .controller_state
             .value,
@@ -8845,7 +9262,7 @@ async fn test_component_error_recovers_with_assigned_machine(
         }
         drop(conn);
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert!(
             matches!(rack.controller_state.value, RackState::Error {
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady, ref cause, ..
@@ -8853,7 +9270,7 @@ async fn test_component_error_recovers_with_assigned_machine(
             "{scenario}: persist the component failure"
         );
 
-        check_public_state(&env, &rack_id, &rack.controller_state.value).await?;
+        check_public_rack_state(&env, &rack_id, &rack.controller_state.value).await?;
         let history = env
             .api
             .find_rack_state_histories(Request::new(rpc::forge::RackStateHistoriesRequest {
@@ -8877,7 +9294,7 @@ async fn test_component_error_recovers_with_assigned_machine(
         );
 
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert!(
             matches!(rack.controller_state.value, RackState::Error { .. }),
             "{scenario}: an active failure must prevent recovery"
@@ -8913,7 +9330,7 @@ async fn test_component_error_recovers_with_assigned_machine(
         }
         drop(conn);
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert!(
             matches!(rack.controller_state.value, RackState::Error { .. }),
             "{scenario}: another component failure must prevent recovery"
@@ -8960,7 +9377,7 @@ async fn test_component_error_recovers_with_assigned_machine(
             env.run_rack_controller_iteration().await;
             assert!(
                 matches!(
-                    get_db_rack(env.db_reader().as_mut(), &rack_id)
+                    get_db_rack(&env.pool, &rack_id)
                         .await
                         .controller_state
                         .value,
@@ -8979,15 +9396,15 @@ async fn test_component_error_recovers_with_assigned_machine(
             db::machine::advance(&machine, conn.as_mut(), &assigned, None).await?;
         }
         env.run_rack_controller_iteration().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(
             rack.controller_state.value,
             RackState::Ready,
             "{scenario}: no terminal failure remains, even while a switch initializes"
         );
-        check_public_state(&env, &rack_id, &RackState::Ready).await?;
+        check_public_rack_state(&env, &rack_id, &RackState::Ready).await?;
         let machine = db::machine::find_one(
-            env.db_reader().as_mut(),
+            &env.pool,
             &host.host_snapshot.id,
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -8999,7 +9416,7 @@ async fn test_component_error_recovers_with_assigned_machine(
         );
         env.run_rack_controller_iteration().await;
         assert_eq!(
-            get_db_rack(env.db_reader().as_mut(), &rack_id)
+            get_db_rack(&env.pool, &rack_id)
                 .await
                 .controller_state
                 .value,
@@ -9041,7 +9458,7 @@ async fn test_empty_rack_error_recovers(
     .await?;
     env.run_rack_controller_iteration().await;
     assert_eq!(
-        get_db_rack(env.db_reader().as_mut(), &rack_id)
+        get_db_rack(&env.pool, &rack_id)
             .await
             .controller_state
             .value,
@@ -9075,7 +9492,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let error_state = rack.controller_state.value.clone();
 
     let handler = RackStateHandler::default();
@@ -9083,6 +9500,8 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9143,7 +9562,7 @@ async fn test_error_recovers_while_switch_initializes(
     )
     .await?;
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let mut rack = get_db_rack(&env.pool, &rack_id).await;
     let error_state = rack.controller_state.value.clone();
 
     let handler = RackStateHandler::default();
@@ -9151,6 +9570,8 @@ async fn test_error_recovers_while_switch_initializes(
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9204,12 +9625,9 @@ fn assert_logged_error_transition(logs: &[CapturedLog], cause: &str) {
     assert_eq!(transitions[0].field("cause"), Some(cause));
 }
 
-async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Box<Rack>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+async fn get_db_rack(db: impl DbReader<'_>, rack_id: &RackId) -> Box<Rack> {
     Box::new(
-        db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+        db_rack::find_by(db, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
             .await
             .unwrap()
             .pop()
@@ -9223,12 +9641,14 @@ async fn run_rack_handler_and_apply_writes(
     rack_id: &RackId,
     controller_state: RackState,
 ) -> Result<Box<Rack>, Box<dyn std::error::Error>> {
-    let mut rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let mut rack = get_db_rack(&env.pool, rack_id).await;
     let handler = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
     let mut db_writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut db_writes,
@@ -9239,7 +9659,7 @@ async fn run_rack_handler_and_apply_writes(
         .await?;
     let mut txn = match outcome.take_transaction() {
         Some(txn) => txn,
-        None => pool.begin().await?,
+        None => pool.txn_begin().await?,
     };
     db_writes.apply_all(&mut txn).await?;
     txn.commit().await?;
@@ -9288,7 +9708,7 @@ async fn ingestion_restart_removed_targets_workflow(
         )
         .await?;
         env.run_rack_controller_iteration().await;
-        let saved = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let saved = get_db_rack(&env.pool, &rack_id).await;
         assert!(
             matches!(
                 &saved.controller_state.value,
@@ -9323,7 +9743,7 @@ async fn ingestion_restart_removed_targets_workflow(
         )
         .await?;
         env.run_rack_controller_iteration().await;
-        let waiting = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let waiting = get_db_rack(&env.pool, &rack_id).await;
         assert_eq!(
             waiting.controller_state.value, saved.controller_state.value,
             "{case}"
@@ -9368,7 +9788,7 @@ async fn ingestion_restart_removed_targets_workflow(
                 .await?;
         }
         env.run_rack_controller_iteration_no_requeue().await;
-        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let rack = get_db_rack(&env.pool, &rack_id).await;
         assert!(
             matches!(
                 rack.controller_state.value,
@@ -9449,7 +9869,7 @@ async fn ingestion_restart_saved_targets_workflow(
     )
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert_eq!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -9485,7 +9905,7 @@ async fn ingestion_restart_saved_targets_workflow(
     ))
     .await?;
     env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {

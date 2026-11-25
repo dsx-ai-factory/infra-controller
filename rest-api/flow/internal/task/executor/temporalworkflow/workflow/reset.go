@@ -61,7 +61,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *oper
 	// Submit every device before observing completion, so a slow first reset
 	// cannot prevent healthy peers from starting. Each mutation has one attempt.
 	for index, id := range target.Identifiers {
-		single := common.Target{Type: target.Type, IdentifierType: target.IdentifierType, Identifiers: []string{id}}
+		single := common.Target{TraceID: target.TraceID, Type: target.Type, IdentifierType: target.IdentifierType, Identifiers: []string{id}}
 		remaining := deadline.Sub(workflow.Now(ctx))
 		if remaining <= 0 {
 			failures = append(failures, fmt.Errorf("switch %s: reset not submitted before deadline", id))

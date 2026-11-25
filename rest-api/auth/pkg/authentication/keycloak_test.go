@@ -6,9 +6,11 @@ package authentication
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -459,10 +461,10 @@ func TestKeycloakAuthService_GetUserInfo(t *testing.T) {
 				res.WriteHeader(http.StatusOK)
 				res.Header().Set("Content-Type", "application/json")
 				// Mock response writes are best-effort if the client closes the connection.
-				_, _ = res.Write([]byte(DefaultMockResponses.UserInfo))
+				_, _ = io.WriteString(res, DefaultMockResponses.UserInfo)
 			} else {
 				res.WriteHeader(http.StatusUnauthorized)
-				_, _ = res.Write([]byte(`{"error":"invalid_token","error_description":"Invalid access token"}`))
+				_, _ = io.WriteString(res, `{"error":"invalid_token","error_description":"Invalid access token"}`)
 			}
 		} else {
 			res.WriteHeader(http.StatusNotFound)
@@ -705,7 +707,7 @@ func TestKeycloakAuthService_Logout(t *testing.T) {
 				res.WriteHeader(http.StatusOK)
 			} else {
 				res.WriteHeader(http.StatusBadRequest)
-				_, _ = res.Write([]byte(`{"error":"invalid_request","error_description":"Invalid logout request"}`))
+				_, _ = io.WriteString(res, `{"error":"invalid_request","error_description":"Invalid logout request"}`)
 			}
 		} else {
 			res.WriteHeader(http.StatusNotFound)
@@ -868,7 +870,7 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 			// Generate JWKS from the same key used for signing
 			testKey := getConsistentTestRSAKey()
 			jwks := createJWKSFromRSAKey(&testKey.PublicKey, "test-key-id")
-			_, _ = res.Write([]byte(jwks))
+			_, _ = io.WriteString(res, jwks)
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -1453,7 +1455,7 @@ func TestKeycloakConfig_WithMockServer(t *testing.T) {
 			// Generate JWKS from the consistent test key
 			testKey := getConsistentTestRSAKey()
 			jwks := createJWKSFromRSAKey(&testKey.PublicKey, "test-key-id")
-			_, _ = res.Write([]byte(jwks))
+			_, _ = io.WriteString(res, jwks)
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -1670,47 +1672,47 @@ func handleIntegrationTokenEndpoint(res http.ResponseWriter, req *http.Request) 
 		if username == "admin" && password == "admin-password" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			_, _ = res.Write([]byte(DefaultMockResponses.AdminLogin))
+			_, _ = io.WriteString(res, DefaultMockResponses.AdminLogin)
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
-			_, _ = res.Write([]byte(`{"error":"invalid_grant","error_description":"Invalid user credentials"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_grant","error_description":"Invalid user credentials"}`)
 		}
 	case "authorization_code":
 		code := req.Form.Get("code")
 		if code == "valid-auth-code" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			_, _ = res.Write([]byte(DefaultMockResponses.Token))
+			_, _ = io.WriteString(res, DefaultMockResponses.Token)
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
-			_, _ = res.Write([]byte(`{"error":"invalid_grant","error_description":"Invalid authorization code"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_grant","error_description":"Invalid authorization code"}`)
 		}
 	case "refresh_token":
 		refreshToken := req.Form.Get("refresh_token")
 		if refreshToken == "valid-refresh-token" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			_, _ = res.Write([]byte(`{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer","not-before-policy":0,"session_state":"new-session-state","scope":"openid profile email"}`))
+			_, _ = io.WriteString(res, `{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer","not-before-policy":0,"session_state":"new-session-state","scope":"openid profile email"}`)
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
-			_, _ = res.Write([]byte(`{"error":"invalid_grant","error_description":"Invalid refresh token"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_grant","error_description":"Invalid refresh token"}`)
 		}
 	case "client_credentials":
 		if clientID == "service-client" && clientSecret == "service-secret" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			_, _ = res.Write([]byte(`{"access_token":"service-access-token","expires_in":3600,"token_type":"Bearer","not-before-policy":0,"session_state":"service-session-state","scope":"profile email"}`))
+			_, _ = io.WriteString(res, `{"access_token":"service-access-token","expires_in":3600,"token_type":"Bearer","not-before-policy":0,"session_state":"service-session-state","scope":"profile email"}`)
 		} else if clientID == "test-client" && clientSecret == "test-secret" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			_, _ = res.Write([]byte(`{"access_token":"admin-access-token","expires_in":3600,"token_type":"Bearer","not-before-policy":0,"session_state":"service-session-state","scope":"profile email"}`))
+			_, _ = io.WriteString(res, `{"access_token":"admin-access-token","expires_in":3600,"token_type":"Bearer","not-before-policy":0,"session_state":"service-session-state","scope":"profile email"}`)
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
-			_, _ = res.Write([]byte(`{"error":"invalid_client","error_description":"Invalid client credentials"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_client","error_description":"Invalid client credentials"}`)
 		}
 	default:
 		res.WriteHeader(http.StatusBadRequest)
-		_, _ = res.Write([]byte(`{"error":"unsupported_grant_type","error_description":"Unsupported grant type"}`))
+		_, _ = io.WriteString(res, `{"error":"unsupported_grant_type","error_description":"Unsupported grant type"}`)
 	}
 }
 
@@ -1722,12 +1724,12 @@ func handleIntegrationIdentityProviders(res http.ResponseWriter, req *http.Reque
 		responseBody := DefaultMockResponses.IDPs
 
 		res.Header().Set("Content-Type", "application/json")
-		res.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
+		res.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 		res.WriteHeader(http.StatusOK)
-		_, _ = res.Write([]byte(responseBody))
+		_, _ = io.WriteString(res, responseBody)
 	} else {
 		res.WriteHeader(http.StatusUnauthorized)
-		_, _ = res.Write([]byte(`{"error":"invalid_token","error_description":"Invalid access token"}`))
+		_, _ = io.WriteString(res, `{"error":"invalid_token","error_description":"Invalid access token"}`)
 	}
 }
 
@@ -1736,10 +1738,10 @@ func handleIntegrationUserInfo(res http.ResponseWriter, req *http.Request) {
 	if isValidBearerToken(authHeader) {
 		res.WriteHeader(http.StatusOK)
 		res.Header().Set("Content-Type", "application/json")
-		_, _ = res.Write([]byte(DefaultMockResponses.UserInfo))
+		_, _ = io.WriteString(res, DefaultMockResponses.UserInfo)
 	} else {
 		res.WriteHeader(http.StatusUnauthorized)
-		_, _ = res.Write([]byte(`{"error":"invalid_token","error_description":"Invalid access token"}`))
+		_, _ = io.WriteString(res, `{"error":"invalid_token","error_description":"Invalid access token"}`)
 	}
 }
 
@@ -1755,7 +1757,7 @@ func handleIntegrationLogout(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(http.StatusOK)
 	} else {
 		res.WriteHeader(http.StatusBadRequest)
-		_, _ = res.Write([]byte(`{"error":"invalid_request","error_description":"Invalid logout request"}`))
+		_, _ = io.WriteString(res, `{"error":"invalid_request","error_description":"Invalid logout request"}`)
 	}
 }
 
@@ -1763,7 +1765,7 @@ func handleIntegrationJWKS(res http.ResponseWriter, req *http.Request) {
 	res.WriteHeader(http.StatusOK)
 	res.Header().Set("Content-Type", "application/json")
 	// Real  JWKS response from nico development environment
-	_, _ = res.Write([]byte(`{"keys":[{"kid":"2qPROcQfHMCXUi4rKt-CRB5iG4Z-5rfbP7zHOsxWA28","kty":"RSA","alg":"RS256","use":"sig","x5c":["MIICmTCCAYECBgGYzofhRDANBgkqhkiG9w0BAQsFADAQMQ4wDAYDVQQDDAVmb3JnZTAeFw0yNTA4MjEyMTI2MDhaFw0zNTA4MjEyMTI3NDhaMBAxDjAMBgNVBAMMBWZvcmdlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ+EtskZ9MnoZEd8NfFbyzAeyAe4iAL+Sjf5DV+ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt/0jabf5Z6QTeKJv22fk6jKM3vQZH2IE/h+ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9QIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQAqNZY5kMW8VcnmuC1Ux4c6EMLhaAej6mQsGawic6sj9AHiYI24zY6VID9I9IG6cBP9J5Pw84TVU+J96CNcavMmCZV80hQNrunABJHM/lUtv0sUsqGm4qpsnOD+g7B9XKIu9YxnpGzX7ouH0nk355rBN7swTuEBpy5ELtQlraAGMbTDv+UjgpxAiUczsQeS3mvKnyiINx9Rv0imJhRskyuaqmLaVb0eZkezFEWPYzqqOAEEuMOkuwOD/1vJVz3j1gCcy9ZOqwe+8O0zPJuN/cLjDiXPmpqOvI1eKW03O+sBKasYm9dVC/JaBktHeQ0LJZUVGYzgVmbun41z/2Q01WQW"],"x5t":"UHFsVos9chqrKD4oPeyih58kFr0","x5t#S256":"UQ7TfWdf5BUFzuZ_8OcK1Idbzz_mYU2Xrpu-Mv9W1KI","n":"9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ-EtskZ9MnoZEd8NfFbyzAeyAe4iAL-Sjf5DV-ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt_0jabf5Z6QTeKJv22fk6jKM3vQZH2IE_h-ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9Q","e":"AQAB"},{"kid":"rYde1QMYY3w-bK7qt5GPvI6uGK1b38KtguxnLYcYg-U","kty":"RSA","alg":"RSA-OAEP","use":"enc","x5c":["MIICmTCCAYECBgGYzofh5DANBgkqhkiG9w0BAQsFADAQMQ4wDAYDVQQDDAVmb3JnZTAeFw0yNTA4MjEyMTI2MDhaFw0zNTA4MjEyMTI3NDhaMBAxDjAMBgNVBAMMBWZvcmdlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtlnHXyI93apJ2gqfX80VlKuz6CrGh79hxPAF3WcKPXfqrng4HjjlH8BYFY37WRXKX4whEEDaE3KPp6p59sOaVpcfYAlf7Nxrzdpm0Mro23mNCR1VCzMlc4enlcD7hB753diBYr93bkMUTZPtE7Ws3YNPPY7+JV+c8xjA0yz7Er1YG89GYuey6sKGxOrNxwvTh9477hN5fKwfVDBBZAZr7oiNxNPFN2ecQ1rXy36byNg8mSRcF32z2Y2KUKuUMXysmSf3W+aC48SHNtykXY9btNEMFhnE2FekmKMc6cefkgkVuSgLo8zmyWYFcFAcmNaqce6EgS4wb4ITfNs9IKrqWwIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQCZZj+L4eIeLGrSqM0HiacMYDG0KXUHO/x3RM6D7UNRXt+pGF8hs1j9+Q27BEejD6IptBjQEfipHAvOaYV8TuFBpE4UEOLXxQBloLPRO4fb/OS7s7UFyE2XgnOS9E4NMxzRYVfyFxtXPZssNd7WxTeiA4/ISh9C47or9Ge+F5h5YQSVkLtXjRmEhN4K5OMkeafGbmA1WGHSEKQei6QbGgzbTbXTgtTpQgcL6WHLtpBaOnd4X9h38mJ9yPwr+aiadco33VDHWaruG0APDIadjq+SI2pn6H+TPpAfzvr11wnjvZswj6ePoPk9HgxtvQbUBalbOO8rIWSl2n5PrKzZNXwM"],"x5t":"pKk7-fkjCqoobuCTe--sBvdX0wc","x5t#S256":"JL1f_QDCxBTj81_-h_K1KBvRtYAc4GbZBcjuAWWOv2c","n":"tlnHXyI93apJ2gqfX80VlKuz6CrGh79hxPAF3WcKPXfqrng4HjjlH8BYFY37WRXKX4whEEDaE3KPp6p59sOaVpcfYAlf7Nxrzdpm0Mro23mNCR1VCzMlc4enlcD7hB753diBYr93bkMUTZPtE7Ws3YNPPY7-JV-c8xjA0yz7Er1YG89GYuey6sKGxOrNxwvTh9477hN5fKwfVDBBZAZr7oiNxNPFN2ecQ1rXy36byNg8mSRcF32z2Y2KUKuUMXysmSf3W-aC48SHNtykXY9btNEMFhnE2FekmKMc6cefkgkVuSgLo8zmyWYFcFAcmNaqce6EgS4wb4ITfNs9IKrqWw","e":"AQAB"}]}`))
+	_, _ = io.WriteString(res, `{"keys":[{"kid":"2qPROcQfHMCXUi4rKt-CRB5iG4Z-5rfbP7zHOsxWA28","kty":"RSA","alg":"RS256","use":"sig","x5c":["MIICmTCCAYECBgGYzofhRDANBgkqhkiG9w0BAQsFADAQMQ4wDAYDVQQDDAVmb3JnZTAeFw0yNTA4MjEyMTI2MDhaFw0zNTA4MjEyMTI3NDhaMBAxDjAMBgNVBAMMBWZvcmdlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ+EtskZ9MnoZEd8NfFbyzAeyAe4iAL+Sjf5DV+ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt/0jabf5Z6QTeKJv22fk6jKM3vQZH2IE/h+ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9QIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQAqNZY5kMW8VcnmuC1Ux4c6EMLhaAej6mQsGawic6sj9AHiYI24zY6VID9I9IG6cBP9J5Pw84TVU+J96CNcavMmCZV80hQNrunABJHM/lUtv0sUsqGm4qpsnOD+g7B9XKIu9YxnpGzX7ouH0nk355rBN7swTuEBpy5ELtQlraAGMbTDv+UjgpxAiUczsQeS3mvKnyiINx9Rv0imJhRskyuaqmLaVb0eZkezFEWPYzqqOAEEuMOkuwOD/1vJVz3j1gCcy9ZOqwe+8O0zPJuN/cLjDiXPmpqOvI1eKW03O+sBKasYm9dVC/JaBktHeQ0LJZUVGYzgVmbun41z/2Q01WQW"],"x5t":"UHFsVos9chqrKD4oPeyih58kFr0","x5t#S256":"UQ7TfWdf5BUFzuZ_8OcK1Idbzz_mYU2Xrpu-Mv9W1KI","n":"9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ-EtskZ9MnoZEd8NfFbyzAeyAe4iAL-Sjf5DV-ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt_0jabf5Z6QTeKJv22fk6jKM3vQZH2IE_h-ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9Q","e":"AQAB"},{"kid":"rYde1QMYY3w-bK7qt5GPvI6uGK1b38KtguxnLYcYg-U","kty":"RSA","alg":"RSA-OAEP","use":"enc","x5c":["MIICmTCCAYECBgGYzofh5DANBgkqhkiG9w0BAQsFADAQMQ4wDAYDVQQDDAVmb3JnZTAeFw0yNTA4MjEyMTI2MDhaFw0zNTA4MjEyMTI3NDhaMBAxDjAMBgNVBAMMBWZvcmdlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtlnHXyI93apJ2gqfX80VlKuz6CrGh79hxPAF3WcKPXfqrng4HjjlH8BYFY37WRXKX4whEEDaE3KPp6p59sOaVpcfYAlf7Nxrzdpm0Mro23mNCR1VCzMlc4enlcD7hB753diBYr93bkMUTZPtE7Ws3YNPPY7+JV+c8xjA0yz7Er1YG89GYuey6sKGxOrNxwvTh9477hN5fKwfVDBBZAZr7oiNxNPFN2ecQ1rXy36byNg8mSRcF32z2Y2KUKuUMXysmSf3W+aC48SHNtykXY9btNEMFhnE2FekmKMc6cefkgkVuSgLo8zmyWYFcFAcmNaqce6EgS4wb4ITfNs9IKrqWwIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQCZZj+L4eIeLGrSqM0HiacMYDG0KXUHO/x3RM6D7UNRXt+pGF8hs1j9+Q27BEejD6IptBjQEfipHAvOaYV8TuFBpE4UEOLXxQBloLPRO4fb/OS7s7UFyE2XgnOS9E4NMxzRYVfyFxtXPZssNd7WxTeiA4/ISh9C47or9Ge+F5h5YQSVkLtXjRmEhN4K5OMkeafGbmA1WGHSEKQei6QbGgzbTbXTgtTpQgcL6WHLtpBaOnd4X9h38mJ9yPwr+aiadco33VDHWaruG0APDIadjq+SI2pn6H+TPpAfzvr11wnjvZswj6ePoPk9HgxtvQbUBalbOO8rIWSl2n5PrKzZNXwM"],"x5t":"pKk7-fkjCqoobuCTe--sBvdX0wc","x5t#S256":"JL1f_QDCxBTj81_-h_K1KBvRtYAc4GbZBcjuAWWOv2c","n":"tlnHXyI93apJ2gqfX80VlKuz6CrGh79hxPAF3WcKPXfqrng4HjjlH8BYFY37WRXKX4whEEDaE3KPp6p59sOaVpcfYAlf7Nxrzdpm0Mro23mNCR1VCzMlc4enlcD7hB753diBYr93bkMUTZPtE7Ws3YNPPY7-JV-c8xjA0yz7Er1YG89GYuey6sKGxOrNxwvTh9477hN5fKwfVDBBZAZr7oiNxNPFN2ecQ1rXy36byNg8mSRcF32z2Y2KUKuUMXysmSf3W-aC48SHNtykXY9btNEMFhnE2FekmKMc6cefkgkVuSgLo8zmyWYFcFAcmNaqce6EgS4wb4ITfNs9IKrqWw","e":"AQAB"}]}`)
 }
 
 // TestKeycloakAuthService_ErrorScenarios tests error handling with realistic server responses
@@ -1774,16 +1776,16 @@ func TestKeycloakAuthService_ErrorScenarios(t *testing.T) {
 		case strings.Contains(req.URL.Path, "/realms/nico/protocol/openid-connect/token"):
 			// Always return unauthorized for admin login
 			res.WriteHeader(http.StatusUnauthorized)
-			_, _ = res.Write([]byte(`{"error":"invalid_grant","error_description":"Invalid credentials"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_grant","error_description":"Invalid credentials"}`)
 		case strings.Contains(req.URL.Path, "/admin/realms/nico/identity-provider/instances"):
 			// Return empty IDP list
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			_, _ = res.Write([]byte(`[]`))
+			_, _ = io.WriteString(res, `[]`)
 		case strings.Contains(req.URL.Path, "/realms/nico/protocol/openid-connect/token"):
 			// Return error for token exchange
 			res.WriteHeader(http.StatusBadRequest)
-			_, _ = res.Write([]byte(`{"error":"invalid_grant","error_description":"Authorization code expired"}`))
+			_, _ = io.WriteString(res, `{"error":"invalid_grant","error_description":"Authorization code expired"}`)
 		default:
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -1843,7 +1845,7 @@ func TestKeycloakConfig_WithRealServer(t *testing.T) {
 		if strings.Contains(req.URL.Path, "/realms/nico/protocol/openid-connect/certs") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			_, _ = res.Write([]byte(`{"keys":[{"kid":"2qPROcQfHMCXUi4rKt-CRB5iG4Z-5rfbP7zHOsxWA28","kty":"RSA","alg":"RS256","use":"sig","n":"9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ-EtskZ9MnoZEd8NfFbyzAeyAe4iAL-Sjf5DV-ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt_0jabf5Z6QTeKJv22fk6jKM3vQZH2IE_h-ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9Q","e":"AQAB"}]}`))
+			_, _ = io.WriteString(res, `{"keys":[{"kid":"2qPROcQfHMCXUi4rKt-CRB5iG4Z-5rfbP7zHOsxWA28","kty":"RSA","alg":"RS256","use":"sig","n":"9YNTgddbGn0PKUbk3uISXkhWro0ColFLRZYFWSCCHV5JXG6bgmCeFa4RWnUi0qzRtzyu2uEAWbf5XMJl0TSO9F0N4OdeeW6nK2ZzdK1ASuRy9ACBGgv0kCRpukgX9vlJAjSR3DIHROom9evsf5RYzX9tgNKdkRz1134zZpQ-EtskZ9MnoZEd8NfFbyzAeyAe4iAL-Sjf5DV-ACKwJopDUPz9MwvK7BYEdqZ6ZNnn6nmwNAt_0jabf5Z6QTeKJv22fk6jKM3vQZH2IE_h-ulHYA9pMZoLciQ7zchXVvyAJkIjmeO2nGtW5cFHZ3X2Bm6MMU9MtzIfjAR2FCbKwtJF9Q","e":"AQAB"}]}`)
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -2062,7 +2064,7 @@ func TestKeycloakAuthService_ClientCredentialsAuth_EdgeCases(t *testing.T) {
 				if strings.Contains(r.URL.Path, "/protocol/openid-connect/token") {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(tt.mockStatusCode)
-					_, _ = w.Write([]byte(tt.mockResponse))
+					_, _ = io.WriteString(w, tt.mockResponse)
 				} else {
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -2180,7 +2182,7 @@ func TestKeycloakAuthService_InitiateAuthFlow_EdgeCases(t *testing.T) {
 					if tt.mockAdminToken != "" {
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
-						_, _ = w.Write([]byte(`{"access_token":"` + tt.mockAdminToken + `","token_type":"Bearer"}`))
+						_, _ = io.WriteString(w, `{"access_token":"`+tt.mockAdminToken+`","token_type":"Bearer"}`)
 					} else {
 						w.WriteHeader(http.StatusUnauthorized)
 					}
@@ -2189,7 +2191,7 @@ func TestKeycloakAuthService_InitiateAuthFlow_EdgeCases(t *testing.T) {
 					if strings.Contains(authHeader, tt.mockAdminToken) && tt.mockAdminToken != "" {
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
-						_, _ = w.Write([]byte(tt.mockIDPs))
+						_, _ = io.WriteString(w, tt.mockIDPs)
 					} else {
 						w.WriteHeader(http.StatusUnauthorized)
 					}
@@ -2438,7 +2440,7 @@ func TestKeycloakAuthService_ErrorEdgeCases(t *testing.T) {
 		invalidJSONServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("invalid json response {{{"))
+			_, _ = io.WriteString(w, "invalid json response {{{")
 		}))
 		defer invalidJSONServer.Close()
 
@@ -2653,10 +2655,10 @@ func TestErrorRecovery(t *testing.T) {
 			// Return minimal valid response
 			if strings.Contains(r.URL.Path, "admin/token") {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"Bearer"}`))
+				_, _ = io.WriteString(w, `{"access_token":"test-token","token_type":"Bearer"}`)
 			} else {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`[]`)) // Empty array for IDP list
+				_, _ = io.WriteString(w, `[]`) // Empty array for IDP list
 			}
 		}))
 		defer workingServer.Close()

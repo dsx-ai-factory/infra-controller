@@ -73,6 +73,7 @@ impl InternalRBACRules {
         x.perm("DeleteDomain", vec![]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
+        x.perm("CancelVpcCreation", vec![SiteAgent]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
@@ -723,6 +724,11 @@ impl InternalRBACRules {
             "GetNetworkSecurityGroupAttachments",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("CreateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetDesiredFirmwareVersions",
             vec![ForgeAdminCLI, Machineatron, Flow, SiteHealthProbe],
@@ -842,12 +848,12 @@ impl InternalRBACRules {
             "ListMachineAttestationStatuses",
             vec![ForgeAdminCLI, SiteAgent],
         );
-        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
             "FindPowerShelfIds",
@@ -1677,18 +1683,37 @@ mod rbac_rule_tests {
         let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
         let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
 
+        // Cancellation can return an existing VPC's full configuration. Creation
+        // permission alone must not grant Machineatron that read access.
+        assert!(!InternalRBACRules::allowed_from_static(
+            "CancelVpcCreation",
+            &[Principal::SpiffeServiceIdentifier(
+                "machine-a-tron".to_string()
+            )],
+        ));
+
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
+            "CancelVpcCreation",
+            "CreateAttestationProfile",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
             "DecommissionPowerShelf",
             "DecommissionSwitch",
+            "DeleteAttestationProfile",
             "DeleteSku",
+            "FailAttestation",
+            "GetAttestation",
+            "GetAttestationCoverage",
+            "GetAttestationProfile",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
             "InsertRackHealthReport",
             "InsertSwitchHealthReport",
+            "ListAttestation",
+            "ListAttestationProfiles",
+            "ListMachineAttestationStatuses",
             "ListMachineHealthReports",
             "ListPowerShelfHealthReports",
             "ListRackHealthReports",
@@ -1698,7 +1723,10 @@ mod rbac_rule_tests {
             "RemoveSwitchHealthReport",
             "ReplaceSku",
             "RotateCredential",
+            "TriggerMachineAttestation",
+            "UpdateAttestationProfile",
             "UpdateSkuMetadata",
+            "WaiveAttestation",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
@@ -2145,10 +2173,9 @@ mod rbac_rule_tests {
             let line = line?;
             let line = line.trim();
             if line.starts_with("rpc") {
-                let mut name = line.strip_prefix("rpc").unwrap_or("why").trim().to_string();
+                let name = line.strip_prefix("rpc").unwrap_or("why").trim();
                 let offset = name.find("(").unwrap_or(name.len());
-                name.replace_range(offset.., "");
-                messages.push(name.trim().to_string());
+                messages.push(name[..offset].trim().to_string());
             }
         }
         if messages.is_empty() {

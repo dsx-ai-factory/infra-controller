@@ -40,7 +40,7 @@ use carbide_credential_rotation::{
     BmcEndpoint, BmcRotationTick, RotateOutcome, RotationStep, advance, rotate_bmc,
 };
 use carbide_uuid::switch::SwitchId;
-use libredfish::model::service_root::RedfishVendor;
+use db::TransactionVending as _;
 use model::switch::{Switch, SwitchControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -153,7 +153,12 @@ pub async fn handle_rotating_bmc(
             // than silently drop the operator's request.
             let mut txn = None;
             if force && matches!(step, RotationStep::Settled) {
-                let mut t = ctx.services.db_pool.begin().await?;
+                let mut t = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::switch::clear_bmc_credential_rotation_requested(&mut t, *switch_id).await?;
                 txn = Some(t);
             }
@@ -161,7 +166,12 @@ pub async fn handle_rotating_bmc(
             // skip window ends exactly when the rotation does.
             let mut resume_txn = match txn.take() {
                 Some(txn) => txn,
-                None => ctx.services.db_pool.begin().await?,
+                None => ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?,
             };
             site_explorer_pause::resume_after_credential_change(
                 &mut resume_txn,
@@ -186,30 +196,23 @@ async fn rotate_switch_bmc(
     endpoint: BmcEndpoint,
     force: bool,
 ) -> BmcRotationTick {
-    // Every switch BMC in the fleet is an NVIDIA NVLink (MGX) switch today, so
-    // the dispatch vendor `set_bmc_root_password` branches on is fixed -- no
-    // per-tick probe is needed (unlike the machine path, whose BMC vendors are
-    // heterogeneous). If non-NVIDIA switch BMCs ever appear, resolve the vendor
-    // here (e.g. via `redfish_client_pool.probe_bmc_vendor`) instead.
-    let vendor = RedfishVendor::NvidiaGBSwitch;
-    let target = endpoint.into_target(vendor);
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.bmc_credential_ops.as_ref(),
-        &target,
+        &services.bmc_connector,
+        &endpoint,
         force,
         &services.instrumentation,
     )
     .await
     {
         Ok(RotateOutcome::Converged) => {
-            tracing::info!(mac = %target.device_mac, force, "switch BMC converged to site-wide rotation target");
+            tracing::info!(mac = %endpoint.device_mac, force, "switch BMC converged to site-wide rotation target");
             BmcRotationTick::Settled
         }
         Ok(RotateOutcome::Quarantined { until }) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 %until,
                 "switch BMC rotation attempt failed; quarantined until backoff elapses"
             );
@@ -217,7 +220,7 @@ async fn rotate_switch_bmc(
         }
         Ok(RotateOutcome::CredentialStoreReconcilePending) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 "switch BMC hardware changed but the per-device secret persist failed; holding rotation until the credential store reconciles"
             );
             BmcRotationTick::WaitForCredentialStoreReconcile
@@ -225,7 +228,7 @@ async fn rotate_switch_bmc(
         Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
         Err(e) => {
             tracing::warn!(
-                mac = %target.device_mac,
+                mac = %endpoint.device_mac,
                 error = %e,
                 "transient switch BMC rotation bookkeeping failure; will retry the tick"
             );

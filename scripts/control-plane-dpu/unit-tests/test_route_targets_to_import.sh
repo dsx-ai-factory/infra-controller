@@ -115,7 +115,7 @@ cat >> "$SITE_DUP_ADMIN" <<EOF
     $DC_ASN:50400: {}
 EOF
 # The same number under another ASN is a different target, not a duplicate
-# (the README's "<siteControllerRoutesAsn>:50100 when the ASNs differ" case).
+# (the README's unequal-ASN case, using the sample controller tag 50100).
 SITE_ZERO="$TMP/site-leading-zero.yaml"; base_site "$SITE_ZERO"
 cat >> "$SITE_ZERO" <<EOF
   routeTargetsToImport:

@@ -39,6 +39,19 @@ Unknown fields in either table fail the boot.
 
 With `ufm_source = "local"` and InfiniBand management enabled, startup requires a local `ufm_auth_by_fabric` entry for every configured fabric and fails naming the missing fabric. With InfiniBand management disabled, startup succeeds because UFM is dormant. In this mode a Vault import configured by `[secrets] import_from` skips the `ufm/` subtree, so local ownership survives the import.
 
+An empty UFM password selects the default SPIFFE client certificate only when
+the source that supplies the credential returns it. Vault and the environment
+and file sources return an empty password. Postgres reads the newest entry with
+an empty password as no credential, which also hides an earlier token stored
+there. When Postgres is the only source that supplies a fabric's credential,
+`credential add-ufm` without `--token` leaves the fabric without a credential:
+UFM client creation fails and the fabric monitor cannot load the fabric. To use
+the SPIFFE certificate with Postgres storage, put the fabric's entry with an
+empty password in the environment or file source and set `ufm_source` to
+`"local_first"` or `"local"`; with `"backend"`, local UFM entries are ignored.
+Native Postgres support is tracked by
+[#9232](https://github.com/dsx-ai-factory/infra-controller/issues/9232).
+
 ### Site-wide BMC Root Version 0 Ownership Policy
 
 | `bmc_site_wide_root_source` | Version 0 reads | `credential add-bmc --kind=site-wide-root` and delete |
@@ -124,7 +137,12 @@ machine_identity:
     kv1: <base64-encoded 32-byte key>
 ```
 
-The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`. For UFM, the password is the bearer token, and an empty password selects the default SPIFFE client certificate.
+The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`.
+
+UFM passwords have two supported forms: an empty or whitespace-only password
+selects the default SPIFFE client certificate, and any other value is the bearer
+token. The credential source affects whether an empty password is returned; see
+[UFM Ownership Policy](#ufm-ownership-policy).
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.
 

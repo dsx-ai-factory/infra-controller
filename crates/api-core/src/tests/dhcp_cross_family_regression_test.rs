@@ -16,13 +16,16 @@
  */
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
+use std::time::Duration;
 
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use rpc::forge::forge_server::Forge;
 
 use crate::tests::common::api_fixtures::network_segment::create_network_segment;
 use crate::tests::common::api_fixtures::{FIXTURE_DHCP_RELAY_ADDRESS, create_test_env};
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 use crate::tests::machine_dhcp::{
     RPC_MESSAGE_KIND_V6_INFO_REQUEST, RPC_MESSAGE_KIND_V6_SOLICIT, add_ipv6_prefix,
@@ -33,7 +36,8 @@ use crate::tests::machine_dhcp::{
 /// Verify one physical NIC retains one interface while gaining independent v4 and v6 leases.
 ///
 /// Cross-family DHCP must merge identity without allowing either protocol to
-/// return or overwrite the other family's address.
+/// return or overwrite the other family's address. A short BMC rotation lock
+/// delays renewal and missing-family allocation without changing either result.
 #[crate::sqlx_test]
 async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     pool: sqlx::PgPool,
@@ -65,16 +69,52 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
     assert!(addresses[0].address.is_ipv4());
 
-    // Request DHCPv6 later for the same MAC; it should add only the v6 family.
-    let v6_response = env
-        .api
-        .discover_dhcp(dhcpv6_discovery(
-            mac,
-            "2001:db8:2::1",
-            RPC_MESSAGE_KIND_V6_SOLICIT,
-        ))
-        .await?
-        .into_inner();
+    let cases = [
+        (
+            "IPv4 renewal",
+            DhcpDiscovery::builder(mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request(),
+            "UPDATE machine_interfaces SET last_dhcp",
+        ),
+        (
+            "first IPv6 allocation",
+            dhcpv6_discovery(mac, "2001:db8:2::1", RPC_MESSAGE_KIND_V6_SOLICIT),
+            "SELECT segment_id FROM machine_interfaces",
+        ),
+    ];
+    let mut responses = Vec::new();
+    for (scenario, request, blocked_query) in cases {
+        let mut rotation = pool.txn_begin().await?;
+        let locked =
+            db::machine_interface::find_by_mac_address_for_update(&mut rotation, mac).await?;
+        assert_eq!(locked.len(), 1, "{scenario}");
+        assert_eq!(locked[0].id, interface_id, "{scenario}");
+        let rotation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *rotation)
+            .await?;
+
+        let discovery = env.api.discover_dhcp(request);
+        tokio::pin!(discovery);
+        tokio::select! {
+            result = &mut discovery => panic!("{scenario} bypassed the BMC interface lock: {result:?}"),
+            _ = wait_for_blocked_query(&pool, rotation_pid, blocked_query) => {},
+        }
+        rotation.commit().await?;
+        let response = tokio::time::timeout(Duration::from_secs(30), discovery)
+            .await?
+            .map_err(|error| format!("{scenario}: {error}"))?
+            .into_inner();
+        assert_eq!(
+            response.machine_interface_id,
+            Some(interface_id),
+            "{scenario}"
+        );
+        responses.push(response);
+    }
+    let v4_renewal = &responses[0];
+    assert_eq!(v4_renewal.address, v4_response.address);
+    assert_eq!(v4_renewal.prefix, v4_response.prefix);
+    assert_eq!(v4_renewal.fqdn, v4_response.fqdn);
+    let v6_response = &responses[1];
     assert!(v6_response.address.parse::<IpAddr>()?.is_ipv6());
     assert_eq!(v6_response.prefix, "2001:db8:2::/64");
     assert!(v6_response.gateway.is_none());
@@ -87,10 +127,12 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     let (_, addresses) = interface_addresses_for_mac(&pool, mac).await?;
     assert_eq!(addresses.len(), 2);
     assert!(addresses.iter().any(|address| {
-        address.allocation_type == AllocationType::Dhcp && address.address.is_ipv4()
+        address.allocation_type == AllocationType::Dhcp
+            && address.address.to_string() == v4_response.address
     }));
     assert!(addresses.iter().any(|address| {
-        address.allocation_type == AllocationType::Dhcp && address.address.is_ipv6()
+        address.allocation_type == AllocationType::Dhcp
+            && address.address.to_string() == v6_response.address
     }));
 
     Ok(())
@@ -129,20 +171,17 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     assert!(response.last_invalidation_time.is_some());
 
     // Read back the persisted address and confirm it is the EUI-64 SLAAC GUA.
-    let mut txn = pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         response.fqdn,
         format!("{}.dwrt1.com", interfaces[0].hostname)
     );
     let interface_id = interfaces[0].id;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
     assert_eq!(addresses[0].address, expected_address);
-    txn.rollback().await?;
 
     // An existing SLAAC row must not turn a repeated observation into a lease.
     let repeated_response = env
@@ -160,7 +199,7 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     assert_eq!(repeated_response.machine_interface_id, Some(interface_id));
 
     // Reload after the repeat to prove the original address is unchanged.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);
@@ -200,7 +239,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     let env = create_test_env(pool.clone()).await;
     let mac = MacAddress::from_str("02:00:00:00:00:0d").unwrap();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::retained_boot_interface::upsert(&mut txn, mac, "NIC.Integrated.1-1-1").await?;
     txn.commit().await?;
 
@@ -224,8 +263,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     assert!(response.last_invalidation_time.is_some());
 
     // Verify the observation persisted the interface identity, but no address.
-    let mut txn = pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
     assert_eq!(
@@ -233,14 +271,13 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
         Some("NIC.Integrated.1-1-1")
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(&mut txn, mac, None)
+        db::retained_boot_interface::find_by_mac(&pool, mac, None)
             .await?
             .is_none()
     );
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert!(addresses.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -297,18 +334,15 @@ async fn test_dhcp_v6_info_request_on_non_reserved_segment_rejects_known_interfa
     );
 
     // Verify the known interface stayed on its original segment with its v4 lease.
-    let mut txn = pool.begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, other_segment);
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, v4_address);
 
     // Verify no second managed interface or SLAAC row was created.
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
-    txn.rollback().await?;
 
     Ok(())
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -283,7 +284,7 @@ Example:
 			"-o", "ConnectTimeout=30",
 		}
 		if usNvosPort != 22 {
-			scpArgs = append(scpArgs, "-P", fmt.Sprintf("%d", usNvosPort))
+			scpArgs = append(scpArgs, "-P", strconv.Itoa(usNvosPort))
 		}
 		scpArgs = append(scpArgs, usFirmwareFile, targetAddr)
 

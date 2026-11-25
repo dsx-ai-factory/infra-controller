@@ -125,7 +125,7 @@ const RMS_PREFIX: &str = "rms: ";
 /// `GetRmsVersion`, the RBAC rule is absent and the result is
 /// `PermissionDenied`, not `Unimplemented`.
 fn classify(s: tonic::Status) -> Report {
-    let msg = s.message().to_owned();
+    let msg = s.message();
 
     if let Some(rms_detail) = msg.strip_prefix(RMS_PREFIX) {
         return classify_rms_failure(s.code(), rms_detail);
@@ -157,7 +157,7 @@ fn classify(s: tonic::Status) -> Report {
                         if msg.is_empty() {
                             "connection refused or service unavailable"
                         } else {
-                            &msg
+                            msg
                         }
                     ),
                 )

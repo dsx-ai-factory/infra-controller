@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
-use std::ops::DerefMut;
 
 use ::rpc::forge as rpc;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use model::firmware::FirmwareComponentType;
 use model::site_explorer::{EndpointExplorationReport, EndpointType};
 use rpc::forge_server::Forge;
@@ -38,7 +38,7 @@ async fn test_find_explored_endpoint_ids(
     let [machine_id, other_machine_id, missing_machine_id] =
         [1, 2, 3].map(|hash| MachineId::new(MachineIdSource::Tpm, [hash; 32], MachineType::Host));
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for (address, report_machine_id) in [
         ("141.219.24.1", Some(machine_id)),
         ("141.219.24.2", Some(machine_id)),
@@ -116,7 +116,7 @@ async fn test_find_explored_endpoints_by_ids(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for i in 1..6 {
         common::endpoint::insert_endpoint_version(
             &mut txn,
@@ -229,20 +229,21 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // The topology copy may be missing the MAC, but machine_id lookup should
     // still recover it from the linked BMC machine_interface.
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
 
-    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}', $2::jsonb, false) WHERE machine_id = $1";
+    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}', $2::jsonb, false) WHERE machine_id = $1 RETURNING topology->'bmc_info'";
     let bmc_info = serde_json::json!({
         "ip": bmc_ip,
         "port": null,
         "version": "1",
         "firmware_version": "5.10",
     });
-    let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
-        .bind(sqlx::types::Json(bmc_info))
-        .execute(txn.deref_mut())
+    let updated_bmc_info = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(query)
+        .bind(host_machine_id)
+        .bind(sqlx::types::Json(&bmc_info))
+        .fetch_all(txn.as_mut())
         .await?;
+    assert_eq!(updated_bmc_info, vec![sqlx::types::Json(bmc_info)]);
     txn.commit().await?;
 
     let req = tonic::Request::new(rpc::AdminBmcResetRequest {
@@ -257,13 +258,20 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     // The topology copy may be missing the IP or contain stale MAC data, but
     // machine_id lookup should still recover the current endpoint data from
     // the linked BMC machine_interface.
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
 
-    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}',  '{\"mac\": \"C8:4B:D6:7A:DB:66\", \"port\": null, \"version\": \"1\", \"firmware_version\": \"5.10\"}', false) WHERE machine_id = $1";
-    let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
-        .execute(txn.deref_mut())
+    let bmc_info = serde_json::json!({
+        "mac": "C8:4B:D6:7A:DB:66",
+        "port": null,
+        "version": "1",
+        "firmware_version": "5.10",
+    });
+    let updated_bmc_info = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(query)
+        .bind(host_machine_id)
+        .bind(sqlx::types::Json(&bmc_info))
+        .fetch_all(txn.as_mut())
         .await?;
+    assert_eq!(updated_bmc_info, vec![sqlx::types::Json(bmc_info)]);
     txn.commit().await?;
 
     let req = tonic::Request::new(rpc::AdminBmcResetRequest {
@@ -291,7 +299,7 @@ async fn test_find_explored_endpoint_firmware_versions(
         (FirmwareComponentType::Cx7, "28.47.2682".to_string()),
     ]);
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     common::endpoint::insert_endpoint_with_firmware_versions(
         &mut txn,
         "141.219.24.1",

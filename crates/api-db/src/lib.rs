@@ -24,6 +24,7 @@ pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
+pub mod cm_action;
 pub mod compute_allocation;
 mod conditional_write;
 mod config_drift;
@@ -32,10 +33,12 @@ pub mod db_read;
 mod db_session;
 pub mod desired_firmware;
 pub mod dhcp_entry;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod direct_dispatch_rms_job;
 pub mod dns;
 pub mod dpa_interface;
+pub mod dpf_bmc_rotation;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
@@ -120,6 +123,9 @@ pub mod vpc_prefix;
 pub mod work_lock_manager;
 mod writable_pool;
 
+#[cfg(test)]
+mod test_maintenance_correlation;
+
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
@@ -127,6 +133,7 @@ pub use db_session::DbSessionGuard;
 pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
+#[allow(txn_held_across_await)]
 pub mod test_support;
 
 use std::backtrace::{Backtrace, BacktraceStatus};
@@ -138,7 +145,7 @@ use std::panic::Location;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 #[cfg(test)]
 pub(crate) use carbide_macros::sqlx_test;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
@@ -146,7 +153,7 @@ use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
 use model::tenant::TenantError;
-use sqlx::{Acquire, PgPool, PgTransaction, Postgres};
+use sqlx::{Acquire, PgPool, Postgres};
 use tonic::Status;
 
 use crate::ip_allocator::DhcpError;
@@ -801,55 +808,66 @@ impl DatabaseTransactionRollbackFailed {
     }
 }
 
-fn record_database_transaction_rollback_failure(
-    trigger: DatabaseTransactionRollbackTrigger,
-    caller: &'static Location<'static>,
-    context: &'static str,
-    error: sqlx::Error,
-) {
-    let error = DatabaseError::txn_rollback(error, caller);
-    emit(DatabaseTransactionRollbackFailed::new(
-        trigger, caller, context, &error,
-    ));
-}
-
+/// A transaction owning a pooled connection or borrowing an existing connection.
+///
+/// Pooled transactions have lifetime `'static`; [`Self::begin_inner`] instead
+/// borrows its connection for `'a`.
 #[derive(Debug)]
 pub struct Transaction<'a> {
-    inner: sqlx::PgTransaction<'a>,
+    inner: sqlx::Transaction<'a, Postgres>,
+    instrumentation: Option<Instrumentation>,
 }
 
-impl<'a> AsMut<sqlx::PgTransaction<'a>> for Transaction<'a> {
+impl AsMut<sqlx::PgConnection> for Transaction<'_> {
     #[inline]
-    fn as_mut(&mut self) -> &mut sqlx::PgTransaction<'a> {
+    fn as_mut(&mut self) -> &mut sqlx::PgConnection {
         &mut self.inner
     }
 }
 
-impl<'a> Transaction<'a> {
+impl Transaction<'static> {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction that owns its connection and does not borrow the pool.
     #[track_caller]
-    pub fn begin(pool: &'a sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
-        let loc = Location::caller();
-        async move {
-            pool.begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, loc))
-                .map(|inner| Self { inner })
-        }
+    pub fn begin(pool: &sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
+        Self::begin_with_location(pool, Location::caller())
     }
 
+    /// Starts an owned pooled transaction with an explicit diagnostic caller location.
     pub async fn begin_with_location(
         pool: &sqlx::PgPool,
         loc: &'static Location<'static>,
     ) -> Result<Self, DatabaseError> {
+        Self::begin_at(pool, loc, None).await
+    }
+
+    /// Starts a pooled transaction that reports failed cleanup to its owner's instrumentation.
+    #[track_caller]
+    pub fn begin_instrumented<'p>(
+        pool: &'p sqlx::PgPool,
+        instrumentation: &Instrumentation,
+    ) -> impl Future<Output = Result<Self, DatabaseError>> + use<'p> {
+        Self::begin_at(pool, Location::caller(), Some(instrumentation.clone()))
+    }
+
+    async fn begin_at(
+        pool: &sqlx::PgPool,
+        loc: &'static Location<'static>,
+        instrumentation: Option<Instrumentation>,
+    ) -> Result<Self, DatabaseError> {
         pool.begin()
             .await
             .map_err(|e| DatabaseError::txn_begin(e, loc))
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                instrumentation,
+            })
     }
+}
 
+impl<'a> Transaction<'a> {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
@@ -862,7 +880,10 @@ impl<'a> Transaction<'a> {
             conn.begin()
                 .await
                 .map_err(|e| DatabaseError::txn_begin(e, loc))
-                .map(|inner| Self { inner })
+                .map(|inner| Self {
+                    inner,
+                    instrumentation: None,
+                })
         })
     }
 
@@ -897,26 +918,39 @@ impl<'a> Transaction<'a> {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
-    /// Roll back the transaction, logging a warning tagged with `context` if
-    /// the rollback itself fails, rather than propagating -- for read-only or
-    /// cleanup paths where the caller can't act on a rollback error but must
-    /// not swallow it.
+    /// Rolls back the transaction. If rollback fails and instrumentation was supplied,
+    /// emits the rollback-failure event with the given context.
     #[track_caller]
     pub fn rollback_or_log(
         self,
         context: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        let loc = Location::caller();
-        Box::pin(async move {
-            if let Err(error) = self.inner.rollback().await {
-                record_database_transaction_rollback_failure(
-                    DatabaseTransactionRollbackTrigger::ExplicitCleanup,
-                    loc,
-                    context,
-                    error,
-                );
-            }
-        })
+        Box::pin(self.rollback_with_trigger(
+            DatabaseTransactionRollbackTrigger::ExplicitCleanup,
+            Location::caller(),
+            context,
+        ))
+    }
+
+    async fn rollback_with_trigger(
+        self,
+        trigger: DatabaseTransactionRollbackTrigger,
+        caller: &'static Location<'static>,
+        context: &'static str,
+    ) {
+        if let Err(error) = self.inner.rollback().await
+            && let Some(instrumentation) = self.instrumentation
+        {
+            let error = DatabaseError::txn_rollback(error, caller);
+            instrumentation.emit(DatabaseTransactionRollbackFailed::new(
+                trigger, caller, context, &error,
+            ));
+        }
+    }
+
+    fn with_instrumentation(mut self, instrumentation: &Instrumentation) -> Self {
+        self.instrumentation = Some(instrumentation.clone());
+        self
     }
 
     pub fn as_pgconn(&mut self) -> &mut sqlx::PgConnection {
@@ -925,7 +959,7 @@ impl<'a> Transaction<'a> {
 }
 
 impl<'a> Deref for Transaction<'a> {
-    type Target = sqlx::PgTransaction<'a>;
+    type Target = sqlx::PgConnection;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -946,7 +980,7 @@ pub trait WithTransaction {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>> + Send
@@ -955,12 +989,12 @@ pub trait WithTransaction {
         E: Send;
 }
 
-impl WithTransaction for PgPool {
+impl<DB: TransactionVending + ?Sized> WithTransaction for DB {
     #[track_caller]
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
@@ -969,27 +1003,24 @@ impl WithTransaction for PgPool {
         E: Send,
     {
         let caller = Location::caller();
+        let begin = self.txn_begin();
         async move {
-            let mut t = self
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::txn_begin(e, caller))?;
+            let mut t = begin.await?;
             match f(&mut t).await {
                 Ok(output) => {
-                    t.commit()
+                    t.inner
+                        .commit()
                         .await
                         .map_err(|e| DatabaseError::txn_commit(e, caller))?;
                     Ok(Ok(output))
                 }
                 Err(e) => {
-                    if let Err(error) = t.rollback().await {
-                        record_database_transaction_rollback_failure(
-                            DatabaseTransactionRollbackTrigger::ClosureError,
-                            caller,
-                            "transaction closure returned an error",
-                            error,
-                        );
-                    }
+                    t.rollback_with_trigger(
+                        DatabaseTransactionRollbackTrigger::ClosureError,
+                        caller,
+                        "transaction closure returned an error",
+                    )
+                    .await;
                     Ok(Err(e))
                 }
             }
@@ -1009,15 +1040,19 @@ pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), 
     Ok(())
 }
 
+/// Starts transactions that own a connection acquired from a PostgreSQL pool.
 pub trait TransactionVending {
-    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>>;
+    /// Starts a transaction without retaining a borrow of the pool.
+    #[track_caller]
+    fn txn_begin(&self)
+    -> impl Future<Output = Result<Transaction<'static>, DatabaseError>> + Send;
 }
 
 impl TransactionVending for PgPool {
     #[track_caller]
     // This returns an `impl Future` instead of being async, so that we can use #[track_caller],
     // which is unsupported with async fn's.
-    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>> {
+    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>> {
         Transaction::begin(self)
     }
 }
@@ -1052,8 +1087,8 @@ mod tests {
                 .map_err(|e| DatabaseError::query(query, e))
         }
 
-        let mut first = pool.begin().await?;
-        let mut second = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
+        let mut second = pool.txn_begin().await?;
         lock(&mut first, 1).await?;
         lock(&mut second, 2).await?;
         let (first_result, second_result) = tokio::join!(lock(&mut first, 2), lock(&mut second, 1));
@@ -1072,10 +1107,10 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn read_only_snapshot_rejects_writes(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_read_only_snapshot(&mut txn).await.unwrap();
         let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
-            .execute(&mut *txn)
+            .execute(txn.as_mut())
             .await
             .expect_err("a read-only transaction rejects writes");
         // read_only_sql_transaction
@@ -1154,17 +1189,19 @@ mod tests {
                 },
             ],
             |case| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let error = DatabaseError::Internal {
                     message: "rollback unavailable".to_string(),
                 };
                 let logs = capture_logs(|| {
-                    emit(DatabaseTransactionRollbackFailed::new(
-                        case.trigger,
-                        caller,
-                        case.context,
-                        &error,
-                    ));
+                    metrics
+                        .instrumentation()
+                        .emit(DatabaseTransactionRollbackFailed::new(
+                            case.trigger,
+                            caller,
+                            case.context,
+                            &error,
+                        ));
                 });
 
                 assert_eq!(logs.len(), 1, "one emit must produce one log record");
@@ -1188,6 +1225,24 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[tokio::test]
+    async fn transaction_extension_retains_caller_location() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unused/unused")
+            .unwrap();
+        pool.close().await;
+
+        let caller_line = line!() + 1;
+        let begin = pool.txn_begin();
+        let DatabaseError::Sqlx(error) = begin.await.unwrap_err() else {
+            panic!("closed pool should return a SQLx error");
+        };
+        assert!(matches!(error.source, sqlx::Error::PoolClosed));
+        assert_eq!(error.query, "transaction begin");
+        assert_eq!(error.file, file!());
+        assert_eq!(error.line, caller_line);
     }
 
     #[test]

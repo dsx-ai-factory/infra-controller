@@ -190,6 +190,7 @@ mod tests {
         complete, find_all_for_machine, find_outstanding_by_machine_ids,
         find_outstanding_machine_ids, is_outstanding, request,
     };
+    use crate::TransactionVending as _;
 
     const DPU_SERVICE_SYNC: MachinePendingActionKind = MachinePendingActionKind::DpuServiceSync;
     const AUTOMATIC: MachinePendingActionActor = MachinePendingActionActor::Automatic;
@@ -222,7 +223,7 @@ mod tests {
     async fn requests_are_scoped_to_one_machine(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let requested = machine_id(1);
         let untouched = machine_id(2);
         seed_machine(txn.as_mut(), &requested).await?;
@@ -252,7 +253,7 @@ mod tests {
     async fn a_completion_records_who_performed_it(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let by_carbide = machine_id(1);
         let by_operator = machine_id(2);
         for id in [&by_carbide, &by_operator] {
@@ -289,7 +290,7 @@ mod tests {
     async fn the_worklist_holds_only_outstanding_actions_longest_wait_first(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             find_outstanding_machine_ids(txn.as_mut(), DPU_SERVICE_SYNC)
                 .await?
@@ -335,7 +336,7 @@ mod tests {
     async fn re_requesting_outstanding_work_preserves_the_original_request_time(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
 
@@ -357,7 +358,7 @@ mod tests {
     async fn completing_retains_the_record_and_reopens_the_slot(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
 
@@ -394,7 +395,7 @@ mod tests {
     async fn history_is_capped_per_machine_without_evicting_outstanding_work(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let busy = machine_id(1);
         let quiet = machine_id(2);
         seed_machine(txn.as_mut(), &busy).await?;
@@ -437,7 +438,7 @@ mod tests {
     async fn deleting_the_machine_clears_its_actions(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
         request(txn.as_mut(), &machine_id, DPU_SERVICE_SYNC).await?;

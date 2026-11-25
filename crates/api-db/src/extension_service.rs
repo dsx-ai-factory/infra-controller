@@ -19,12 +19,14 @@ use std::collections::HashMap;
 
 use carbide_uuid::DbTable;
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
-    ExtensionServiceLifecycleState, ExtensionServiceObservability, ExtensionServiceSnapshot,
-    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
+    ExtensionService, ExtensionServiceChainSelector, ExtensionServiceDeploymentType,
+    ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState, ExtensionServiceObservability,
+    ExtensionServiceSnapshot, ExtensionServiceType, ExtensionServiceVersionInfo,
+    ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
@@ -39,6 +41,124 @@ const SQL_VIOLATION_INTERFACE_MAC_ADDRESS_COLLISION: &str =
     "extension_service_interface_macs_mac_address_key";
 const SQL_VIOLATION_INTERFACE_MAC_SERVICE_NOT_FOUND: &str =
     "extension_service_interface_macs_service_id_fkey";
+
+/// Changes one DPU's chain eligibility without replacing sibling exclusions.
+#[derive(Debug, Clone, Copy)]
+pub enum ServiceVpcChainExclusion {
+    /// Prevent the chain from selecting this DPU.
+    Exclude,
+    /// Remove this DPU's exclusion after the caller validates activation.
+    Allow,
+}
+
+/// Rejects an exclusion update when the row's presence or version no longer matches.
+/// Missing rows and version mismatches share this rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainSelectorNotCurrent;
+
+/// Reads retained chain exclusions in interface and slot order for registration repair.
+/// An absent row represents an empty exclusion set without a configuration version.
+pub async fn find_chain_selectors(
+    db: impl DbReader<'_>,
+    service_id: ExtensionServiceId,
+) -> DatabaseResult<Vec<ExtensionServiceChainSelector>> {
+    let query = "SELECT service_id, interface_ordinal, slot, excluded_dpu_ids, version
+                 FROM extension_service_chain_selectors
+                 WHERE service_id = $1
+                 ORDER BY interface_ordinal, slot";
+    sqlx::query_as(query)
+        .bind(service_id)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Changes one DPU exclusion at the expected version while preserving other DPUs.
+///
+/// Callers must serialize attachment/configuration validation and this exclusion
+/// update with concurrent attachment/configuration changes in the same transaction.
+/// Commit before changing Kubernetes resources.
+///
+/// `expected_version = None` creates only an absent row. `Some` updates only a matching
+/// existing row. Repeated membership requests retain the version; membership changes
+/// advance it. Empty rows remain for version fencing. An unmet presence or version
+/// precondition returns `NotApplied`; database failures remain errors. Interface ordinals
+/// and slots above `i32::MAX` return an invalid-argument error.
+pub async fn try_update_chain_exclusion(
+    txn: &mut PgConnection,
+    service_id: ExtensionServiceId,
+    interface_ordinal: u32,
+    slot: u32,
+    dpu_id: DpuMachineId,
+    expected_version: Option<ConfigVersion>,
+    change: ServiceVpcChainExclusion,
+) -> DatabaseResult<ConditionalWrite<ExtensionServiceChainSelector, ChainSelectorNotCurrent>> {
+    // Reject values that cannot represent the persisted selector identity.
+    let interface_ordinal = i32::try_from(interface_ordinal).map_err(|_| {
+        DatabaseError::InvalidArgument(
+            "interface ordinal exceeds the database representation".into(),
+        )
+    })?;
+    let slot = i32::try_from(slot).map_err(|_| {
+        DatabaseError::InvalidArgument(
+            "service VPC slot exceeds the database representation".into(),
+        )
+    })?;
+    let exclude = matches!(change, ServiceVpcChainExclusion::Exclude);
+
+    // Creation cannot replace a selector committed by another activation or retirement.
+    let Some(expected_version) = expected_version else {
+        let excluded_dpu_ids = if exclude { vec![dpu_id] } else { Vec::new() };
+        let query = "INSERT INTO extension_service_chain_selectors
+                         (service_id, interface_ordinal, slot, excluded_dpu_ids, version)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (service_id, interface_ordinal, slot) DO NOTHING
+                     RETURNING service_id, interface_ordinal, slot, excluded_dpu_ids, version";
+        let inserted = sqlx::query_as(query)
+            .bind(service_id)
+            .bind(interface_ordinal)
+            .bind(slot)
+            .bind(excluded_dpu_ids)
+            .bind(ConfigVersion::initial())
+            .fetch_optional(txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        return Ok(match inserted {
+            Some(inserted) => ConditionalWrite::Applied(inserted),
+            None => ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+        });
+    };
+
+    // Change only this DPU's membership, retaining the version for idempotent retries.
+    let query = "UPDATE extension_service_chain_selectors
+                 SET excluded_dpu_ids = CASE
+                     WHEN $6 AND NOT ($4 = ANY(excluded_dpu_ids))
+                         THEN array_append(excluded_dpu_ids, $4)
+                     WHEN NOT $6 THEN array_remove(excluded_dpu_ids, $4)
+                     ELSE excluded_dpu_ids
+                 END,
+                 version = CASE
+                     WHEN ($4 = ANY(excluded_dpu_ids)) = $6 THEN version ELSE $7
+                 END
+                 WHERE service_id = $1 AND interface_ordinal = $2 AND slot = $3
+                     AND version = $5
+                 RETURNING service_id, interface_ordinal, slot, excluded_dpu_ids, version";
+    let updated = sqlx::query_as(query)
+        .bind(service_id)
+        .bind(interface_ordinal)
+        .bind(slot)
+        .bind(dpu_id)
+        .bind(expected_version)
+        .bind(exclude)
+        .bind(expected_version.increment())
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(match updated {
+        Some(updated) => ConditionalWrite::Applied(updated),
+        None => ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+    })
+}
 
 /// Reports MAC assignment outcomes that registration must handle differently.
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +193,7 @@ pub enum InsertExtensionServiceInterfaceMacError {
 
 /// Reads a service's stable interface MAC assignments in ordinal order.
 pub async fn find_interface_macs(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
 ) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
     let query = "SELECT service_id, interface_ordinal, mac_address
@@ -82,7 +202,7 @@ pub async fn find_interface_macs(
                  ORDER BY interface_ordinal";
     let rows = sqlx::query_as::<_, (ExtensionServiceId, i32, mac_address::MacAddress)>(query)
         .bind(service_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
@@ -256,7 +376,7 @@ pub async fn create(
         .bind(deployment_type)
         .bind(service_name)
         .bind(description.unwrap_or(""))
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(initial_version_ctr)
         .bind(sqlx::types::Json(initial_controller_state))
         .bind(initial_controller_state_version)
@@ -297,7 +417,7 @@ pub async fn create(
         version_query.as_str(),
     ))
     .bind(service_id)
-    .bind(version.to_string())
+    .bind(version)
     .bind(data)
     .bind(dpf_service_id)
     .bind(observability.map(sqlx::types::Json))
@@ -390,7 +510,7 @@ pub async fn update(
     {
         Ok(service) => service,
         Err(sqlx::Error::RowNotFound) => {
-            if !find_by_ids(txn, &[service_id], false, true)
+            if !find_by_ids_for_update(txn, &[service_id], false)
                 .await?
                 .is_empty()
             {
@@ -742,23 +862,20 @@ pub async fn update_controller_state_outcome(
 /// Finds the IDs of extension services, optionally filtered by type, name, and tenant organization ID.
 ///
 /// # Parameters
-/// * `txn`          - A reference to an active DB transaction
 /// * `service_type` - Optional filter on the type of the extension service
 /// * `service_name` - Optional filter by case-insensitive exact match on service name
 /// * `tenant_organization_id` - Optional filter by tenant organization ID
 /// * `include_deleted` - Whether terminal soft-deleted services should also be included.
 ///   In-progress deletion remains visible regardless of this flag.
-/// * `for_update`   - A boolean flag to acquire DB locks for synchronization
 ///
 /// # Returns
 /// A vector of matching `ExtensionServiceId`s (may be empty).
 pub async fn find_ids(
-    txn: &mut PgConnection,
+    db: impl DbReader<'_>,
     service_type: Option<ExtensionServiceType>,
     service_name: Option<&str>,
     tenant_organization_id: Option<&TenantOrganizationId>,
     include_deleted: bool,
-    for_update: bool,
 ) -> Result<Vec<ExtensionServiceId>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new("SELECT id FROM extension_services WHERE true");
 
@@ -784,31 +901,38 @@ pub async fn find_ids(
 
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" ORDER BY created DESC");
 
-    if for_update {
-        builder.push(" FOR UPDATE");
-    }
-
     builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
 
-/// Finds extension services by their IDs.
-///
-/// # Parameters
-/// * `txn`        - A reference to an active DB transaction
-/// * `ids`        - A list of extension service IDs to query
-/// * `include_deleted` - Whether soft-deleted services should be included
-/// * `for_update` - Whether to lock the extension services for update
+/// Finds extension services by their IDs, optionally including soft-deleted services.
 pub async fn find_by_ids(
+    db: impl DbReader<'_>,
+    ids: &[ExtensionServiceId],
+    include_deleted: bool,
+) -> DatabaseResult<Vec<ExtensionService>> {
+    find_by_ids_inner(db, ids, include_deleted, false).await
+}
+
+/// Locks extension services in ID order for the duration of the caller's transaction.
+pub async fn find_by_ids_for_update(
     txn: &mut PgConnection,
+    ids: &[ExtensionServiceId],
+    include_deleted: bool,
+) -> DatabaseResult<Vec<ExtensionService>> {
+    find_by_ids_inner(txn, ids, include_deleted, true).await
+}
+
+async fn find_by_ids_inner(
+    db: impl DbReader<'_>,
     ids: &[ExtensionServiceId],
     include_deleted: bool,
     for_update: bool,
@@ -836,13 +960,13 @@ pub async fn find_by_ids(
 
     builder
         .build_query_as::<ExtensionService>()
-        .fetch_all(txn)
+        .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
 
 pub async fn find_snapshots_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ids: &[ExtensionServiceId],
 ) -> DatabaseResult<Vec<ExtensionServiceSnapshot>> {
     // We order the active versions using the version number in descending order
@@ -894,7 +1018,7 @@ pub async fn find_snapshots_by_ids(
 
     sqlx::query_as::<_, ExtensionServiceSnapshot>(query)
         .bind(ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -906,17 +1030,20 @@ pub async fn find_snapshots_by_ids(
 /// * `txn`        - A reference to an active DB transaction
 /// * `service_id` - The ID of the extension service
 /// * `version`    - Optional specific version number to retrieve. If None, returns the latest version
-pub async fn find_version_info(
-    txn: &mut PgConnection,
+pub async fn find_version_info<DB>(
+    conn: &mut DB,
     service_id: ExtensionServiceId,
     version: Option<ConfigVersion>,
-) -> DatabaseResult<ExtensionServiceVersionInfo> {
+) -> DatabaseResult<ExtensionServiceVersionInfo>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     // We check if the extension service exists first to return a precise service not found error
     let service_query = "SELECT id FROM extension_services WHERE id = $1 AND deleted IS NULL";
 
     match sqlx::query_scalar::<_, uuid::Uuid>(service_query)
         .bind(service_id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(service_query, e))?
     {
@@ -929,7 +1056,7 @@ pub async fn find_version_info(
         }
     }
 
-    find_version_info_of_known_service(txn, service_id, version).await
+    find_version_info_of_known_service(conn, service_id, version).await
 }
 
 /// Finds a specific version of an extension service, or the latest version if not specified,
@@ -945,7 +1072,7 @@ pub async fn find_version_info(
 /// * `service_id` - The ID of the extension service
 /// * `version`    - Optional specific version number to retrieve. If None, returns the latest version
 pub async fn find_version_info_of_known_service(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     version: Option<ConfigVersion>,
 ) -> DatabaseResult<ExtensionServiceVersionInfo> {
@@ -968,7 +1095,7 @@ pub async fn find_version_info_of_known_service(
     }
 
     let query = builder.build_query_as::<ExtensionServiceVersionInfo>();
-    match query.fetch_one(txn).await {
+    match query.fetch_one(conn).await {
         Ok(ver) => Ok(ver),
         Err(sqlx::Error::RowNotFound) => {
             let id_text = if let Some(v) = version {
@@ -992,7 +1119,7 @@ pub async fn find_version_info_of_known_service(
 /// * `service_id` - The ID of the extension service
 /// * `versions`   - Optional slice of version numbers to filter by. If None, returns all version infos.
 pub async fn find_versions_info(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: &ExtensionServiceId,
     versions: Option<&[ConfigVersion]>,
 ) -> DatabaseResult<Vec<ExtensionServiceVersionInfo>> {
@@ -1018,7 +1145,7 @@ pub async fn find_versions_info(
     builder.push(" ORDER BY (split_part(split_part(version, '-', 1), 'V', 2))::integer DESC");
 
     let query = builder.build_query_as::<ExtensionServiceVersionInfo>();
-    match query.fetch_all(txn).await {
+    match query.fetch_all(conn).await {
         Ok(versions) => Ok(versions),
         Err(e) => Err(DatabaseError::query(builder.sql(), e)),
     }
@@ -1197,7 +1324,7 @@ pub async fn soft_delete_versions(
 ///   whose persisted configuration still refers to the service as in use. Such
 ///   rows are retained while instance cleanup is still in progress.
 pub async fn is_service_in_use(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     versions: &[ConfigVersion],
     include_deleted_instances: bool,
@@ -1235,7 +1362,7 @@ pub async fn is_service_in_use(
 
     let exists = builder
         .build_query_scalar::<i32>()
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))?
         .is_some();
@@ -1250,7 +1377,7 @@ pub async fn is_service_in_use(
 /// * `service_id` - The ID of the extension service
 /// * `versions`   - Optional slice of version numbers to check if the service has credentials
 pub async fn find_versions_with_credentials(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     service_id: ExtensionServiceId,
     versions: &[ConfigVersion],
 ) -> DatabaseResult<Vec<ConfigVersion>> {
@@ -1276,7 +1403,7 @@ pub async fn find_versions_with_credentials(
 
     builder
         .build_query_scalar::<ConfigVersion>()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
@@ -1353,9 +1480,9 @@ mod test_batched_lookups {
     };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
-    use sqlx::Acquire as _;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const TENANT_ORG: &str = "test-org";
     const SQL_VIOLATION_INTERFACE_MAC_ORDINAL_NEGATIVE: &str =
@@ -1368,7 +1495,10 @@ mod test_batched_lookups {
     async fn deployment_type_migration_preserves_existing_placement(pool: sqlx::PgPool) {
         // Seed both service types, including a deleted Helm registration that must retain policy.
         let [(pod_id, _), (helm_id, _)] = seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin migration contract test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin migration contract test");
         sqlx::query(
             "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'primary',
              deleted = NOW() WHERE id = $1",
@@ -1400,7 +1530,7 @@ mod test_batched_lookups {
         .expect("apply shipped deployment-type migration");
 
         // Decode migrated rows through the production reader, including soft-deleted services.
-        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true, false)
+        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true)
             .await
             .expect("read migrated registrations");
         assert_eq!(services.len(), 2);
@@ -1432,7 +1562,9 @@ mod test_batched_lookups {
             ("unknown", None),
         ];
         for (deployment_type, target) in cases {
-            let mut attempt = txn.begin().await.expect("begin invalid-policy savepoint");
+            let mut attempt = crate::Transaction::begin_inner(&mut txn)
+                .await
+                .expect("begin invalid-policy savepoint");
             let error = sqlx::query(
                 "UPDATE extension_services SET deployment_type = $1, dpu_target = $2 WHERE id = $3",
             )
@@ -1462,7 +1594,10 @@ mod test_batched_lookups {
     async fn service_vpc_migration_and_mac_accessor_contract(pool: sqlx::PgPool) {
         let [(service_id, _), (other_service_id, _)] =
             seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin migration contract test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin migration contract test");
 
         // Restore the actual predecessor schema around a realistic service row, then
         // apply exactly what ships under the migration runner's transaction boundary.
@@ -1495,7 +1630,9 @@ mod test_batched_lookups {
 
         // The database rejects negative ordinals even when a caller bypasses
         // the typed accessor, preserving the zero-based interface contract.
-        let mut attempt = txn.begin().await.expect("begin negative-ordinal savepoint");
+        let mut attempt = crate::Transaction::begin_inner(&mut txn)
+            .await
+            .expect("begin negative-ordinal savepoint");
         let error = sqlx::query(
             "INSERT INTO extension_service_interface_macs
              (service_id, interface_ordinal, mac_address)
@@ -1612,7 +1749,9 @@ mod test_batched_lookups {
             .execute(txn.as_mut())
             .await
             .expect("remove the predecessor version dependency");
-        let mut attempt = txn.begin().await.expect("begin parent-delete savepoint");
+        let mut attempt = crate::Transaction::begin_inner(&mut txn)
+            .await
+            .expect("begin parent-delete savepoint");
         let error = sqlx::query("DELETE FROM extension_services WHERE id = $1")
             .bind(service_id)
             .execute(attempt.as_mut())
@@ -1649,7 +1788,7 @@ mod test_batched_lookups {
         n: usize,
     ) -> Vec<(ExtensionServiceId, ConfigVersion)> {
         let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant org id");
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
 
         // Extension services carry an FK to tenants(organization_id); seed the tenant first.
         crate::tenant::create_and_persist(
@@ -1693,6 +1832,306 @@ mod test_batched_lookups {
         seeded
     }
 
+    /// Commits one exclusion change so separate reads can verify durable selector state.
+    /// Ordinal zero and slot zero keep these tests focused on membership and version checks.
+    async fn commit_chain_exclusion(
+        pool: &sqlx::PgPool,
+        service_id: ExtensionServiceId,
+        dpu_id: DpuMachineId,
+        expected_version: Option<ConfigVersion>,
+        change: ServiceVpcChainExclusion,
+    ) -> ConditionalWrite<ExtensionServiceChainSelector, ChainSelectorNotCurrent> {
+        // Give each writer its own transaction, including concurrent test writers.
+        let mut txn = pool.txn_begin().await.expect("begin exclusion update");
+        let outcome = try_update_chain_exclusion(
+            txn.as_mut(),
+            service_id,
+            0,
+            0,
+            dpu_id,
+            expected_version,
+            change,
+        )
+        .await
+        .expect("update chain exclusion");
+
+        // Finish the write before another connection checks persisted membership.
+        txn.commit().await.expect("commit exclusion update");
+        outcome
+    }
+
+    /// Rejects one of two competing exclusion updates and preserves both DPUs after retry,
+    /// preventing retirement on one DPU from reopening the chain on another.
+    /// Allowing one DPU afterward must preserve the sibling's committed exclusion.
+    #[crate::sqlx_test]
+    async fn chain_exclusions_preserve_siblings_after_version_conflict(pool: sqlx::PgPool) {
+        // The registration supplies the foreign key; the two DPU IDs drive membership.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_ids: [DpuMachineId; 2] = [
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg",
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng",
+        ]
+        .map(|id| id.parse().expect("valid DPU ID"));
+        // Create a versioned empty selector so both writers compete against the same existing row.
+        let ConditionalWrite::Applied(initial) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_ids[0],
+            None,
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("an absent selector must be created");
+        };
+
+        // Confirm the empty selector exists before both writers use its version.
+        assert!(initial.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read initial selector"),
+            vec![initial.clone()],
+        );
+
+        // Race independent transactions against the same persisted version.
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_ids[0],
+                    Some(initial.version),
+                    ServiceVpcChainExclusion::Exclude,
+                ),
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_ids[1],
+                    Some(initial.version),
+                    ServiceVpcChainExclusion::Exclude,
+                ),
+            )
+        })
+        .await
+        .expect("competing exclusion writes must finish");
+
+        // Exactly one writer may consume the version, leaving one exclusion persisted.
+        assert_eq!(
+            usize::from(matches!(first, ConditionalWrite::Applied(_)))
+                + usize::from(matches!(second, ConditionalWrite::Applied(_))),
+            1,
+        );
+        let committed = find_chain_selectors(&pool, service_id)
+            .await
+            .expect("read winning exclusion")
+            .pop()
+            .expect("selector remains");
+        assert_eq!(committed.excluded_dpu_ids.len(), 1);
+        assert_eq!(
+            committed.version.version_nr(),
+            initial.version.version_nr() + 1
+        );
+        let pending_dpu = dpu_ids
+            .into_iter()
+            .find(|id| !committed.excluded_dpu_ids.contains(id))
+            .expect("one DPU still needs exclusion");
+
+        // Retry only the rejected DPU against the refreshed version.
+        let ConditionalWrite::Applied(retried) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            pending_dpu,
+            Some(committed.version),
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("retry with the current version must apply");
+        };
+
+        // The retry must retain the winning writer's exclusion as well as its own.
+        assert_eq!(retried.excluded_dpu_ids.len(), 2);
+        assert!(
+            dpu_ids
+                .iter()
+                .all(|id| retried.excluded_dpu_ids.contains(id))
+        );
+        assert_eq!(
+            retried.version.version_nr(),
+            committed.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read merged exclusions"),
+            vec![retried.clone()],
+        );
+
+        // Remove only one DPU's exclusion using the version that contains both exclusions.
+        let ConditionalWrite::Applied(activation) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_ids[0],
+            Some(retried.version),
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("current activation must remove only its own exclusion");
+        };
+
+        // The independent read must retain the sibling and the advanced membership version.
+        assert_eq!(activation.excluded_dpu_ids, vec![dpu_ids[1]]);
+        assert_eq!(
+            activation.version.version_nr(),
+            retried.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read sibling exclusion after activation"),
+            vec![activation],
+        );
+    }
+
+    /// Retains empty selector versions and rejects stale activation after another retirement,
+    /// preventing delayed work from reconnecting a service to a reused slot.
+    #[crate::sqlx_test]
+    async fn chain_exclusions_reject_stale_activation_and_retain_empty_versions(
+        pool: sqlx::PgPool,
+    ) {
+        // The registration supplies the foreign key; one DPU drives the lifecycle changes.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_id: DpuMachineId = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+            .parse()
+            .expect("valid DPU ID");
+
+        // Record the first retirement and check it through a separate database read.
+        let ConditionalWrite::Applied(first_retirement) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            None,
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("first retirement must create the selector");
+        };
+        assert_eq!(first_retirement.excluded_dpu_ids, vec![dpu_id]);
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read first retirement"),
+            vec![first_retirement.clone()],
+        );
+
+        // Repeat the same membership request without creating another desired version.
+        assert_eq!(
+            commit_chain_exclusion(
+                &pool,
+                service_id,
+                dpu_id,
+                Some(first_retirement.version),
+                ServiceVpcChainExclusion::Exclude,
+            )
+            .await,
+            ConditionalWrite::Applied(first_retirement.clone()),
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read repeated retirement"),
+            vec![first_retirement.clone()],
+        );
+
+        // Model the exclusion removal that follows a caller-validated activation.
+        let ConditionalWrite::Applied(activation) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            Some(first_retirement.version),
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("current activation must remove the exclusion");
+        };
+
+        // Keep the empty row and its new version so absence cannot reset concurrency checks.
+        assert!(activation.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            activation.version.version_nr(),
+            first_retirement.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read retained empty selector"),
+            vec![activation.clone()],
+        );
+
+        // Retire the same DPU again using the version established by activation.
+        let ConditionalWrite::Applied(second_retirement) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            Some(activation.version),
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("second retirement must restore the exclusion");
+        };
+        assert_eq!(second_retirement.excluded_dpu_ids, vec![dpu_id]);
+        assert_eq!(
+            second_retirement.version.version_nr(),
+            activation.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read second retirement"),
+            vec![second_retirement.clone()],
+        );
+
+        let stale_activations = [
+            // A delayed activation cannot consume the earlier retirement's version again.
+            ("old activation", Some(first_retirement.version)),
+            // A stale absence snapshot cannot replace an existing selector.
+            ("old absence observation", None),
+        ];
+        for (scenario, expected_version) in stale_activations {
+            // Attempt the stale removal, then read the retained exclusion independently.
+            assert_eq!(
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_id,
+                    expected_version,
+                    ServiceVpcChainExclusion::Allow,
+                )
+                .await,
+                ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+                "{scenario}",
+            );
+            assert_eq!(
+                find_chain_selectors(&pool, service_id)
+                    .await
+                    .expect("read after stale activation"),
+                vec![second_retirement.clone()],
+                "{scenario}",
+            );
+        }
+    }
+
     /// Concurrent creates using case variants must serialize on one advisory lock,
     /// so only one active service can own the case-insensitive DPF identity.
     #[crate::sqlx_test]
@@ -1704,7 +2143,7 @@ mod test_batched_lookups {
         let first_service_id = ExtensionServiceId::new();
         let claimed_id = "contended-dpf-id";
         let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
-        let mut first = pool.begin().await.expect("begin first create");
+        let mut first = pool.txn_begin().await.expect("begin first create");
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *first)
             .await
@@ -1733,7 +2172,7 @@ mod test_batched_lookups {
         let upper_id = "CONTENDED-DPF-ID";
         let upper_data = r#"{"serviceID":"CONTENDED-DPF-ID"}"#;
         let second_service_id = ExtensionServiceId::new();
-        let mut second = pool.begin().await.expect("begin second create");
+        let mut second = pool.txn_begin().await.expect("begin second create");
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *second)
             .await
@@ -1814,7 +2253,7 @@ mod test_batched_lookups {
         let (active_service_id, initial_version) = seeded[0];
         let (deleted_service_id, _) = seeded[1];
         let missing_service_id = ExtensionServiceId::new();
-        let mut txn = pool.begin().await.expect("begin winning updates");
+        let mut txn = pool.txn_begin().await.expect("begin winning updates");
         for (service_id, version) in seeded {
             let (service, _) = update(
                 &mut txn,
@@ -1881,8 +2320,8 @@ mod test_batched_lookups {
             expected_error,
         } in cases
         {
-            let mut txn = pool.begin().await.expect("begin stale update");
-            let before = find_by_ids(&mut txn, &[service_id], true, false)
+            let mut txn = pool.txn_begin().await.expect("begin stale update");
+            let before = find_by_ids(&mut txn, &[service_id], true)
                 .await
                 .expect("load parent before rejected update");
             let versions_before = find_versions_info(&mut txn, &service_id, None)
@@ -1915,11 +2354,10 @@ mod test_batched_lookups {
             // Commit to prove rejection didn't leave any database changes.
             txn.commit().await.expect("commit rejected update");
 
-            let mut txn = pool.begin().await.expect("begin persistence check");
-            let after = find_by_ids(&mut txn, &[service_id], true, false)
+            let after = find_by_ids(&pool, &[service_id], true)
                 .await
                 .expect("reload parent after rejected update");
-            let versions_after = find_versions_info(&mut txn, &service_id, None)
+            let versions_after = find_versions_info(&pool, &service_id, None)
                 .await
                 .expect("reload versions after rejected update");
             assert_eq!(after.len(), before.len(), "{scenario}: parent count");
@@ -1965,7 +2403,6 @@ mod test_batched_lookups {
                     .collect::<Vec<_>>(),
                 "{scenario}: version rows must not change"
             );
-            txn.commit().await.expect("commit persistence check");
         }
     }
 
@@ -1973,7 +2410,7 @@ mod test_batched_lookups {
     async fn dpf_helm_chart_controller_persistence_is_versioned_and_retained(pool: sqlx::PgPool) {
         let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant org id");
         let service_id = ExtensionServiceId::new();
-        let mut txn = pool.begin().await.expect("begin");
+        let mut txn = pool.txn_begin().await.expect("begin");
         crate::tenant::create_and_persist(
             TENANT_ORG.to_string(),
             Metadata {
@@ -2006,7 +2443,7 @@ mod test_batched_lookups {
         .await
         .expect("create DPF Helm chart service");
 
-        let creating = find_by_ids(&mut txn, &[service_id], false, false)
+        let creating = find_by_ids(&mut txn, &[service_id], false)
             .await
             .map(|mut services| services.pop())
             .expect("load controller record")
@@ -2076,13 +2513,13 @@ mod test_batched_lookups {
             .expect("soft delete service");
 
         assert!(
-            find_by_ids(&mut txn, &[service_id], false, false)
+            find_by_ids(&mut txn, &[service_id], false)
                 .await
                 .expect("exclude soft-deleted controller record")
                 .is_empty(),
             "find_by_ids excludes soft-deleted services unless requested"
         );
-        let deleted_record = find_by_ids(&mut txn, &[service_id], true, false)
+        let deleted_record = find_by_ids(&mut txn, &[service_id], true)
             .await
             .map(|mut services| services.pop())
             .expect("load soft-deleted controller record")
@@ -2117,7 +2554,6 @@ mod test_batched_lookups {
             None,
             None,
             true,
-            false,
         )
         .await
         .expect("list DPF controller ids");
@@ -2130,19 +2566,16 @@ mod test_batched_lookups {
         let seeded = seed_services(&pool, N).await;
         let ids = seeded.iter().map(|(id, _)| *id).collect::<Vec<_>>();
 
-        // The reads run on plain pool connections -- no transaction -- so no
-        // begin/commit statements land in the counts. Each counted region
-        // acquires its connection inside the instrumented future.
+        // Use the pool directly so the counts only include the queries under test.
 
         // BEFORE: find_by_ids called with a 1-element slice per service (the pattern in dpu.rs).
         let (looped, before_count) = {
             let pool = &pool;
             let ids = &ids;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
                 let mut names = std::collections::HashMap::new();
                 for id in ids {
-                    let service = find_by_ids(&mut conn, &[*id], false, false)
+                    let service = find_by_ids(pool, &[*id], false)
                         .await
                         .expect("find_by_ids")
                         .into_iter()
@@ -2159,13 +2592,8 @@ mod test_batched_lookups {
         let (batched, after_count) = {
             let pool = &pool;
             let ids = &ids;
-            count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_by_ids(&mut conn, ids, false, false)
-                    .await
-                    .expect("find_by_ids")
-            })
-            .await
+            count_queries(async move { find_by_ids(pool, ids, false).await.expect("find_by_ids") })
+                .await
         };
 
         // Data equality: same set of (id -> name) pairs.
@@ -2203,18 +2631,19 @@ mod test_batched_lookups {
         let seeded = seed_services(&pool, 1).await;
         let (service_id, version) = seeded[0];
 
-        // The reads run on plain pool connections -- no transaction -- so no
-        // begin/commit statements land in the counts. Each counted region
-        // acquires its connection inside the instrumented future.
+        // Use the pool directly so the counts only include the queries under test.
 
         // find_version_info: existence probe + version lookup.
         let (probed_info, probed_count) = {
             let pool = &pool;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_version_info(&mut conn, service_id, Some(version))
-                    .await
-                    .expect("find_version_info")
+                find_version_info(
+                    &mut crate::db_read::PgPoolReader::from(pool.clone()),
+                    service_id,
+                    Some(version),
+                )
+                .await
+                .expect("find_version_info")
             })
             .await
         };
@@ -2223,8 +2652,7 @@ mod test_batched_lookups {
         let (unprobed_info, unprobed_count) = {
             let pool = &pool;
             count_queries(async move {
-                let mut conn = pool.acquire().await.expect("acquire");
-                find_version_info_of_known_service(&mut conn, service_id, Some(version))
+                find_version_info_of_known_service(pool, service_id, Some(version))
                     .await
                     .expect("find_version_info_of_known_service")
             })
@@ -2273,7 +2701,10 @@ mod test_batched_lookups {
     async fn inventory_ids_retain_in_progress_deletion(pool: sqlx::PgPool) {
         let [(active_id, _), (deleting_id, version)] =
             seed_services(&pool, 2).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin inventory lifecycle test");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin inventory lifecycle test");
         sqlx::query(
             "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'all_active',
              controller_state = '{\"state\":\"creating\"}'::jsonb WHERE id = $1",
@@ -2282,7 +2713,7 @@ mod test_batched_lookups {
         .execute(&mut *txn)
         .await
         .expect("prepare DPF registration");
-        let controller_version = find_by_ids(&mut txn, &[deleting_id], false, false)
+        let controller_version = find_by_ids(&mut txn, &[deleting_id], false)
             .await
             .expect("load DPF registration")
             .pop()
@@ -2309,7 +2740,7 @@ mod test_batched_lookups {
 
         for finalized in [false, true] {
             if finalized {
-                let deleting_version = find_by_ids(&mut txn, &[deleting_id], true, false)
+                let deleting_version = find_by_ids(&mut txn, &[deleting_id], true)
                     .await
                     .expect("load deleting registration")
                     .pop()
@@ -2330,7 +2761,7 @@ mod test_batched_lookups {
                     ConditionalWrite::Applied(())
                 );
             }
-            let ids = find_ids(&mut txn, None, None, None, false, false)
+            let ids = find_ids(&mut txn, None, None, None, false)
                 .await
                 .expect("enumerate inventory");
             assert_eq!(
@@ -2341,7 +2772,7 @@ mod test_batched_lookups {
                     vec![deleting_id, active_id]
                 }
             );
-            let controller_ids = find_ids(&mut txn, None, None, None, true, false)
+            let controller_ids = find_ids(&mut txn, None, None, None, true)
                 .await
                 .expect("enumerate controller records including terminal deletion");
             assert_eq!(controller_ids, vec![deleting_id, active_id]);
@@ -2363,7 +2794,6 @@ mod test_batched_lookups {
                 Some("SVC-1"),
                 Some(&tenant),
                 false,
-                false,
             )
             .await
             .expect("enumerate filtered inventory");
@@ -2375,7 +2805,7 @@ mod test_batched_lookups {
     #[crate::sqlx_test]
     async fn snapshot_rejects_malformed_older_active_version(pool: sqlx::PgPool) {
         let [(service_id, initial_version)] = seed_services(&pool, 1).await.try_into().unwrap();
-        let mut txn = pool.begin().await.expect("begin snapshot decode test");
+        let mut txn = pool.txn_begin().await.expect("begin snapshot decode test");
         let version_change = initial_version.incremental_change();
         let (_, updated) = update(
             &mut txn,
@@ -2444,7 +2874,7 @@ mod test_batched_lookups {
     async fn version_queries_decode_complete_records(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::tenant::create_and_persist(
             TENANT_ORG.to_string(),
             Metadata {

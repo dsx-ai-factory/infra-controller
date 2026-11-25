@@ -24,8 +24,8 @@ use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials}
 use carbide_utils::HostPortPair;
 use eyre::eyre;
 
-use crate::IPMITool;
 use crate::metrics::{IpmiCommand, count_ipmi_command};
+use crate::{IPMITool, RestartError};
 
 /// HTTP-based IPMI implementation for testing with bmc-mock.
 /// Sends JSON requests to bmc_proxy which routes to appropriate machine.
@@ -84,8 +84,7 @@ impl IPMIToolHttpImpl {
         command: IpmiCommand,
         bmc_address: SocketAddr,
         credential_key: &CredentialKey,
-    ) -> Result<(), eyre::Report> {
-        let action = Self::wire_action(command);
+    ) -> Result<(), RestartError> {
         let proxy = self.bmc_proxy.load();
         let (url, forwarded_header) = Self::request_target(proxy.as_ref().as_ref(), bmc_address);
 
@@ -94,15 +93,31 @@ impl IPMIToolHttpImpl {
             .get_credentials(credential_key)
             .await
             .map_err(|e| {
-                eyre!("secret engine getting credentials for key {credential_key:#?}: {e:#?}")
+                RestartError::NotSent(eyre!(
+                    "secret engine getting credentials for key {credential_key:#?}: {e:#?}"
+                ))
             })?
-            .ok_or_else(|| eyre!("no credentials for key {credential_key:#?} found"))?;
+            .ok_or_else(|| {
+                RestartError::NotSent(eyre!("no credentials for key {credential_key:#?} found"))
+            })?;
+        self.send_action(command, url, forwarded_header, &credentials)
+            .await
+    }
+
+    async fn send_action(
+        &self,
+        command: IpmiCommand,
+        url: String,
+        forwarded_header: Option<String>,
+        credentials: &Credentials,
+    ) -> Result<(), RestartError> {
+        let action = Self::wire_action(command);
         let Credentials::UsernamePassword { username, password } = credentials;
 
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()
-            .map_err(|e| eyre!("failed to create HTTP client: {}", e))?;
+            .map_err(|e| RestartError::NotSent(eyre!("failed to create HTTP client: {}", e)))?;
 
         let mut request = client
             .post(&url)
@@ -113,10 +128,7 @@ impl IPMIToolHttpImpl {
             request = request.header("Forwarded", header);
         }
 
-        // Everything from here on is a dispatched command: the counter covers
-        // the wire attempt and its response, not the credential lookup or
-        // client construction above (a command that was never sent must not
-        // move the metric).
+        // Count the wire attempt and response after credentials and the HTTP client are ready.
         let result = async {
             let resp = request
                 .send()
@@ -149,12 +161,33 @@ impl IPMIToolHttpImpl {
         }
         .await;
         count_ipmi_command(command, &result, &self.instrumentation);
-        result
+        result.map_err(RestartError::Uncertain)
     }
 }
 
 #[async_trait]
 impl IPMITool for IPMIToolHttpImpl {
+    async fn restart_with_credentials(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: &Credentials,
+    ) -> Result<(), eyre::Report> {
+        let (url, forwarded) =
+            Self::request_target(self.bmc_proxy.load().as_ref().as_ref(), bmc_address);
+        self.send_action(IpmiCommand::ChassisPowerReset, url, forwarded, credentials)
+            .await
+            .map_err(RestartError::into_inner)
+    }
+
+    async fn restart_once(
+        &self,
+        bmc_address: SocketAddr,
+        credential_key: &CredentialKey,
+    ) -> Result<(), RestartError> {
+        self.execute_action(IpmiCommand::ChassisPowerReset, bmc_address, credential_key)
+            .await
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,
@@ -162,6 +195,7 @@ impl IPMITool for IPMIToolHttpImpl {
     ) -> Result<(), eyre::Report> {
         self.execute_action(IpmiCommand::BmcColdReset, bmc_address, credential_key)
             .await
+            .map_err(RestartError::into_inner)
     }
 
     async fn restart(
@@ -178,6 +212,7 @@ impl IPMITool for IPMIToolHttpImpl {
                     credential_key,
                 )
                 .await
+                .map_err(RestartError::into_inner)
                 .is_ok()
         {
             return Ok(());
@@ -185,6 +220,7 @@ impl IPMITool for IPMIToolHttpImpl {
         // Fall through to chassis_power_reset if legacy_boot fails or is false
         self.execute_action(IpmiCommand::ChassisPowerReset, bmc_address, credential_key)
             .await
+            .map_err(RestartError::into_inner)
     }
 }
 

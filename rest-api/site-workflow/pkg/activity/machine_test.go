@@ -194,15 +194,19 @@ func Test_pruneMachineForPublish(t *testing.T) {
 		check   func(*testing.T, *corev1.Machine)
 	}{
 		{
-			name: "keeps status and config",
+			name: "keeps health and config and removes the Core hardware command",
 			machine: &corev1.Machine{
-				Id:     &corev1.MachineId{Id: "machine-1"},
-				Status: &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
+				Id: &corev1.MachineId{Id: "machine-1"},
+				Status: &corev1.MachineStatus{
+					Health:              &corev1.HealthReport{Source: "status"},
+					NicFirmwareDispatch: &corev1.NicFirmwareDispatchStatus{},
+				},
 				Config: &corev1.MachineConfig{},
 			},
 			check: func(t *testing.T, machine *corev1.Machine) {
 				// The replacements the REST layer actually reads have to survive.
 				assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
+				assert.Nil(t, machine.GetStatus().GetNicFirmwareDispatch())
 				assert.NotNil(t, machine.GetConfig())
 				assert.Equal(t, "machine-1", machine.GetId().GetId())
 			},

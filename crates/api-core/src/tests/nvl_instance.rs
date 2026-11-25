@@ -38,7 +38,7 @@ use common::api_fixtures::{
     TestEnv, TestManagedHost, create_managed_host_with_hardware_info_template,
     insert_nvlink_nmxc_endpoint_from_managed_host,
 };
-use db::{ObjectColumnFilter, rack as db_rack, switch as db_switch};
+use db::{ObjectColumnFilter, TransactionVending as _, rack as db_rack, switch as db_switch};
 use ipnetwork::IpNetwork;
 use libnmxc::nmxc_model::{GetGpuInfoListRequest, GetPartitionInfoListRequest, GpuAttr};
 use model::expected_switch::ExpectedSwitch;
@@ -245,7 +245,7 @@ async fn test_create_instance_with_nvl_config(pool: sqlx::PgPool) {
     nvl_config.gpu_configs.iter_mut().for_each(|gpu| {
         gpu.logical_partition_id = None;
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -390,20 +390,13 @@ async fn nvlink_observed_at(
     mh: &TestManagedHost,
     pool: &sqlx::PgPool,
 ) -> chrono::DateTime<chrono::Utc> {
-    let mut txn = pool
-        .begin()
-        .await
-        .expect("begin txn for nvlink observation read");
-    let observed_at = mh
-        .host()
-        .db_machine(&mut txn)
+    mh.host()
+        .db_machine(pool)
         .await
         .status
         .nvlink_status_observation
         .expect("expected nvlink_status_observation to be set")
-        .observed_at;
-    txn.commit().await.expect("commit nvlink observation read");
-    observed_at
+        .observed_at
 }
 
 /// Adds a switch to `rack_id` that is not an NMX-C endpoint.
@@ -416,7 +409,7 @@ async fn add_rack_switch(pool: &sqlx::PgPool, rack_id: &RackId, serial: &str) ->
         carbide_uuid::switch::SwitchType::NvLink,
     )
     .expect("switch id");
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     db_switch::create(
         txn.as_mut(),
         &NewSwitch {
@@ -441,7 +434,7 @@ async fn add_rack_switch(pool: &sqlx::PgPool, rack_id: &RackId, serial: &str) ->
 
 async fn add_rack_power_shelf(pool: &sqlx::PgPool, rack_id: &RackId) -> PowerShelfId {
     let shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     db::power_shelf::create(
         txn.as_mut(),
         &NewPowerShelf {
@@ -466,12 +459,10 @@ async fn switch_nvlink_domain_uuid(
     pool: &sqlx::PgPool,
     switch_id: &SwitchId,
 ) -> Option<NvLinkDomainId> {
-    let mut txn = pool.begin().await.expect("begin txn");
-    let switch = db_switch::find_by_id(txn.as_mut(), switch_id)
+    let switch = db_switch::find_by_id(pool, switch_id)
         .await
         .expect("load switch")
         .expect("switch");
-    txn.commit().await.expect("commit switch read");
     switch.nvlink_domain_uuid
 }
 
@@ -479,12 +470,10 @@ async fn power_shelf_nvlink_domain_uuid(
     pool: &sqlx::PgPool,
     shelf_id: &PowerShelfId,
 ) -> Option<NvLinkDomainId> {
-    let mut txn = pool.begin().await.expect("begin txn");
-    let shelf = db::power_shelf::find_by_id(txn.as_mut(), shelf_id)
+    let shelf = db::power_shelf::find_by_id(pool, shelf_id)
         .await
         .expect("load power shelf")
         .expect("power shelf");
-    txn.commit().await.expect("commit power shelf read");
     shelf.nvlink_domain_uuid
 }
 
@@ -564,7 +553,7 @@ async fn test_partition_monitor_skipped_rack_republishes_domain_uuid(pool: sqlx:
 
     // Move the converged host into a rack whose primary switch is the NMX-C endpoint.
     let rack_id: RackId = "rack_1".parse().expect("rack id");
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -648,7 +637,7 @@ async fn test_partition_monitor_debounces_rack_nmxc_unreachable_alert(pool: sqlx
     let mh = create_partitioned_host(&env).await;
 
     let rack_id: RackId = "rack_1".parse().expect("rack id");
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -858,7 +847,7 @@ async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::P
     assert_eq!(nmxc_partitions.len(), 1);
 
     nvl_config.gpu_configs = vec![];
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -1145,7 +1134,7 @@ async fn test_nvl_partition_monitor_adds_successful_partitions_when_some_creates
             })
             .collect(),
     };
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -1327,7 +1316,7 @@ async fn test_create_instances_with_nvl_configs_same_logical_partition_different
     nvl_config2.gpu_configs.iter_mut().for_each(|gpu| {
         gpu.logical_partition_id = None;
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     // add or remove instance_gpus_from_logical_partition doesn't seem to update db :(
     // till we root cause that, force direct db update from here
     update_instance_nvlink_config(
@@ -1719,7 +1708,7 @@ async fn test_logical_partition_purge_skips_referenced_partition(pool: sqlx::PgP
 
     // A row in the host's domain for a partition NMX-C has forgotten. While the
     // domain is unreachable no pass can tell, so the row keeps its reference.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let stale_row = db::nvl_partition::create(
         &model::nvl_partition::NewNvlPartition {
             id: NvLinkPartitionId::new(),
@@ -1796,7 +1785,7 @@ async fn test_partition_monitor_removes_stale_physical_partition_rows(pool: sqlx
     // The simulator allocates partition ids from 1 and never reaches this one,
     // so the row describes a partition NMX-C has forgotten. The second row is
     // under a domain uuid NMX-C no longer reports for any host.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let stale_row = db::nvl_partition::create(
         &model::nvl_partition::NewNvlPartition {
             id: NvLinkPartitionId::new(),
@@ -2265,7 +2254,7 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
     nvl_config.gpu_configs.iter_mut().for_each(|gpu| {
         gpu.logical_partition_id = None;
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -2331,7 +2320,7 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
     nvl_config.gpu_configs.iter_mut().for_each(|gpu| {
         gpu.logical_partition_id = Some(logical_partition_id2);
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -2460,12 +2449,18 @@ async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sql
         .iter()
         .find(|partition| partition.name != "tray_partition_0")
         .expect("tenant partition should be created");
-
     let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
     let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
     expected_tenant_uids.sort_unstable();
     actual_tenant_uids.sort_unstable();
     assert_eq!(actual_tenant_uids, expected_tenant_uids);
+    assert_eq!(
+        tenant_partition.name,
+        format!(
+            "{logical_partition_id}{},{}",
+            tenant_partition.gpu_uid_list[0], tenant_partition.gpu_uid_list[1]
+        )
+    );
 
     let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
     let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
@@ -2758,7 +2753,7 @@ const GB200_TRAY_4_CHASSIS_SERIAL: &str = "27XYX27000001";
 /// Removes the `nvlink_nmxc_endpoints` row for `chassis_serial` so NMX-C resolution fails in tests.
 async fn delete_nvlink_nmxc_endpoint(pool: &sqlx::PgPool, chassis_serial: &str) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("begin txn for nvlink_nmxc_endpoint delete");
     assert!(
@@ -2807,17 +2802,12 @@ async fn assert_machine_nvlink_observation_null(mh: &TestManagedHost, pool: &sql
         machine.status.as_ref().unwrap().nvlink
     );
 
-    let mut txn = pool
-        .begin()
-        .await
-        .expect("begin txn for nvlink observation check");
-    let db_machine = mh.host().db_machine(&mut txn).await;
+    let db_machine = mh.host().db_machine(pool).await;
     assert!(
         db_machine.status.nvlink_status_observation.is_none(),
         "expected null nvlink_status_observation in DB, got {:?}",
         db_machine.status.nvlink_status_observation
     );
-    txn.commit().await.expect("commit nvlink observation check");
 }
 
 async fn run_create_instance_with_nvl_config_nmxc_simulator_scenario(
@@ -2923,7 +2913,7 @@ async fn run_create_instance_with_nvl_config_nmxc_simulator_scenario(
     nvl_config.gpu_configs.iter_mut().for_each(|gpu| {
         gpu.logical_partition_id = None;
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     update_instance_nvlink_config(
         &mut txn,
         &instance.id(),
@@ -3073,7 +3063,7 @@ async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) 
     )
     .expect("switch id");
 
-    let mut txn = env.pool.begin().await.expect("begin txn");
+    let mut txn = env.pool.txn_begin().await.expect("begin txn");
     seed_switch_endpoint_records(
         txn.as_mut(),
         bmc_mac,
@@ -3206,7 +3196,7 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     env.run_network_segment_controller_iteration().await;
 
     let rack_id: RackId = "rack_1".parse().expect("rack id");
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -3254,7 +3244,7 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
         api: env.api.clone(),
     };
 
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
         .bind(rack_id.as_str())
         .bind(mh.id)
@@ -3361,7 +3351,7 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
     let env = common::api_fixtures::create_test_env_with_overrides(pool.clone(), overrides).await;
 
     let rack_id: RackId = "rack-cert-monitor".parse().expect("rack id");
-    let mut txn = pool.begin().await.expect("begin txn");
+    let mut txn = pool.txn_begin().await.expect("begin txn");
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -3408,20 +3398,15 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
     );
     assert_eq!(result.apply_errors, 0);
 
-    let mut txn = pool.begin().await.expect("begin txn");
-    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await
         .expect("load switch")
         .expect("switch");
-    let rack = db_rack::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
-    )
-    .await
-    .expect("load rack")
-    .pop()
-    .expect("rack");
-    txn.commit().await.expect("commit txn");
+    let rack = db_rack::find_by(&pool, ObjectColumnFilter::One(db_rack::IdColumn, &rack_id))
+        .await
+        .expect("load rack")
+        .pop()
+        .expect("rack");
 
     if expected_certificates_needing_rotation > 0 {
         assert!(

@@ -19,6 +19,7 @@
 use std::future::Future;
 
 use ::libredfish::{BootInterfaceRef, RedfishError};
+use bmc_platform::BootInterfaceSelector;
 use mac_address::MacAddress;
 use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 
@@ -92,6 +93,18 @@ impl From<BootInterfaceTarget> for MachineBootInterfaceTarget {
 impl From<&BootInterfaceTarget> for MachineBootInterfaceTarget {
     fn from(target: &BootInterfaceTarget) -> Self {
         target.clone().into()
+    }
+}
+
+impl From<&BootInterfaceTarget> for BootInterfaceSelector {
+    fn from(target: &BootInterfaceTarget) -> Self {
+        match target {
+            BootInterfaceTarget::Pair(boot_interface) => Self::Pair {
+                mac_address: boot_interface.mac_address,
+                interface_id: boot_interface.interface_id.clone(),
+            },
+            BootInterfaceTarget::MacOnly(mac_address) => Self::Mac(*mac_address),
+        }
     }
 }
 

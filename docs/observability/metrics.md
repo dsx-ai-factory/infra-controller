@@ -428,7 +428,7 @@ Enable via TOML configuration:
 enabled = true                    # default: false
 listen_address = "[::]:9091"      # dual-stack default
 # Defaults to all supported types; also valid: network_segment, vpc_prefix,
-# spdm_attestation, ib_partition
+# spdm_attestation, ib_partition, nvlink_domain
 object_types = ["machine", "switch", "power_shelf", "rack"]
 ```
 
@@ -453,6 +453,7 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
+      - nvlink_domain
 
 perObjectStateMetricsServiceMonitor:
   enabled: true
@@ -508,10 +509,16 @@ max by (object_type, object_id, reason)
     (time() - carbide_object_state_entered_timestamp_seconds{object_type="machine"})
     > 3600
 )
-  * on(object_type, object_id) group_left(rack, sku)
-    max by (object_type, object_id, rack, sku)
-        (carbide_object_info)
+  * on(object_type, object_id) group_left(rack_id, sku)
+    topk by (object_type, object_id) (1,
+      max by (object_type, object_id, rack_id, sku)
+          (carbide_object_info)
+    )
 ```
+
+`topk` keeps one info series per object so conflicting replica traits cannot
+break the join. Since info values are all `1`, selection among conflicting
+traits is arbitrary and does not identify the newest traits.
 
 For alerting rules using these metrics, see [alerts.md](alerts.md#5-per-object-alerting).
 

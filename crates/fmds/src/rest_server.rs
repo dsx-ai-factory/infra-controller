@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use axum::Router;
@@ -23,7 +24,7 @@ use axum::http::header::HeaderMap;
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
-use forge_dpu_fmds_shared::machine_identity;
+use carbide_dpu_fmds_shared::machine_identity;
 
 use crate::state::FmdsState;
 
@@ -137,10 +138,7 @@ fn extract_metadata(category: String, state: &FmdsState) -> (StatusCode, String)
                 "instance name not available".to_string(),
             ),
         },
-        SITENAME_CATEGORY => (
-            StatusCode::OK,
-            config.sitename.clone().unwrap_or(String::new()),
-        ),
+        SITENAME_CATEGORY => (StatusCode::OK, config.sitename.clone().unwrap_or_default()),
         USER_DATA_CATEGORY => (StatusCode::OK, config.user_data.clone()),
         ASN_CATEGORY => (StatusCode::OK, config.asn.to_string()),
         _ => (
@@ -231,7 +229,8 @@ async fn get_devices(State(state): State<Arc<FmdsState>>) -> (StatusCode, String
     let mut response = String::new();
     if let Some(devices) = &config.ib_devices {
         for (index, device) in devices.iter().enumerate() {
-            response.push_str(&format!("{}={}\n", index, device.pf_guid));
+            writeln!(response, "{index}={}", device.pf_guid)
+                .expect("writing to a String cannot fail");
         }
         (StatusCode::OK, response)
     } else {
@@ -264,7 +263,9 @@ async fn get_instances(
         let mut response = String::new();
         for (index, instance) in dev.instances.iter().enumerate() {
             match &instance.ib_guid {
-                Some(guid) => response.push_str(&format!("{index}={guid}\n")),
+                Some(guid) => {
+                    writeln!(response, "{index}={guid}").expect("writing to a String cannot fail");
+                }
                 None => continue,
             }
         }
@@ -307,10 +308,12 @@ async fn get_instance_attributes(
 
         let mut response = String::new();
         if inst.ib_guid.is_some() {
-            response += &(GUID.to_owned() + "\n");
+            response.push_str(GUID);
+            response.push('\n');
         }
         if inst.ib_partition_id.is_some() {
-            response += &(IB_PARTITION.to_owned() + "\n");
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 
@@ -386,8 +389,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use axum::http;
-    use carbide_instrument::testing::MetricsCapture;
-    use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
+    use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
     use hyper_util::rt::TokioExecutor;
@@ -400,7 +402,7 @@ mod tests {
             FmdsState::try_new(
                 "https://api.test".to_string(),
                 None,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .unwrap(),
         )
@@ -839,17 +841,12 @@ mod tests {
             asn: 12345,
             machine_identity: Some(MachineIdentityParams::default().into()),
         };
-        {
-            // The gRPC handler emits into the process-global test registry, so
-            // participate in the metric-capture lock while driving it.
-            let _metrics = MetricsCapture::start();
-            grpc_server
-                .update_config(Request::new(UpdateConfigRequest {
-                    config_update: Some(update),
-                }))
-                .await
-                .unwrap();
-        }
+        grpc_server
+            .update_config(Request::new(UpdateConfigRequest {
+                config_update: Some(update),
+            }))
+            .await
+            .unwrap();
 
         // Read via REST
         let (server, port) = setup_server(state).await;

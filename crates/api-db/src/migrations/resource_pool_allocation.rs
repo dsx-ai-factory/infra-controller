@@ -14,7 +14,8 @@ use sqlx::PgPool;
 
 use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator};
 use crate::ConditionalWrite::Applied;
-use crate::db_read::DbReader;
+use crate::TransactionVending as _;
+use crate::db_read::{DbReader, PgPoolReader};
 use crate::resource_pool::{self, allocation};
 use crate::test_support::postgres::wait_for_blocked_query;
 
@@ -104,7 +105,7 @@ async fn allocation_migration_backfills_existing_allocations(pool: PgPool) -> ey
 
     // Pool setup writes its binding before inventory. The migration must wait
     // for that writer before taking the inventory lock it needs for backfill.
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
         .await?;
@@ -114,9 +115,12 @@ async fn allocation_migration_backfills_existing_allocations(pool: PgPool) -> ey
     let migration = allocation_migration();
     let (migration_result, writer_result) = tokio::time::timeout(Duration::from_secs(35), async {
         tokio::join!(migration.run(&pool), async {
-            let migration_pid =
-                wait_for_blocked_query(&pool, writer_pid, "CREATE TABLE resource_pool_allocations")
-                    .await;
+            let migration_pid = wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                writer_pid,
+                "CREATE TABLE resource_pool_allocations",
+            )
+            .await;
             let inventory_locked: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_locks
                  WHERE pid = $1 AND relation = 'resource_pool'::regclass

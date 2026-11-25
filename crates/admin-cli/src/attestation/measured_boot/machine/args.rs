@@ -120,11 +120,9 @@ impl From<Attest> for AttestCandidateMachineRequest {
 impl TryFrom<Show> for ShowCandidateMachineRequest {
     type Error = CarbideCliError;
     fn try_from(show: Show) -> Result<Self, Self::Error> {
-        let machine_id = show
-            .machine_id
-            .ok_or(CarbideCliError::GenericError(String::from(
-                "machine_id must be set to get a machine",
-            )))?;
+        let machine_id = show.machine_id.ok_or_else(|| {
+            CarbideCliError::GenericError(String::from("machine_id must be set to get a machine"))
+        })?;
         Ok(Self {
             selector: Some(show_candidate_machine_request::Selector::MachineId(
                 machine_id.to_string(),

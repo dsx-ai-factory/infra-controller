@@ -27,6 +27,8 @@ type VpcPrefix struct {
 	Id *string `json:"id,omitempty"`
 	// Name of the VPC Prefix
 	Name *string `json:"name,omitempty"`
+	// String key-value pairs describing VPC Prefix labels
+	Labels map[string]string `json:"labels,omitempty"`
 	// ID of the Site the VPC Prefix belongs to
 	SiteId *string `json:"siteId,omitempty"`
 	// ID of the VPC the VPC Prefix belongs to
@@ -128,6 +130,38 @@ func (o *VpcPrefix) HasName() bool {
 // SetName gets a reference to the given string and assigns it to the Name field.
 func (o *VpcPrefix) SetName(v string) {
 	o.Name = &v
+}
+
+// GetLabels returns the Labels field value if set, zero value otherwise.
+func (o *VpcPrefix) GetLabels() map[string]string {
+	if o == nil || IsNil(o.Labels) {
+		var ret map[string]string
+		return ret
+	}
+	return o.Labels
+}
+
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// and a boolean to check if the value has been set.
+func (o *VpcPrefix) GetLabelsOk() (map[string]string, bool) {
+	if o == nil || IsNil(o.Labels) {
+		return map[string]string{}, false
+	}
+	return o.Labels, true
+}
+
+// HasLabels returns a boolean if a field has been set.
+func (o *VpcPrefix) HasLabels() bool {
+	if o != nil && !IsNil(o.Labels) {
+		return true
+	}
+
+	return false
+}
+
+// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+func (o *VpcPrefix) SetLabels(v map[string]string) {
+	o.Labels = v
 }
 
 // GetSiteId returns the SiteId field value if set, zero value otherwise.
@@ -487,6 +521,9 @@ func (o VpcPrefix) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Name) {
 		toSerialize["name"] = o.Name
+	}
+	if !IsNil(o.Labels) {
+		toSerialize["labels"] = o.Labels
 	}
 	if !IsNil(o.SiteId) {
 		toSerialize["siteId"] = o.SiteId
