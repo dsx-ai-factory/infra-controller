@@ -18,7 +18,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. With `--skip-vault`, this step is skipped and `setup.sh` creates and labels the `nico-system` namespace itself. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
-| **5b — DPF** | DPF components are upgraded through their Helm charts. The `DPFOperatorConfig`, `DPUCluster`, and `DPUService` objects are preserved. Refer to [DPF version update](#20--21-dpf-version-update). |
+| **5b — DPF** | DPF components are upgraded through their Helm charts. The `DPFOperatorConfig`, `DPUCluster`, and `DPUService` objects are preserved. Refer to [DPF version update](#20--21-dpf-version-update). Setup then waits up to 10 minutes for the `DPFOperatorConfig` to report the new operator version, and stops before Core when it does not. Refer to [DPF Upgrade Source](#dpf-upgrade-source). |
 | **5c - [RMS](https://docs.nvidia.com/rms/documentation/home/)** | Unless `--skip-rms` is passed: the rack-manager release is upgraded using `helm upgrade --install` from the pinned `helm-prereqs/nv-rms` submodule. The RMS database on `nico-pg-cluster`, the ESO-synced credentials, and the operator-edited state are preserved. Seeding is create-if-absent; re-runs never overwrite. RMS does not reload its TLS material - after a certificate renewal, restart with `kubectl rollout restart deployment/rms-api-server -n rack-manager`. |
 | **6 — NICo Core** | `helm upgrade --install nico` rolls out the new Core image tag. On DPF sites, the same deployment carries `[dpf].enabled = true`; there is no preliminary DPF-disabled deployment or second Core rollout. With `nico-api.siteConfig.enabled: true`, the chart hashes the site configuration inputs into the pod template, so changing `nico-api.siteConfig.nicoApiSiteConfig` also rolls `nico-api` when the image is unchanged; an unchanged rerun does not restart it. The PostgreSQL database schema is migrated by the pre-upgrade Job (uses the `imagepullsecret` Secret, which is upserted). NICo state (host records, machine state, firmware inventory) lives in PostgreSQL and is preserved. |
 | **7a–7g — NICo REST** | REST components are upgraded using `helm upgrade --install`. The `nico_rest` PostgreSQL database is migrated in-place by the REST migration Job. Temporal workflow state is preserved. The Keycloak realm and client credentials are preserved. |
@@ -40,7 +40,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions through server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: that release). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
+- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: the version in `helm-prereqs/dpf-versions.toml`). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
 
 ## Pre-upgrade checklist
 
@@ -196,6 +196,18 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
 
+`setup.sh` also needs a resolver for the DPU cluster CoreDNS. It reads `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file in every DPF run that does not set `NICO_DPF_COREDNS_UPSTREAM`, including with `--skip-core`. Reading the file needs `python3` with PyYAML. A site that passed `--core-values` at initial install passes the same file again. Export `NICO_DPF_COREDNS_UPSTREAM` only to use other resolvers or when that file is not available. Preflight reports an error when neither gives a value.
+
+`setup.sh` sets `spec.coreDNS.upstreamNameservers` in the `DPFOperatorConfig` to that resolver. Since DPF v26.8.0, the CoreDNS that serves the DPU cluster runs in the host cluster and forwards names outside the cluster domain, such as the `.forge` names, to the resolvers in this field. A site installed without the field gets it when `setup.sh` runs phase 5b again. Upgrades performed outside `setup.sh` must set the field. Refer to [DPFOperatorConfig](dpf.md#32-dpfoperatorconfig).
+
+On a DPF site, check the installed DPF version:
+
+```bash
+kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system -o jsonpath='{.status.version}'
+```
+
+`setup.sh` installs the DPF v30.0.0 operator. That operator upgrades only from v26.8.x or from another v30.0.x build. With the default operator image tag, preflight reports an error for any other installed version. Refer to [DPF Upgrade Source](#dpf-upgrade-source).
+
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 
 Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
@@ -252,10 +264,7 @@ an older replica can still register a DPU that uses the shared credential. A
 transient rotation-target read failure does not block startup when local v0 is
 present. After NICo accepts local v0, removing it retains the last accepted
 shared Secret and logs an error until the original value is restored.
-The default pinned DPF v26.4.0 does not support BMC credential rotation;
-adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). If the rotation
-target is already version 1 or later, the local
+If the rotation target is already version 1 or later, the local
 version 0 entry does not become current. If devices still use version 0, keep
 the copied local value unchanged after this ownership migration; later password
 changes must use coordinated BMC rotation so hardware and convergence records
@@ -393,6 +402,22 @@ Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade c
 Moving a site off Vault entirely, including certificate issuance and the Vault install itself, is a later step. Complete the credential migration on that page first, then follow [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault) for the certificate flags, the issuer switch, and the `--skip-vault` rerun.
 
 ## Version-specific upgrade notes
+
+### DPF Upgrade Source
+
+`setup.sh` installs DPF v30.0.0, and NICo Core does not start with an older DPF operator. DPF supports an upgrade from the previous release only. The v30.0.0 operator accepts v26.8.x, or another v30.0.x build, as the installed version. Refer to the [DPF upgrade guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/operational-readiness/upgrades/README.md#supported-upgrade-path-n-1-policy).
+
+A site on an older release, such as v26.4.0, must upgrade DPF to v26.8.x first. Without that step, the v30.0.0 operator sets the `PreUpgradeValidationReady` condition of the `DPFOperatorConfig` to `False` and leaves `status.version` unchanged. Preflight reports this case as an error before `setup.sh` changes the cluster. It makes this check when `NICO_DPF_IMAGE_TAG` is unset or names a tag on the v30.0 release line.
+
+Do not bypass this error with `--ignore-preflight-errors`. `setup.sh` would install the v30.0.0 operator chart before the wait in phase 5b stops the run, and DPF does not support an operator downgrade. Refer to [Rollback](#rollback).
+
+Upgrade DPF to v26.8.x as the [DPF v26.8.0 upgrade guide](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/operational-readiness/upgrades/README.md) and the [v26.8.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/f1b50e85122a3df6047708e41a8203f8cdce03a1/docs/public/release-notes/v26.8.0.md#upgrade-notes) describe. DPF v26.8.0 lists Kamaji chart 1.4.0 and requires `spec.deploymentMode` in the `DPFOperatorConfig`. A NICo site uses `zero-trust`. From v26.8.0 the DPU cluster CoreDNS runs in the host cluster, so set `spec.coreDNS.upstreamNameservers` in the same step. Refer to [DPFOperatorConfig](dpf.md#32-dpfoperatorconfig). When `status.version` reports v26.8.x, run `setup.sh`.
+
+The same check reports a warning in three cases: preflight cannot read the installed version, the `DPFOperatorConfig` has no `status.version`, or `status.version` is a prerelease of the image tag, such as `v30.0.0-rc.4` for the tag `v30.0.0`. In the first two cases, preflight has not checked the installed version, so continue only when the installed DPF is on v26.8.x or v30.0.x. In the third case, NICo Core does not start on a prerelease of the release that it requires, and the wait in phase 5b does not end on that version.
+
+In phase 5b, `setup.sh` waits up to 10 minutes until `status.version` reports the new operator version. A DPU that is still provisioning holds the DPF upgrade until it reaches `Ready` or `Error`. If the operator does not finish in time, `setup.sh` prints the conditions of the `DPFOperatorConfig` that are not `True`, such as `PreUpgradeValidationReady`, and stops before it deploys Core. Resolve what they report and run `setup.sh` again.
+
+A `status.version` that is a prerelease of the release in the image tag, such as `v30.0.0-rc.4` for the tag `v30.0.0`, does not end the wait unless the tag carries the same prerelease. When the 10 minutes pass and the operator has recorded no other target version, `setup.sh` stops before Core and reports this case instead of the conditions. The remedy is an operator image built with a plain release `TAG`, under an image tag that the cluster has not run. Refer to [DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries).
 
 ### Upgrades That Introduce Automatic Site IP Block Reconciliation
 

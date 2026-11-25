@@ -210,17 +210,18 @@ The tables below summarize the keys that must be set per site.
 | `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
 | `NICO_SKIP_VAULT` | No | Install without HashiCorp Vault, which installs **by default**: skip the Vault install and unseal phases, render no Vault resources in `nico-prereqs` (on an existing Vault site, after nothing references Vault any more), and deploy Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Same as `--skip-vault`; `NICO_INSTALL_VAULT=false` is honored too. Defaults to `false`. Accepts `true` or `false` only; any other value stops setup with `Error: NICO_SKIP_VAULT must be true or false (got '<value>')`, and `NICO_INSTALL_VAULT` is validated the same way, with its own name in the message. The choice is not stored: pass the flag or keep the variable set on every run. Not an uninstall: on a site that runs Vault it is a configuration change. Refer to [Installing without Vault](#installing-without-vault). |
 | `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
-| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.4.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
+| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
 | `NICO_DPF_NICO_NGC_API_KEY` | No | NGC API key with access to the NICo DPUService images (`nico-pull-secret`). Defaults to `NICO_DPF_NGC_API_KEY`. |
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
+| `NICO_DPF_COREDNS_UPSTREAM` | No (DPF only) | Override for the resolvers that the DPU cluster CoreDNS forwards to: IP addresses separated by spaces or commas. Defaults to `nico-dhcp.config.kea.hookParameters.nameservers` from the core values file, which `setup.sh` reads in every DPF run that does not set the override, including with `--skip-core`. Reading the file needs `python3` with PyYAML. CoreDNS spreads queries across all listed resolvers, so each one must serve the `.forge` zone. Unless `--skip-dpf`, preflight reports an error when neither source has a value. With `--ignore-preflight-errors`, `setup.sh` stops at the start of phase 5b when neither source has a value. |
 | `NICO_DPF_DPU_INTERFACE` | Unless `--skip-dpf` | Controller interface on which keepalived advertises the DPU cluster VIP. |
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in KMIP KEK provider. When set, `setup.sh` creates or updates the `nico-system/nico-kmip-client` Secret from them before Phase 6 and refuses to overwrite a Secret it did not create. An error with `--skip-core`. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
-| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.4.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
+| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to the version in `dpf-versions.toml`, prefixed with `v`. Set separately when your self-built image uses a different tag than the chart version. NICo checks the version that the operator reports, which is the `TAG` the image was built with, not this image tag. `setup.sh` reads the release at the start of this tag. Preflight checks the installed DPF version only when the tag is on the release line of `dpf-versions.toml`, and phase 5b waits until the operator reports that release or a later one. A reported prerelease of that release, such as `v30.0.0-rc.4` for the tag `v30.0.0`, does not end the wait unless the tag carries the same prerelease. Start a custom tag with the `vMAJOR.MINOR.PATCH` of the plain build `TAG`, for example `v30.0.0-site1`. Refer to [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
 | `NICO_DPF_HELM_REPO_OCI` / `_HTTPS` / `_CARBIDE` | No | Argo CD helm repository URLs DPF pulls operand/service charts from. `_OCI`/`_HTTPS` default to the public `nvidia/doca` repos; `_CARBIDE` defaults to the **private** `0837451325059433/carbide-dev` (the NICo DPUService charts). Must match the `[dpf.services.*].helm_repo_url` carbide-api requests — override in lockstep when mirroring. |
 
@@ -389,7 +390,9 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before the installation phases.
+Reading the default DPF image tag requires Python 3.11 or later (`tomllib`), or the `tomli` package. This is skipped with `--skip-dpf` or an explicit `NICO_DPF_IMAGE_TAG`. Preflight reports an error without one.
 Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
+The default DPU cluster CoreDNS upstream is also read from the core values file with PyYAML. This applies to every DPF run that does not set `NICO_DPF_COREDNS_UPSTREAM`, including runs with `--skip-core`.
 
 It supports these common deployment modes:
 
@@ -1218,10 +1221,10 @@ vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS - defaul
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack (default — --skip-dpf to opt out, all in dpf-operator-system)
   ├── argo-cd               (argo/argo-cd 9.4.1)
-  ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.2.0 - DPU cluster control planes)
+  ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.4.0 - DPU cluster control planes)
   ├── maintenance-operator  (ghcr.io/mellanox/maintenance-operator-chart 0.3.0)
   ├── node-feature-discovery (nfd/node-feature-discovery 0.18.3)
-  └── dpf-operator          (pinned NVIDIA/doca-platform submodule, v26.4.0)
+  └── dpf-operator          (pinned NVIDIA/doca-platform submodule)
 nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
   ├── nico-api              (Deployment - gRPC/REST API, requires PostgreSQL, and Vault unless --skip-vault)
@@ -1503,17 +1506,15 @@ the deprecated iPXE DPU path. setup.sh installs the
 base infrastructure and NICo Core), then deploys Core once with DPF enabled:
 
 1. **Prerequisite operators** — Argo CD, Kamaji, maintenance-operator, and
-   node-feature-discovery, pinned from `NVIDIA/doca-platform`
-   `deploy/helmfiles/prereqs.yaml` at the release the doca-platform submodule
-   is pinned to
-   (cert-manager and local-path-provisioner are reused from the base install).
+   node-feature-discovery, using the versions in `helm-prereqs/helmfile.yaml`.
+   Setup reuses cert-manager and local-path-provisioner from the base install.
    Kamaji's cold-start deadlock is broken automatically.
 2. **Secrets** — `dpf-pull-secret` / `nico-pull-secret` (nvcr.io, from
    `NICO_DPF_NGC_API_KEY` / `NICO_DPF_NICO_NGC_API_KEY`), a generated
    `hbn-user-password`, and the Argo CD helm repository secrets.
 3. **DPF operator** - installed from `deploy/charts/dpf-operator` in a
    `NVIDIA/doca-platform` checkout at the reviewed commit this repository
-   pins (currently `v26.4.0`). Two source paths enforce that commit: in a
+   pins. Two source paths enforce that commit: in a
    git checkout of this repository, the `helm-prereqs/doca-platform` git
    submodule (initialized automatically); from the packaged `nico-prereqs`
    chart, a shallow clone of the commit recorded in
@@ -1527,7 +1528,13 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
 4. **Operator CRs** — `DPFOperatorConfig`, `DPUCluster` (keepalived VIP from
    `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP`), and, when
    `NICO_DPF_METALLB_POOL` is set, the VIP LoadBalancer Service that makes the
-   DPU cluster VIP routable.
+   DPU cluster VIP routable. The `DPFOperatorConfig` carries the CoreDNS
+   upstream: the Kea `nameservers` value unless `NICO_DPF_COREDNS_UPSTREAM` is
+   set.
+   Setup then waits up to 10 minutes until the `DPFOperatorConfig` reports the
+   new operator version in `status.version`. When the operator does not
+   finish, setup stops and prints the conditions that are not `True`, such as
+   `PreUpgradeValidationReady`.
 5. **carbide-api enablement (phase 6)** — Core starts with `[dpf]` enabled and
    initializes the BFB, DPUFlavor, and DPUDeployment during that deployment.
    The `nico-api-dpf` Role is created via `nico-api.dpf.rbacCreate=true`. The API
@@ -1538,8 +1545,11 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    startup when v0 is current or the current target cannot be resolved.
 
 Requirements (unless `--skip-dpf`): `envsubst` on the machine running setup,
-an NGC API key, and `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
-the DPU cluster VIP. The BMC root is optional at install time in `local_first`
+an NGC API key, `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
+the DPU cluster VIP, and a resolver for the DPU cluster CoreDNS: the Kea
+`nameservers` value in the core values file, or `NICO_DPF_COREDNS_UPSTREAM`.
+`setup.sh` writes that resolver into the `DPFOperatorConfig`, so run it again
+after changing the resolver. The BMC root is optional at install time in `local_first`
 or `backend` mode but required before DPU provisioning. The DPF and RMS phases
 each also need `git` and a record of their pinned commit: a git checkout of
 this repository that records the submodule (`helm-prereqs/doca-platform` for
@@ -1653,10 +1663,7 @@ new DPU registration then retries until the credential is accepted and
 transient rotation-target read failure, a present local v0 permits startup and
 retry. After
 NICo accepts local v0, losing the entry retains the last accepted shared Secret
-and logs an error; restore the unchanged value. The default pinned DPF v26.4.0
-does not support BMC credential rotation, so NICo retains the shared Secret.
-Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other missing
+and logs an error. Restore the unchanged value. Other missing
 current BMC rotation targets follow the same retention rule. During background
 refresh, a transient source-read failure retains the last published Secret and
 is retried.
@@ -1693,27 +1700,50 @@ registry and point setup.sh at it.
 | **DOCA operand/service charts** | Charts the operator deploys onto DPUs (DTS, DOCA-HBN, multus, flannel, sriov, ovs-cni, …) via Argo CD | Public NGC `nvidia/doca` helm repo, anonymous | `NICO_DPF_HELM_REPO_OCI` / `_HTTPS` / `_CARBIDE` (the Argo CD repo URLs) |
 | **NICo DPUService images** | NICo's own DPU-side services (`dpu-agent`, `dhcp-server`, `fmds`, `otelcol`) built from `bluefield/` | **Private** `nvcr.io/0837451325059433/carbide-dev`, needs `nico-pull-secret` | Build/push to your registry (below), then set `[dpf.services.*]` in the site config |
 
-**1. DPF operator image (self-built or mirrored).** The public GA image is
-public and pulls anonymously — the default needs nothing. To use your own
-registry:
+**1. DPF operator image (self-built or mirrored).** The GA image is public and
+pulls anonymously. The default needs nothing. To mirror the image,
+run the following from the repository root. The version reader requires Python
+3.11 or later, or Python 3 with the `tomli` package installed.
 
 ```bash
-# mirror the public image into your registry (or build it from the
-# NVIDIA/doca-platform source and push — see that repo's Makefile)
-docker pull  nvcr.io/nvidia/doca/dpf-system:v26.4.0
-docker tag   nvcr.io/nvidia/doca/dpf-system:v26.4.0  <your-registry>/dpf-system:v26.4.0
-docker push  <your-registry>/dpf-system:v26.4.0
-
-export NICO_DPF_IMAGE_REPO=<your-registry>/dpf-system
-export NICO_DPF_IMAGE_TAG=v26.4.0                 # or your own build tag
-export NICO_DPF_IMAGE_PULL_SECRET=imagepullsecret # the pull secret setup.sh
-                                                  # already creates in dpf-operator-system
+MIRROR_DPF_IMAGE_REPO="<your-registry>/dpf-system"
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
+DPF_TAG="v${DPF_VERSION}" &&
+docker pull "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG" &&
+docker tag "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG" "$MIRROR_DPF_IMAGE_REPO:$DPF_TAG" &&
+docker push "$MIRROR_DPF_IMAGE_REPO:$DPF_TAG" &&
+export NICO_DPF_IMAGE_REPO="$MIRROR_DPF_IMAGE_REPO" NICO_DPF_IMAGE_TAG="$DPF_TAG"
 ```
+
+For a self-built operator image, set the doca-platform build `TAG` to a plain
+version at or above the version in `dpf-versions.toml`, for example
+`TAG=v30.0.0`. The operator reports its build `TAG` as
+`DPFOperatorConfig.status.version`, and NICo stops at startup when that version
+is below the minimum. The upstream default `TAG` is `v0.1.0`. A tag with a
+suffix ranks below the plain version. For a minimum of `30.0.0`, NICo rejects
+`v30.0.0-rc.4` and `v30.0.0-latest-stable`.
+
+`setup.sh` reads the release at the start of `NICO_DPF_IMAGE_TAG`. In phase 5b
+it waits until the operator reports that release or a later one, and stops
+before Core after 10 minutes when it does not. A reported prerelease of that
+release, such as `v30.0.0-rc.4` for the tag `v30.0.0`, does not end the wait
+unless the tag carries the same prerelease. Setting the tag to that prerelease
+ends the wait, but it does not change the minimum that NICo checks at startup.
+Use an operator image built with a plain release `TAG` instead. Push it under
+an image tag that the cluster has not run, so that the rerun replaces the
+running operator pod, and set `NICO_DPF_IMAGE_TAG` to that tag. An image tag
+that starts with a later release than the build `TAG` fails this wait, so start
+a custom tag with the plain build `TAG`, for example `v30.0.0-site1`. With a
+tag that does not start with a release, such as `latest`, preflight does not
+check the installed DPF version, and the wait cannot tell a pending upgrade
+from the previous version.
 
 Set `NICO_DPF_IMAGE_PULL_SECRET` **only** for a private registry — attaching a
 registry-scoped secret to the public `nvidia/doca` pull makes nvcr.io return
 403 (the credential can't be entitled to `nvidia/doca`), and kubelet does not
-fall back to anonymous.
+fall back to anonymous. `setup.sh` passes the name to the operator chart and
+creates pull Secrets only for `nvcr.io`, so a Secret for a private mirror must
+already exist in `dpf-operator-system`.
 
 **2. NICo DPUService images (built from this repo).** These are NICo's own
 DPU-side services and belong in the same registry as Core/REST. Build and push
@@ -1753,15 +1783,37 @@ from your mirror instead, override the repo URLs **and** the matching
 DPUService charts live).
 
 > **Version.** The DPF version is the `helm-prereqs/doca-platform` submodule
-> pin (currently `v26.4.0`), mirrored in `helm-prereqs/doca-platform.pin` for
+> pin, mirrored in `helm-prereqs/doca-platform.pin` for
 > the packaged chart - it selects the doca-platform chart/CRDs to install, and
-> `NICO_DPF_IMAGE_TAG` defaults to the same release. Version bumps are commits
+> `NICO_DPF_IMAGE_TAG` defaults to the version in `dpf-versions.toml`. Version bumps are commits
 > in this repo that move the submodule and the pin file together, not an
 > environment variable. When `NICO_DPF_SRC` is set, the installed chart/CRDs
 > come from that checkout instead; `setup.sh` warns, but does not stop, when
 > its HEAD differs from the pin. Keep your
 > mirrored/self-built artifacts on the same version, or set `NICO_DPF_IMAGE_TAG`
 > explicitly when they diverge.
+
+[`dpf-versions.toml`](dpf-versions.toml) defines NICo's minimum supported DPF
+version and setup's default operator image tag. Use a semantic version without
+a leading `v` or build metadata. Updating it requires rebuilding
+NICo. Keep the source chart pin and image compatible. Changing the file does not
+advance the source pin. During a DPF upgrade, use the commit in
+`crates/dpf/Makefile.toml` for the submodule and packaged `.pin` file. Review
+the prerequisite charts and values. Update `_DPF_PINNED_LINE` in `preflight.sh`
+and the version that the DPF simulator reports. The helm-prereqs tests fail
+when either differs from this file. Also set `_DPF_UPGRADE_SOURCE_LINE` in
+`preflight.sh` to the release line of `LastReleasedDPFGAVersion` in the new DPF
+release. No test checks that value. Rerun setup to install or upgrade DPF
+through Helm.
+
+An installed DPF must be on v26.8.x or v30.0.x before this setup upgrades it.
+With the default image tag, or another tag on the v30.0 release line, preflight
+reports any other version as an error. Do not pass `--ignore-preflight-errors`
+for this error. The same check reports a warning when preflight cannot read
+the installed version, when the `DPFOperatorConfig` has no `status.version`,
+and when `status.version` is a prerelease of the image tag, such as
+`v30.0.0-rc.4` for the tag `v30.0.0`.
+Refer to [DPF Upgrade Source](../docs/manuals/upgrade.md#dpf-upgrade-source).
 
 ## DPU compatibility DNS (`.forge` zone) — REQUIRED for DPU bring-up
 

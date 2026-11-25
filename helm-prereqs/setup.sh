@@ -20,6 +20,8 @@
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
 #   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
+#   So does the default for NICO_DPF_COREDNS_UPSTREAM (unless --skip-dpf).
+#   The default DPF image tag requires Python 3.11+ or the tomli package.
 #   --skip-vault preflight also requires a python3 TOML parser (3.11 tomllib
 #   or the tomli package) to inspect the site config's [secrets] section.
 #
@@ -66,8 +68,16 @@
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.4.0, the release
-#                          the doca-platform submodule is pinned to.
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Defaults to the version in
+#                          dpf-versions.toml, prefixed with v. setup.sh reads
+#                          the release at the start of the tag. Preflight
+#                          checks the installed DPF version only for a tag on
+#                          the release line of dpf-versions.toml, and phase 5b
+#                          waits until the operator reports that release or a
+#                          later one. A reported prerelease of that release
+#                          does not end the wait unless the tag carries the
+#                          same prerelease. Start a custom tag with the
+#                          vMAJOR.MINOR.PATCH of the image's plain build TAG.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -80,6 +90,16 @@
 #   NICO_DPF_K8S_API_VIP   Host-cluster API server IP reachable from DPUs.
 #                          Default: derived from the kubernetes Endpoints.
 #   NICO_DPF_K8S_API_PORT  Host-cluster API server port. Default: derived.
+#   NICO_DPF_COREDNS_UPSTREAM
+#                          Override for the resolvers the DPU cluster CoreDNS
+#                          forwards to: IP addresses separated by spaces or
+#                          commas. Default:
+#                          nico-dhcp.config.kea.hookParameters.nameservers from
+#                          the core values file, read in every DPF run that
+#                          does not set this override, also with --skip-core
+#                          (needs python3 with PyYAML).
+#                          CoreDNS spreads queries across all listed resolvers,
+#                          so each one must serve the .forge zone.
 #   NICO_DPF_DPU_INTERFACE Controller interface for the Kamaji keepalived VIP.
 #                          REQUIRED when DPF install is enabled.
 #   NICO_DPF_DPU_CLUSTER_VIP
@@ -475,10 +495,12 @@ NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}
 # DPF operator image. Defaults to the public NGC image (anonymous pull). To use
 # your own registry (mirror or self-built, e.g. matching NICO_IMAGE_REGISTRY),
 # set NICO_DPF_IMAGE_REPO/_TAG and NICO_DPF_IMAGE_PULL_SECRET. The tag defaults
-# to the release the doca-platform submodule is pinned to (bump both together)
-# but can differ for a self-built image.
+# to dpf-versions.toml. Keep the source chart pin compatible with that version.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.4.0}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-}"
+if "${INSTALL_DPF}" && [[ -z "${NICO_DPF_IMAGE_TAG}" ]]; then
+    NICO_DPF_IMAGE_TAG="v$(python3 "${SCRIPT_DIR}/read-dpf-version.py")"
+fi
 # RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
 # git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
 # versions). Image tags are git-describe style and decoupled from the chart -
@@ -1658,6 +1680,90 @@ _warn_dpf_source_mismatch() {
     fi
 }
 
+# Prints a number that orders the MAJOR.MINOR.PATCH release at the start of
+# version $1, or nothing when $1 does not start with one.
+_dpf_release_key() {
+    local _re='^v?([0-9]+)\.([0-9]+)\.([0-9]+)'
+    [[ "$1" =~ ${_re} ]] || return 0
+    printf '%d%05d%05d\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))"
+}
+
+# Prints the prerelease of the version at the start of $1 (the part between the
+# release and any build metadata), or nothing when it has none.
+_dpf_prerelease() {
+    local _re='^v?[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z.-]+)'
+    [[ "$1" =~ ${_re} ]] || return 0
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Whether reported version $1 is at or above the release at the start of image
+# tag $2. A prerelease of that release counts as below it unless $2 carries the
+# same prerelease. Prereleases are compared by equality, not ordered. Holds
+# when either side does not start with a release.
+_dpf_version_at_floor() {
+    local _have _floor
+    _have="$(_dpf_release_key "$1")"
+    _floor="$(_dpf_release_key "$2")"
+    [[ -n "${_have}" && -n "${_floor}" ]] || return 0
+    if (( 10#${_have} != 10#${_floor} )); then
+        (( 10#${_have} > 10#${_floor} ))
+        return
+    fi
+    [[ -z "$(_dpf_prerelease "$1")" || "$(_dpf_prerelease "$1")" == "$(_dpf_prerelease "$2")" ]]
+}
+
+# Waits until the DPFOperatorConfig reports the version its operator deploys.
+# The operator records status.targetVersion when it starts and sets
+# status.version when its components are deployed. carbide-api reads
+# status.version once at startup. Until an upgraded operator has recorded its
+# target, both fields hold the previous version, so a version older than the
+# release in the operator image tag, or a prerelease of that release that the
+# tag does not carry, does not end the wait. Each read has a request timeout,
+# so a hung API request cannot hold the wait past its limit.
+#   $1 timeout in seconds   $2 operator image tag
+_wait_for_dpf_operator_version() {
+    local _deadline=$(( $(date +%s) + $1 )) _floor _status _version="" _target=""
+    _floor="$(_dpf_release_key "$2")"
+    echo "Waiting up to ${1}s for the DPF operator to report its version..."
+    [[ -n "${_floor}" ]] \
+        || echo "  Image tag $2 does not start with a release, so this wait cannot tell a pending operator upgrade from the previous version."
+    while true; do
+        _status="$(kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+            --request-timeout=20s \
+            -o jsonpath='{.status.version}|{.status.targetVersion}' 2>/dev/null || true)"
+        IFS='|' read -r _version _target <<< "${_status}"
+        if [[ -n "${_version}" && "${_version}" == "${_target}" ]] \
+            && _dpf_version_at_floor "${_version}" "$2"; then
+            echo "DPF operator version: ${_version}"
+            return 0
+        fi
+        (( $(date +%s) < _deadline )) || break
+        sleep 10
+    done
+    echo "Error: the DPFOperatorConfig does not report the operator from image tag $2: status.version is '${_version:-<unset>}', status.targetVersion is '${_target:-<unset>}'." >&2
+    if [[ -n "${_version}" && "${_version}" == "${_target}" ]]; then
+        # Only the version floor from the image tag holds back an equal pair.
+        if [[ "$(_dpf_release_key "${_version}")" == "${_floor}" ]]; then
+            echo "  ${_version} is the release in image tag $2 with a suffix that the tag does not carry, and the operator has recorded no other target." >&2
+            echo "  NICo Core does not start on a prerelease of the DPF release that it requires." >&2
+            echo "  The operator reports the TAG it was built with. Use an operator image built with a plain release TAG, such as TAG=${_version%%-*}, and push it under an image tag that the cluster has not run, so that the rerun replaces the running operator pod." >&2
+            echo "  Set NICO_DPF_IMAGE_TAG to that image tag, then run setup.sh again." >&2
+            echo "  This stop does not need clean.sh, which removes the whole installation." >&2
+            return 1
+        fi
+        echo "  ${_version} is older than the release in image tag $2, and the operator has recorded no other target." >&2
+        echo "  The operator reports the TAG it was built with. For an image built with TAG=${_version}, use an image tag that does not start with a later release." >&2
+    fi
+    echo "  Conditions that are not True:" >&2
+    kubectl get dpfoperatorconfig dpfoperatorconfig -n dpf-operator-system \
+        --request-timeout=20s \
+        -o jsonpath='{range .status.conditions[?(@.status!="True")]}{.type}: {.status}/{.reason}{"\n"}{.message}{"\n"}{end}' \
+        | sed 's/^/    /' >&2 || true
+    echo "  Resolve what is reported above, then run setup.sh again." >&2
+    echo "  This stop does not need clean.sh, which removes the whole installation." >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # 5b. DPF (DOCA Platform Framework) — optional DPU provisioning stack.
 #     Needs StorageClass (1), MetalLB (1c), cert-manager (2). Must complete
@@ -1676,6 +1782,14 @@ _LEGACY_DPF_BOOTSTRAP_CLEANED=true
 if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
     echo "=== [5b] DPF (DOCA Platform Framework) ==="
+
+    # preflight.sh resolves the DPU cluster CoreDNS upstream. It is empty only
+    # when --ignore-preflight-errors skipped that finding. Stop before any DPF
+    # change.
+    if [[ -z "${_DPF_COREDNS_UPSTREAM:-}" ]]; then
+        echo "Error: no resolver for the DPU cluster CoreDNS. Set nico-dhcp.config.kea.hookParameters.nameservers in the core values file or export NICO_DPF_COREDNS_UPSTREAM." >&2
+        exit 1
+    fi
 
     # 5b.1 Resolve the doca-platform source before anything touches the cluster,
     #      so a missing or unfetchable pin cannot leave a partial install: an
@@ -1696,9 +1810,8 @@ if "${INSTALL_DPF}"; then
     fi
     _warn_dpf_source_mismatch "${_DPF_SRC}"
 
-    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
-    #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
-    #      dpf-operator-system, same as upstream.
+    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD)
+    #      use the versions in helmfile.yaml. All land in dpf-operator-system.
     helmfile sync -l name=argo-cd
 
     # Kamaji has a cold-start deadlock: its controller requires the 'default'
@@ -1733,7 +1846,7 @@ if "${INSTALL_DPF}"; then
         # apply order is nondeterministic), so we can't rely on its partial
         # state — create all three explicitly, matching the chart.
         echo "Creating the Kamaji Issuer, webhook Certificate, and default DataStore out-of-band..."
-        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
+        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.4.0 \
             -n dpf-operator-system -f operators/values/kamaji.yaml \
             --show-only templates/certmanager_issuer.yaml \
             --show-only templates/certmanager_certificate.yaml \
@@ -1842,7 +1955,7 @@ if "${INSTALL_DPF}"; then
     #      (PCI class 0200). The in-repo source chart ships EMPTY
     #      controllerManager.image (CI stamps it when publishing to NGC), so we
     #      set it explicitly - matching the published nvidia/doca chart. Repo and
-    #      tag are overridable; the tag defaults to the pinned release.
+    #      tag are overridable. The tag defaults to dpf-versions.toml.
     #      Image pull secret: the GA nvidia/doca images are PUBLIC, so by default
     #      the operator pulls them anonymously. Attaching a registry-scoped
     #      secret that lacks nvidia/doca entitlement makes nvcr.io 403 the pull
@@ -1880,7 +1993,10 @@ if "${INSTALL_DPF}"; then
     export NICO_DPF_K8S_API_VIP NICO_DPF_K8S_API_PORT
     export NICO_DPF_DPU_INTERFACE NICO_DPF_DPU_CLUSTER_VIP
     export NICO_DPF_CP_LABEL_VALUE="${NICO_DPF_CP_LABEL_VALUE:-}"
-    envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT}' \
+    # preflight.sh resolves the CoreDNS upstream into _DPF_COREDNS_UPSTREAM.
+    echo "DPU cluster CoreDNS upstream: ${_DPF_COREDNS_UPSTREAM}"
+    NICO_DPF_COREDNS_UPSTREAM="${_DPF_COREDNS_UPSTREAM}" \
+        envsubst '${NICO_DPF_K8S_API_VIP} ${NICO_DPF_K8S_API_PORT} ${NICO_DPF_COREDNS_UPSTREAM}' \
         < operators/dpf/dpfoperatorconfig.yaml.tmpl | kubectl apply -f -
     envsubst '${NICO_DPF_DPU_INTERFACE} ${NICO_DPF_DPU_CLUSTER_VIP} ${NICO_DPF_CP_LABEL_VALUE}' \
         < operators/dpf/dpucluster.yaml.tmpl | kubectl apply -f -
@@ -1893,7 +2009,11 @@ if "${INSTALL_DPF}"; then
         echo "  Ensure ${NICO_DPF_DPU_CLUSTER_VIP} is routable from the DPUs by other means."
     fi
 
-    # 5b.7 Readiness — WARN only. Kamaji TenantControlPlane bring-up can take
+    # 5b.7 Operator version. Core must not deploy before the operator reports
+    #      the version it installed.
+    _wait_for_dpf_operator_version 600 "${NICO_DPF_IMAGE_TAG}"
+
+    # 5b.8 Readiness - WARN only. Kamaji TenantControlPlane bring-up can take
     #      minutes and depends on VIP routability that this script can't verify.
     echo "Waiting up to 300s for the DPU cluster control plane (non-fatal)..."
     _dpf_deadline=$(( $(date +%s) + 300 ))
@@ -1907,7 +2027,7 @@ if "${INSTALL_DPF}"; then
         sleep 10
     done
 
-    # 5b.8 Core is deployed with [dpf] enabled after these prerequisites exist.
+    # 5b.9 Core is deployed with [dpf] enabled after these prerequisites exist.
     #      carbide-api can initialize DPF without the site-wide BMC root and its
     #      refresh task writes bmc-shared-password after the credential appears.
     echo "DPF stack installed (Core will start with carbide-api DPF enabled in phase 6)"

@@ -59,8 +59,10 @@ protocol gateway. To replicate it on a fresh site:
    [dpf-sim-controller quick start](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/k8s/dpf-sim-controller/README.md#quick-start-against-a-machine-a-tron-cluster)
    give the `make deploy` command and the namespace it creates. The running
    simulator also creates the `DPFOperatorConfig` whose `status.version`
-   nico-api reads at startup. Until that version exists nico-api exits with
-   `failed to initialize DPF SDK`, so keep this order.
+   nico-api reads at startup. Until that version exists, or when an older
+   simulator image reports a version below `helm-prereqs/dpf-versions.toml`,
+   nico-api exits with `failed to initialize DPF SDK`. Keep this order and
+   build the simulator from the same revision as Core.
 1. Check the rack profile. nico-api derives an expected rack's profile id from
    the expected rack group that declares it: the group topology in upper case,
    an underscore, the compute vendor in upper case, and the suffix
@@ -148,7 +150,7 @@ export NICO_REST_IMAGE_TAG=<rest-tag>       # NICo REST image tag from the same 
 export REGISTRY_PULL_SECRET=<registry-key>  # registry password or API key, unset for a public or preloaded registry
 export REGISTRY_PULL_USERNAME='$oauthtoken'  # registry user for the pull Secrets, $oauthtoken for NGC
 export MAT_IMAGE_TAG=<mat-tag>              # machine-a-tron and mat-k8s-controller image tag
-export DPF_SIM_IMAGE_TAG=<dpf-sim-tag>      # dpf-sim-controller image tag
+export DPF_SIM_IMAGE_TAG=<dpf-sim-tag>      # dpf-sim-controller image tag, built from the same revision as Core
 ```
 
 `setup.sh` creates the `imagepullsecret` Secret that the Core values reference
@@ -829,7 +831,7 @@ column names the file or section that now carries each fix.
 | 3 | site-explorer aborts every run: `MissingCredentials` | `machines/bmc/site/root` isn't in default kvSeeds; each periodic pass requires the current site-wide BMC root password. Empty UEFI defaults affect the operations that use them | `siteCredentials` in `helm-prereqs/values.yaml` renders all three as the nico-api credential file and generates any password left empty |
 | 4 | Host BMCs 401 while DPUs explore fine | Host and DPU mock factory passwords differ (`factory_password` vs `0penBmc`). The host factory Vault path vendor segment is **lowercase** (`.../dell`, because `BMCVendor`'s `Display` lowercases, so the earlier capital-`Dell` seed was read by nobody) | `kvSeeds` in `helm-prereqs/values.yaml` (the host `dell` entry is commented). The scale profiles leave the chart's site credentials lookup enabled, so the mocks are pinned and no factory login happens |
 | 5 | machine-a-tron's expected-machine registration 403s (each failed record is logged and startup exits non-zero) | `Machineatron` principal missing from the `AddExpectedMachine` RBAC grant - an oversight; it holds the sibling grants (`DiscoverDhcp`, `CreateNetworkSegment`, `GetExpectedSwitch`) | One-line fix in `internal_rbac_rules.rs`, merged on main. No fallback remains |
-| 6 | Endpoints permanently stuck `AvoidLockout` (NICO-SITEEXPLORER-144) on a fresh deploy | Per-MAC rotated creds (`machines/bmc/<mac>/root`) survive cleanup; a fresh mock is at factory password but the per-MAC entry makes site-explorer present the old rotated one → 401 latch, self-perpetuating by design | The pinned passwords (the site root from the site credentials Secret) prevent the per-MAC writes under the scale profiles. Override Mode sites purge them as described in the deployment guide's Teardown and Reset section |
+| 6 | Endpoints permanently stuck `AvoidLockout` (NICO-SITEEXPLORER-144) on a fresh deploy | Per-MAC rotated creds (`machines/bmc/<mac>/root`) survive cleanup; a fresh mock is at factory password but the per-MAC entry makes site-explorer present the old rotated one → 401 latch, self-perpetuating by design | With the pinned passwords (the site root from the site credentials Secret) a per-MAC entry holds the site root, not a rotated password. Override Mode sites purge them as described in the deployment guide's Teardown and Reset section |
 | 7 | `DiscoverDhcp` fails for every BMC: "no rows returned…" | The `machine_dhcp_records` VIEW inner-joins a singleton control row (`machine_interfaces_deletion` id=1); manual lease cleanup had deleted it | Documented in the deployment guide: never delete lease rows manually, and the restore statement |
 | 8 | Machines never created: admin pool exhausted | Real demand is OOB = `hosts×(1+dpus)` and admin = `hosts×(dpus+1)` (one host-PF IP per DPU **plus one per host at creation**); usable = `2^(32-mask) − reserve_first − 1` | Demand formulas in the deployment guide's DHCP Address Space; `nico-core-simulation.yaml` sizes the segments for 4,500 hosts x 2 DPUs |
 

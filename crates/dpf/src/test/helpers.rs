@@ -34,7 +34,11 @@ use crate::crds::dpus_generated::*;
 use crate::error::DpfError;
 use crate::repository::{DpfOperatorConfigRepository, DpuRepository, K8sConfigRepository};
 
-pub(super) const DPF_VERSION: &str = "26.8.0";
+pub(super) static DPF_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let manifest: toml::Value =
+        toml::from_str(include_str!("../../../../helm-prereqs/dpf-versions.toml")).unwrap();
+    manifest["version"].as_str().unwrap().to_string()
+});
 
 pub(super) struct Collector<T> {
     pub(super) items: Mutex<Vec<T>>,

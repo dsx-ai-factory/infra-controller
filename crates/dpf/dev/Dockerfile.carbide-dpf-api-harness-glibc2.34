@@ -54,6 +54,7 @@ RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo/ .cargo/
 COPY pxe/ipxe/local/embed.ipxe pxe/ipxe/local/embed.ipxe
+COPY helm-prereqs/dpf-versions.toml helm-prereqs/dpf-versions.toml
 
 # Verify workspace structure
 RUN grep -q '^\[workspace\]' Cargo.toml && \

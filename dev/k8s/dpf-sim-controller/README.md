@@ -54,9 +54,10 @@ simulator walks. The real operator's per-phase logic lives in
 It is not importable (`internal/`), but it is the definitive reference for
 entry/exit criteria of each phase.
 
-> **Pin the dependency** to the doca-platform release whose CRDs match the ones
-> NICo ships in `crates/dpf/crds/*.yaml`, not `public-main`, so the simulator's
-> types and the installed CRDs cannot skew.
+> **The dependency is pinned** to a doca-platform release tag, not
+> `public-main`. The pin is older than the CRDs NICo ships in
+> `crates/dpf/crds/*.yaml`. Refer to
+> [Independence from the real DPF operator](#independence-from-the-real-dpf-operator-and-setupsh).
 
 ## The NICo ⇄ DPF contract this reproduces
 
@@ -67,7 +68,7 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPUNode CR name | `node-{dpf_id}` (`dpf_id` = host BMC MAC, `:`→`-`) | NICo creates |
 | DPUDevice CR name | `device-{device_id}` | NICo creates |
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
-| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
+| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v30.0.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
 | host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
@@ -125,9 +126,11 @@ status and fight.
 The simulator's Go types stay pinned to doca-platform **v26.4.0** (`go.mod`),
 the release it reproduces. This simulator is an exception to the matching-release
 guidance above: its CRDs must accept v26.4.0 objects, but can come from a newer
-release. The newer CRDs in `crates/dpf/crds/` share the fields the simulator
-uses. It handles `DPFOperatorConfig` as unstructured data because the shipped
-CRD requires `spec.deploymentMode`, which the v26.4.0 types do not provide.
+release. The CRDs in `crates/dpf/crds/` are v30.0.0 and share the fields the
+simulator uses. It handles `DPFOperatorConfig` as unstructured data because the
+shipped CRD requires `spec.deploymentMode`, which the v26.4.0 types do not
+provide. The version the simulator reports does not follow this pin. Refer to
+[The operator config NICo reads at startup](#the-operator-config-nico-reads-at-startup).
 
 ## The operator config NICo reads at startup
 
@@ -143,9 +146,11 @@ version. A simulated site has neither, so the simulator provides both:
   `crates/dpf/crds/` requires: `deploymentMode: zero-trust` and the Redfish
   install interface that mode needs. Nothing reads that spec on a simulated
   site.
-- It keeps `status.version` at `v26.4.0`, the release the simulator
-  reproduces. NICo treats versions from 26.8.0 as supporting per-DPU BMC
-  credential Secrets, and the simulator reads only the shared Secret.
+- It keeps `status.version` at `v30.0.0`, the version in
+  `helm-prereqs/dpf-versions.toml`. nico-api exits at startup when the
+  reported version is lower, so build the simulator from the same revision as
+  nico-api. `helm-prereqs/tests/doca-platform-pin_test.sh` fails when the two
+  differ.
 - It checks when it starts and every 30 seconds after that, so a deleted
   object comes back. A failed check is logged and retried, and the DPU walk
   continues meanwhile.
@@ -163,6 +168,38 @@ restarts it until the version is there. The Core install in
 then fails. `helm-prereqs/clean.sh` deletes `dpf-operator-system` and the
 DPF CRDs, and the simulator and the object with them, so deploy the simulator
 again before the next `setup.sh`. `make undeploy` leaves the object in place.
+
+## Per-DPU BMC credentials
+
+NICo treats versions from 26.8.0 as supporting one BMC credential Secret per
+DPU (`crates/dpf/src/sdk/version.rs`). With the simulator at `v30.0.0`,
+nico-api does the following for every DPUDevice it creates:
+
+- It creates an immutable Secret in the DPF namespace, named
+  `<device-id>-initial` or `<device-id>-v<version>`, with the DPU BMC password
+  under the key `password`.
+- It sets `spec.bmcCredentialSecretName` on the DPUDevice to that name.
+- It deletes these Secrets when the host is deleted, decommissioned, or reset.
+
+A force-delete of a host with DPUs returns `all_done: false` until the DPF
+objects of the host and these Secrets are gone, so it takes more than one call.
+`nico-admin-cli machine force-delete` repeats the call. machine-a-tron sends one
+call and does not read the result, so keep `machineATron.cleanupOnQuit` at its
+default `false`.
+
+The simulator does not reproduce the operator's part:
+
+- It does not read the per-DPU Secrets. The optional Redfish install logs in
+  with the shared `bmc-shared-password` Secret, which NICo still writes. A DPU
+  BMC whose password differs from the shared one rejects that login, and the
+  DPU moves to `Error`.
+- It does not write `status.bmcCredentialSecretName` or the
+  `BMCCredentialsReady` condition on the DPUDevice. NICo's BMC credential
+  rotation for a host ingested through DPF waits for both. Leave
+  `bmc_rotation_enabled` off and do not request a forced BMC rotation on a
+  simulated site.
+- It does not set the BlueField-4 `service` account password. The operator
+  sets it from the same Secret, so NICo skips it from 26.8.0.
 
 ## Quick start (against a machine-a-tron cluster)
 
@@ -377,7 +414,9 @@ Secret directly, not through the cache, and the Role grants `get` on that name
 only, so a custom `--bmc-secret-name` needs the name in
 `config/rbac/role.yaml` as well. TLS verification is skipped, as in the
 operator's basic-auth client: DPU BMCs and machine-a-tron's mock BMCs serve
-self-signed certificates. The operator's mTLS client is not reproduced.
+self-signed certificates. The operator's mTLS client is not reproduced. The
+Redfish install does not use a per-DPU Secret. Refer to
+[Per-DPU BMC credentials](#per-dpu-bmc-credentials).
 
 **Network path on a machine-a-tron cluster.** machine-a-tron's controller
 publishes every mock BMC as a Service whose `externalIPs` is the BMC address

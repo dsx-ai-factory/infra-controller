@@ -2,12 +2,13 @@ module github.com/nvidia/infra-controller/dev/k8s/dpf-sim-controller
 
 go 1.27.3
 
-// doca-platform is pinned to the DPF v26.4.0 release installed on the target
-// cluster (nvcr.io/nvidia/doca/dpf-system:v26.4.0, per PR #3578), matching the
-// CRDs NICo ships in crates/dpf/crds/*.yaml. The module tags as v26.4.0 but its
-// module path is unversioned (github.com/nvidia/doca-platform), so Go must
-// reference it by the pseudo-version at that tag's commit (8551df0d3ac4,
-// 2026-06-13). Bump both in lockstep with the DPF version setup.sh installs.
+// doca-platform is pinned to the DPF v26.4.0 release for its Go types. The
+// module tags as v26.4.0 but its module path is unversioned
+// (github.com/nvidia/doca-platform), so Go must reference it by the
+// pseudo-version at that tag's commit (8551df0d3ac4, 2026-06-13). The CRDs in
+// crates/dpf/crds and the release setup.sh installs are v30.0.0, and the
+// simulator uses only fields both have. Moving the pin is part of
+// https://github.com/dsx-ai-factory/infra-controller/issues/9384.
 require (
 	github.com/nvidia/doca-platform v0.0.0-20260613043527-8551df0d3ac4
 	k8s.io/api v0.34.1

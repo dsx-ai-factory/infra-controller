@@ -148,16 +148,13 @@ func TestOperatorConfigKeeperEnsure(t *testing.T) {
 				t.Errorf("status.conditions = %#v, want %#v", got, tc.wantConditions)
 			}
 			// nico-api reads this object by these literals and parses the
-			// version as semver after a leading "v". Releases from 26.8.0
-			// select per-DPU BMC credentials, which the simulator lacks.
+			// version as semver after a leading "v".
 			if got, want := cfg.GetAPIVersion()+" "+cfg.GetKind()+" "+cfg.GetName(), "operator.dpu.nvidia.com/v1alpha1 DPFOperatorConfig dpfoperatorconfig"; got != want {
 				t.Errorf("object = %q, want %q", got, want)
 			}
 			var major, minor, patch int
 			if _, err := fmt.Sscanf(version, "v%d.%d.%d", &major, &minor, &patch); err != nil || fmt.Sprintf("v%d.%d.%d", major, minor, patch) != version {
 				t.Errorf("status.version = %q, want vMAJOR.MINOR.PATCH", version)
-			} else if major > 26 || (major == 26 && minor >= 8) {
-				t.Errorf("status.version = %q, want a release below 26.8.0", version)
 			}
 			if !reflect.DeepEqual(writes, tc.wantWrites) {
 				t.Errorf("writes = %v, want %v", writes, tc.wantWrites)

@@ -28,8 +28,10 @@
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables:    presence and format
 #   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
-#                                Core VIP validation also needs python3 + PyYAML;
-#                                --skip-vault also a TOML parser (3.11 tomllib or tomli)
+#                                Core VIP validation and the DPF CoreDNS
+#                                default also need python3 + PyYAML.
+#                                The default DPF image tag and --skip-vault
+#                                also need a TOML parser (3.11 tomllib or tomli)
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
 #   3b. Site values completeness: no placeholder or empty required value
 #   3c. Core values (--skip-vault): nothing in them makes nico-api need a Vault
@@ -44,6 +46,12 @@
 #   4f. --skip-vault consumers:    Deployments and Certificates that still reference
 #                                Vault and that this run does not redeploy keep the
 #                                Vault resources in nico-prereqs (warning)
+#   4g. DPF upgrade source:      an installed DPF operator is on a release the
+#                                operator this run installs upgrades from
+#                                (warning: the installed version cannot be read,
+#                                the DPFOperatorConfig has no status.version, or
+#                                status.version is a prerelease of the operator
+#                                image tag)
 #   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
 #   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
 #   7. Per-node checks:          kernel params (sysctl) and DNS on every node
@@ -510,6 +518,91 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
     ERRORS+=("KUBECONFIG='${KUBECONFIG}' does not exist — check the path to your cluster kubeconfig")
 fi
 
+# Prints nico-dhcp.config.kea.hookParameters.nameservers from core values file
+# $1. Prints nothing when the file or value is missing.
+_kea_nameservers() {
+    [[ -f "$1" ]] && command -v python3 &>/dev/null || return 0
+    python3 - "$1" <<'PY' 2>/dev/null || true
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for k in ("nico-dhcp", "config", "kea", "hookParameters", "nameservers"):
+    v = v.get(k) if isinstance(v, dict) else None
+print(v if isinstance(v, str) else "")
+PY
+}
+
+# Prints $1 with commas and runs of white space turned into single spaces.
+_space_separated() {
+    local _parts
+    read -r -a _parts <<< "${1//[,[:space:]]/ }"
+    echo "${_parts[*]:-}"
+}
+
+# Release line of the DPF operator in dpf-versions.toml, and the only other
+# line that operator upgrades from (LastReleasedDPFGAVersion in
+# NVIDIA/doca-platform internal/release/version.go). Update both with
+# dpf-versions.toml. tests/dpf-versions_test.sh checks only the first.
+_DPF_PINNED_LINE="30.0"
+_DPF_UPGRADE_SOURCE_LINE="26.8"
+
+# Sets _DPF_TARGET_TAG to the operator image tag setup.sh installs:
+# NICO_DPF_IMAGE_TAG, or the version in dpf-versions.toml, which needs a TOML
+# parser. Records an error and leaves it empty when that cannot be read.
+_resolve_dpf_target_tag() {
+    local _version
+    _DPF_TARGET_TAG="${NICO_DPF_IMAGE_TAG:-}"
+    [[ -z "${_DPF_TARGET_TAG}" ]] || return 0
+    if command -v python3 &>/dev/null \
+        && _version="$(python3 "${SCRIPT_DIR}/read-dpf-version.py" 2>/dev/null)"; then
+        _DPF_TARGET_TAG="v${_version}"
+    else
+        ERRORS+=("DPF requires python3 with a TOML parser (Python 3.11 or later, or the tomli package) to read the default operator image tag from dpf-versions.toml - install one, set NICO_DPF_IMAGE_TAG, or pass --skip-dpf")
+    fi
+    return 0
+}
+
+# Prints "<name>:<status.version>" of the DPFOperatorConfig (the version part
+# may be empty), or nothing when the CRD or the object is absent. Fails when
+# the cluster cannot be read.
+_dpf_installed_version() {
+    local _crd
+    _crd="$(kubectl get crd dpfoperatorconfigs.operator.dpu.nvidia.com \
+        --ignore-not-found -o name 2>/dev/null)" || return 1
+    [[ -n "${_crd}" ]] || return 0
+    kubectl get dpfoperatorconfigs.operator.dpu.nvidia.com dpfoperatorconfig \
+        -n dpf-operator-system --ignore-not-found \
+        -o jsonpath='{.metadata.name}:{.status.version}' 2>/dev/null
+}
+
+# Records an error when the installed DPF operator is on a release line that
+# the operator this run installs ($1, its image tag) does not upgrade from.
+# Warns when the installed version cannot be read, when the DPFOperatorConfig
+# reports no status.version, or when it reports a prerelease of $1, which
+# nico-api treats as below it. A tag on another release line, or without a
+# release, is left to that operator's own validation.
+_check_dpf_upgrade_source() {
+    local _target="$1" _state _installed
+    [[ "${_target#v}" == "${_DPF_PINNED_LINE}."* ]] || return 0
+    if ! _state="$(_dpf_installed_version)"; then
+        WARNINGS+=("Could not read DPFOperatorConfig dpf-operator-system/dpfoperatorconfig to check the installed DPF version - the ${_target} operator upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+        return 0
+    fi
+    [[ -n "${_state}" ]] || return 0
+    _installed="${_state#*:}"
+    if [[ -z "${_installed}" ]]; then
+        WARNINGS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig has no status.version, so the installed DPF version cannot be checked - the ${_target} operator upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+        return 0
+    fi
+    case "${_installed#v}" in
+        "${_target#v}-"*)
+            WARNINGS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version), a prerelease of ${_target} - nico-api treats a prerelease as below ${_target} by semver precedence and does not start on it, so the ${_target} operator must finish its upgrade first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+            return 0 ;;
+        "${_DPF_PINNED_LINE}."* | "${_DPF_UPGRADE_SOURCE_LINE}."*) return 0 ;;
+    esac
+    ERRORS+=("DPFOperatorConfig dpf-operator-system/dpfoperatorconfig reports DPF ${_installed} (status.version). The ${_target} operator that setup.sh installs upgrades only from v${_DPF_UPGRADE_SOURCE_LINE}.x and v${_DPF_PINNED_LINE}.x. A DPF older than v${_DPF_UPGRADE_SOURCE_LINE}.x would stay at its version and nico-api would not start - in that case upgrade DPF to v${_DPF_UPGRADE_SOURCE_LINE}.x first (docs/manuals/upgrade.md, section \"DPF Upgrade Source\")")
+    return 0
+}
+
 # A phase that installs from a pinned helm-prereqs/<name> submodule needs git
 # and a record of the pinned commit: the gitlink in a git checkout of this
 # repository, or the helm-prereqs/<name>.pin file shipped with the packaged
@@ -559,10 +652,20 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     fi
     command -v envsubst &>/dev/null || \
         ERRORS+=("DPF requires 'envsubst' (gettext) to render DPF manifests — install it, or pass --skip-dpf")
+    _resolve_dpf_target_tag
     [[ -z "${NICO_DPF_DPU_INTERFACE:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
+    # The DPU cluster CoreDNS otherwise forwards to the host node's resolv.conf,
+    # which usually does not serve the .forge zone. Default to the DHCP resolver.
+    # Kept in a private variable so that sourcing this file does not turn the
+    # default into an override in the operator's shell.
+    _DPF_COREDNS_UPSTREAM="$(_space_separated "${NICO_DPF_COREDNS_UPSTREAM:-}")"
+    [[ -n "${_DPF_COREDNS_UPSTREAM}" ]] || \
+        _DPF_COREDNS_UPSTREAM="$(_space_separated "$(_kea_nameservers "${_CORE_VALUES_CFG}")")"
+    [[ -z "${_DPF_COREDNS_UPSTREAM}" ]] && \
+        ERRORS+=("NICO_DPF_COREDNS_UPSTREAM is not set and no nico-dhcp.config.kea.hookParameters.nameservers value was found in ${_CORE_VALUES_LABEL} - set nameservers there (reading the file needs python3 with PyYAML), pass --core-values <file>, or export NICO_DPF_COREDNS_UPSTREAM    (resolver serving .forge for the DPU cluster CoreDNS; required unless --skip-dpf)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi
@@ -1416,6 +1519,13 @@ if [[ "${_CLUSTER_REACHABLE}" == "true" ]]; then
     # 4f. --skip-vault consumers this run does not redeploy (see the function).
     # -----------------------------------------------------------------------
     _check_skip_vault_consumers_not_redeployed
+
+    # -----------------------------------------------------------------------
+    # 4g. DPF upgrade source (see the function).
+    # -----------------------------------------------------------------------
+    if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
+        _check_dpf_upgrade_source "${_DPF_TARGET_TAG:-}"
+    fi
 
     # -----------------------------------------------------------------------
     # 5. Node resources — at least 3 schedulable nodes required

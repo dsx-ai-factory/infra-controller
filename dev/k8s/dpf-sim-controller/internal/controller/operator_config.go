@@ -17,11 +17,11 @@ import (
 	"github.com/nvidia/infra-controller/dev/k8s/dpf-sim-controller/internal/carbide"
 )
 
-// simulatedOperatorVersion is the DPF release the simulator reproduces, the
-// doca-platform version pinned in go.mod. NICo treats versions from 26.8.0 as
-// supporting per-DPU BMC credential Secrets (crates/dpf/src/sdk/version.rs).
-// The simulator reads only the shared Secret.
-const simulatedOperatorVersion = "v26.4.0"
+// simulatedOperatorVersion is the DPF release the simulator reports as
+// installed. It equals the version in helm-prereqs/dpf-versions.toml, which
+// nico-api requires at startup (helm-prereqs/tests/doca-platform-pin_test.sh).
+// README.md lists what the simulator reproduces of that release.
+const simulatedOperatorVersion = "v30.0.0"
 
 // operatorConfigInterval is the default time between checks of the
 // DPFOperatorConfig and the deadline of each check.
@@ -41,7 +41,7 @@ var dpfOperatorConfigGVK = schema.GroupVersionKind{
 // neither.
 //
 // The keeper creates the object when it is absent and keeps status.version at
-// the release the simulator reproduces. It removes any Ready condition from
+// simulatedOperatorVersion. It removes any Ready condition from
 // the status, including one a real operator left, which keeps NICo's scan for
 // outdated DPUs off. It never changes the spec or the other conditions of an
 // existing object.

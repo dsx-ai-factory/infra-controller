@@ -13,9 +13,9 @@ agnostic to the specific cluster implementation (kubeadm, k3s, RKE2, managed clo
 conformant cluster that satisfies the DPF prerequisites is acceptable.
 
 This guide is **not a replacement** for the official DPF documentation. The
-authoritative source for installing and configuring DPF is the [upstream guide](https://docs.nvidia.com/networking/display/dpf26041).
+authoritative source for installing and configuring DPF is the [upstream guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/dpf-zero-trust.md).
 
-NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://docs.nvidia.com/networking/display/dpf26041/hbn-in-dpf-zero-trust).
+NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/user-guides/zero-trust/use-cases/hbn/README.md).
 
 Distinguish managed-host DPUs from DPUs in the site controller nodes. NICo
 does not provision the site controller's own DPUs. Provision those separately
@@ -78,10 +78,10 @@ The following table maps the sections on this page to what the run does:
 | §1.1 [Namespace](#11-create-the-dpf-operator-namespace) | Creates `dpf-operator-system`. |
 | §1.2 [Secrets](#12-image-pull-and-helm-repository-credentials) | Creates `hbn-user-password` (generated once), `dpf-pull-secret` / `nico-pull-secret` (from `NICO_DPF_NGC_API_KEY` / `NICO_DPF_NICO_NGC_API_KEY`, defaulting to `REGISTRY_PULL_SECRET`), and the three Argo CD repository Secrets (GA repo URLs; override with `NICO_DPF_HELM_REPO_OCI/HTTPS/CARBIDE`). |
 | §1.4 [Cert-manager policy](#14-cert-manager-policy-and-rbac-for-dpf) | Applied only when the approver-policy CRD exists. The stock helm-prereqs cert-manager does **not** run approver-policy, so this is normally skipped. |
-| [Prerequisites](#1-prerequisites) (Argo CD, Kamaji, NFD, maintenance-operator) | Installed from `helm-prereqs/helmfile.yaml` with versions/values pinned from `doca-platform deploy/helmfiles/prereqs.yaml`; cert-manager and local-path-provisioner are reused from the base install.<br/><br/>Kamaji has a cold-start deadlock (its controller needs the `default` DataStore, whose admission webhook the controller itself serves) — setup.sh breaks it automatically. Note: upstream pins cert-manager v1.19.3 while helm-prereqs ships v1.17.1 — a known, compatible skew. |
-| §2 [Operator install](#2-dpf-installation) | Installs `deploy/charts/dpf-operator` from a `NVIDIA/doca-platform` checkout at the reviewed commit this repository pins (currently `v26.4.0`). Two source paths enforce that commit: the `helm-prereqs/doca-platform` git submodule in a git checkout (initialized automatically), or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged `nico-prereqs` chart. `NICO_DPF_SRC` overrides both with an operator-managed local checkout (air-gapped sites); keep it at the pinned commit, because setup.sh installs whatever it contains and only warns when its HEAD differs from the pin.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_IMAGE_TAG` (defaults to the pinned release; override the repository with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default - a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
+| [Prerequisites](#1-prerequisites) (Argo CD, Kamaji, NFD, maintenance-operator) | Installed with the versions and values in `helm-prereqs/helmfile.yaml`. Setup reuses cert-manager and local-path-provisioner from the base install.<br/><br/>Kamaji has a cold-start deadlock because its controller needs the `default` DataStore and serves its admission webhook. Setup breaks the deadlock automatically.<br/><br/>Kamaji follows the DPF v30.0.0 prerequisite list. That list also names cert-manager v1.21.1, Argo CD 10.2.2, maintenance-operator 0.4.0, and NFD 0.19.0. helm-prereqs ships cert-manager v1.17.1, Argo CD 9.4.1, maintenance-operator 0.3.0, and NFD 0.18.3. |
+| §2 [Operator install](#2-dpf-installation) | Installs `deploy/charts/dpf-operator` from a `NVIDIA/doca-platform` checkout at the reviewed commit this repository pins. Two source paths enforce that commit: the `helm-prereqs/doca-platform` git submodule in a git checkout (initialized automatically), or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged `nico-prereqs` chart. `NICO_DPF_SRC` overrides both with an operator-managed local checkout (air-gapped sites); keep it at the pinned commit, because setup.sh installs whatever it contains and only warns when its HEAD differs from the pin.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_IMAGE_TAG` (the tag defaults to the version in `helm-prereqs/dpf-versions.toml`, and `NICO_DPF_IMAGE_REPO` overrides the repository).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default - a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
-| §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
+| §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set, CoreDNS upstream from the Kea `nameservers` value unless `NICO_DPF_COREDNS_UPSTREAM` is set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
 | §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret after deployment is accepted and configures local ownership before that rollout. Declining deployment leaves the Secret untouched. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
 
 [Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
@@ -116,7 +116,7 @@ The DPF operator, Kamaji `DPUCluster`, and carbide-api all come up, but `DPFOper
 
 ## 1. Prerequisites
 
-The official DPF guide lists a set of [cluster-level prerequisites](https://docs.nvidia.com/networking/display/dpf26041/helm-prerequisites) (Argo CD, cert-manager, Kamaji etc.). Follow that guide for those components.
+The official DPF guide lists a set of [cluster-level prerequisites](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/helm-prerequisites.md) (Argo CD, cert-manager, Kamaji etc.). Follow that guide for those components.
 
 NICo reuses several of those same components (notably Argo CD and cert-manager). If they are already installed for NICo, **do not reinstall them** — only configure the missing pieces and adapt the existing installations so DPF can use them. The subsections below cover the prerequisite configuration that is specific to a NICo + DPF deployment.
 
@@ -132,7 +132,7 @@ kubectl get namespace dpf-operator-system &>/dev/null \
 
 ### 1.2. Image pull and helm repository credentials
 
-Access to the DPF staging Helm chart and related container images requires authentication through NVIDIA NGC. Both the DPF operator and the workloads it deploys will need credentials for pulling Helm charts and container images from private registries. Refer to the [Using Private Registries](https://docs.nvidia.com/networking/display/dpf26041/using-private-registries) section of the DPF documentation for detailed instructions.
+Access to the DPF staging Helm chart and related container images requires authentication through NVIDIA NGC. Both the DPF operator and the workloads it deploys will need credentials for pulling Helm charts and container images from private registries. Refer to the [Using Private Registries](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/advanced-configuration/using-private-registries.md) section of the DPF documentation for detailed instructions.
 
 #### 1.2.a. `hbn-user-password` Secret
 
@@ -374,31 +374,35 @@ Without this binding cert-manager's controller cannot reference the policy and
 
 ## 2. DPF Installation
 
-Follow the [upstream DPF installation guide](https://docs.nvidia.com/networking/display/dpf26041) for the actual install procedure.
+Follow the [upstream DPF installation guide](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/getting-started/dpf-zero-trust.md) for the actual install procedure.
+Install the version in `helm-prereqs/dpf-versions.toml`, as the examples below
+do. The commands in the upstream guides name v26.8.0, which NICo does not accept.
 
-When installing the DPF operator chart, two parameter overrides are required
-for a NICo-integrated deployment. The example command below illustrates how to
-set them:
+Run these examples from the repository root. The version reader requires
+Python 3.11 or later, or Python 3 with the `tomli` package installed.
+
+To install the chart published in the NGC Helm repository:
 
 ```bash
-# From the NGC helm repository:
 REGISTRY="https://helm.ngc.nvidia.com/nvidia/doca"
-TAG="v26.4.0"
-helm repo add --force-update dpf-repository $REGISTRY
-helm repo update
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
+helm repo add --force-update dpf-repository "$REGISTRY" &&
+helm repo update &&
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
-  dpf-operator dpf-repository/dpf-operator --version=$TAG
+  dpf-operator dpf-repository/dpf-operator --version="v${DPF_VERSION}"
+```
 
-# Or from the helm-prereqs/doca-platform submodule at its pinned commit
-# (what setup.sh does by default; run from the repository root). The source
-# chart ships an empty controllerManager.image, so the image must be set:
+Alternatively, install from the pinned `helm-prereqs/doca-platform` submodule,
+as `setup.sh` does by default. The source chart requires explicit image settings.
+
+```bash
 NICO_DPF_IMAGE_REPO="nvcr.io/nvidia/doca/dpf-system"
-NICO_DPF_IMAGE_TAG="v26.4.0"
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
   --set "controllerManager.image.repository=$NICO_DPF_IMAGE_REPO" \
-  --set "controllerManager.image.tag=$NICO_DPF_IMAGE_TAG" \
+  --set "controllerManager.image.tag=v${DPF_VERSION}" \
   dpf-operator ./helm-prereqs/doca-platform/deploy/charts/dpf-operator
 ```
 
@@ -418,9 +422,7 @@ NICo-specific notes on the parameters:
   leaves the operator image empty (CI stamps it when publishing to NGC), so
   `setup.sh` sets them from `NICO_DPF_IMAGE_REPO` (default
   `nvcr.io/nvidia/doca/dpf-system`) and `NICO_DPF_IMAGE_TAG` (default
-  `v26.4.0`, the pinned release). The published NGC chart already carries them.
-
-Adjust `REGISTRY` and `TAG` to the version of DPF you are deploying.
+  the version in `helm-prereqs/dpf-versions.toml`). The published NGC chart already carries them.
 
 ---
 
@@ -564,6 +566,7 @@ metadata:
   name: dpfoperatorconfig
   namespace: dpf-operator-system
 spec:
+  deploymentMode: zero-trust
   dpuDetector:
     disable: true
   provisioningController:
@@ -580,6 +583,9 @@ spec:
     argoCDNamespace: argocd
   kamajiClusterManager:
     disable: false
+  coreDNS:
+    # Replace with the resolver that serves the .forge zone, for example the Unbound VIP
+    upstreamNameservers: "REPLACE_ME"
   networking:
     highSpeedMTU: 9000
   imagePullSecrets:
@@ -590,6 +596,7 @@ Field-by-field:
 
 | Field | Meaning |
 | --- | --- |
+| `deploymentMode: zero-trust` | Required by DPF for Redfish provisioning. DPF treats the mode as immutable once set. |
 | `dpuDetector.disable: true` | DPF normally polls hosts to discover new DPUs. NICo disables auto-discovery because DPUs are fed in via `DPUSet` CRs from the orchestrator. |
 | `provisioningController.osInstallTimeout: "90m"` | Total budget for the OS install flow per DPU. |
 | `provisioningController.installViaRedfish` | Provision DPUs by talking Redfish to the host BMC (vs. PXE-based). |
@@ -598,6 +605,7 @@ Field-by-field:
 | `overrides.kubernetesAPIServerPort` | Host-cluster API-server port (`6443` by default). |
 | `overrides.argoCDNamespace` | Namespace where Argo CD is installed. |
 | `kamajiClusterManager.disable: false` | Use Kamaji as the DPU control plane. |
+| `coreDNS.upstreamNameservers` | Resolvers that the DPU cluster CoreDNS forwards to for names outside the cluster domain. The value is a space-separated string. Without it, CoreDNS uses `/etc/resolv.conf` of the host node it runs on, which usually cannot resolve `carbide-pxe.forge` and the other `.forge` names. Set it to the same resolver that DPUs get from DHCP (`nico-dhcp.config.kea.hookParameters.nameservers`). CoreDNS spreads queries across all listed resolvers, so each one must serve the `.forge` zone. |
 | `networking.highSpeedMTU: 9000` | Jumbo frames on the high-speed fabric. |
 | `imagePullSecrets: dpf-pull-secret` | Pull Secret inserted into every DPUService spawned by the operator. |
 
@@ -1407,10 +1415,7 @@ without a restart. This refresh is not a safe rotation mechanism.
 If the current rotation target is absent from its authoritative credential
 source, a fresh site leaves the derived Secret unwritten. Once NICo has
 published a value, it retains that last value and logs an error until the
-credential returns. Restore the expected credential. The default pinned DPF
-v26.4.0 does not support BMC credential rotation, so NICo retains the shared
-Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). A transient
+credential returns. Restore the expected credential. A transient
 source-read failure during background refresh likewise retains the last
 published Secret and retries the read.
 
