@@ -91,11 +91,14 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 	git && \
 	rm -rf /var/lib/apt/lists/*
 
-# Overwrite vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
-COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /usr/lib/x86_64-linux-gnu/libfreeipmi.so.17.2.18
-RUN cd /usr/lib/x86_64-linux-gnu && \
-	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
-	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+# Replace vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
+# Copy all source-built libraries, purge Debian packages so scanners no
+# longer report the old version, then re-link with ldconfig.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
+RUN dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
+	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
+		-exec cp {} /usr/lib/x86_64-linux-gnu/ \; && \
+	rm -rf /tmp/freeipmi-libs && \
 	ldconfig
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \

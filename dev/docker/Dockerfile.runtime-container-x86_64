@@ -79,7 +79,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		libprotoc32 \
 		libssh-4 \
 		libudev1 \
-		nginx \
+		nginx=1.22.1-9+deb12u11 \
 		openipmi \
 		openssh-client \
 		openssh-server \
@@ -88,15 +88,15 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
 
-# Overwrite vulnerable Debian-packaged freeipmi 1.6.10 (CVE-2026-85506,
+# Replace vulnerable Debian-packaged freeipmi 1.6.10 (CVE-2026-85506,
 # CVE-2026-85509, CVE-2026-85508, CVE-2026-85504, CVE-2026-85507) with
-# source-built 1.6.20. The source build installs to /usr/lib/ but Debian's
-# multiarch path (/usr/lib/<arch>/) takes precedence, so we copy the new
-# .so into the multiarch directory and re-link.
-COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/libfreeipmi.so.17.2.18 /usr/lib/x86_64-linux-gnu/libfreeipmi.so.17.2.18
-RUN cd /usr/lib/x86_64-linux-gnu && \
-	rm -f libfreeipmi.so.17.2.9 libfreeipmi.so.17 && \
-	ln -sf libfreeipmi.so.17.2.18 libfreeipmi.so.17 && \
+# source-built 1.6.20. Copy all source-built libraries, purge Debian
+# packages so scanners no longer report the old version, then re-link.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
+RUN dpkg --purge --force-depends libfreeipmi17 freeipmi-common libipmimonitoring6 || true && \
+	find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
+		-exec cp {} /usr/lib/x86_64-linux-gnu/ \; && \
+	rm -rf /tmp/freeipmi-libs && \
 	ldconfig
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \
