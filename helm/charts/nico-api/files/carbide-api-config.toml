@@ -47,6 +47,11 @@ dpu_nic_firmware_reprovision_update_enabled = true
 dpu_nic_firmware_update_versions = ["24.47.3576", "32.47.3576"]
 # Number of VFs configured per DPU PF during BlueField provisioning.
 num_of_vfs = 16
+# When true, DPUFlavor nvconfig includes persistent RoCE firmware settings
+# matching NIC Configuration Operator roceOptimized (ROCE_CC_PRIO_MASK /
+# CNP_DSCP / CNP_802P_PRIO). Does not apply runtime PFC/trust/ToS.
+# BF3 GB200 skips these parameters (already at the 32-parameter DPF cap).
+#roce_optimized_firmware = false
 
 [host_health]
 hardware_health_reports = "MonitorOnly"

@@ -20,7 +20,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use carbide_libmlx_model::nvconfig::{DpuNvConfigProfile, GB200_B3240_V1_PF_TOTAL_SF};
+use carbide_libmlx_model::nvconfig::{
+    append_roce_optimized_firmware_parameters, DpuNvConfigProfile, GB200_B3240_V1_PF_TOTAL_SF,
+};
 use kube::core::ObjectMeta;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -48,6 +50,8 @@ use crate::types::{
 };
 
 pub const DEFAULT_FLAVOR_NAME: &str = "dpu-flavor";
+/// DPF v26.4 accepts at most this many NVConfig parameters per flavor entry.
+pub const MAX_DPF_NVCONFIG_PARAMETERS: usize = 32;
 /// Directory containerd reads per-registry host configuration from.
 const CONTAINERD_CERTS_DIR: &str = "/etc/containerd/certs.d";
 const DELAY_HOST_OS_INIT_PARAMETER: &str = "DELAY_HOST_OS_INIT=0x3";
@@ -768,6 +772,7 @@ pub fn default_flavor_for(
         deployment_type,
         DEFAULT_DPU_NUM_OF_VFS,
         pf_total_sf,
+        false,
         None,
         None,
         ServiceVpcSlots::default(),
@@ -793,6 +798,7 @@ pub(crate) fn default_flavor_for_with_topology(
     deployment_type: DpuDeploymentType,
     num_of_vfs: u32,
     pf_total_sf: u32,
+    roce_optimized_firmware: bool,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
     service_vpc_slots: ServiceVpcSlots,
@@ -807,6 +813,7 @@ pub(crate) fn default_flavor_for_with_topology(
             registry_mirrors,
             num_of_vfs,
             pf_total_sf,
+            roce_optimized_firmware,
             intercept_bridging,
             dhcp_acl_interfaces,
             service_vpc_slots,
@@ -824,6 +831,7 @@ pub(crate) fn default_flavor_for_with_topology(
             deployment_type,
             num_of_vfs,
             pf_total_sf,
+            roce_optimized_firmware,
             intercept_bridging,
             dhcp_acl_interfaces,
             service_vpc_slots,
@@ -853,6 +861,7 @@ pub fn flavor_bf4(
         &[],
         DEFAULT_DPU_NUM_OF_VFS,
         DEFAULT_PF_TOTAL_SF_RESERVED,
+        false,
         None,
         None,
         ServiceVpcSlots::default(),
@@ -871,6 +880,7 @@ fn flavor_bf4_with_topology(
     registry_mirrors: &[DpfRegistryMirror],
     num_of_vfs: u32,
     pf_total_sf: u32,
+    roce_optimized_firmware: bool,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
     service_vpc_slots: ServiceVpcSlots,
@@ -909,9 +919,10 @@ fn flavor_bf4_with_topology(
             nvconfig: Some(vec![get_bf4_nvconfig(
                 num_of_vfs,
                 pf_total_sf,
+                roce_optimized_firmware,
                 enable_delay_host_init,
                 enable_pci_switch_emulation,
-            )]),
+            )?]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
                 raw_config_script: Some(get_bf4_ovs_defaults_with_topology(
                     intercept_bridging,
@@ -1185,6 +1196,7 @@ pub fn default_flavor(
         DpuDeploymentType::Bf3,
         DEFAULT_DPU_NUM_OF_VFS,
         DEFAULT_PF_TOTAL_SF_RESERVED,
+        false,
         None,
         None,
         ServiceVpcSlots::default(),
@@ -1204,6 +1216,7 @@ fn default_flavor_with_topology(
     deployment_type: DpuDeploymentType,
     num_of_vfs: u32,
     pf_total_sf: u32,
+    roce_optimized_firmware: bool,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
     service_vpc_slots: ServiceVpcSlots,
@@ -1243,9 +1256,10 @@ fn default_flavor_with_topology(
                 num_of_vfs,
                 pf_total_sf,
                 deployment_type,
+                roce_optimized_firmware,
                 enable_delay_host_init,
                 enable_pci_switch_emulation,
-            )]),
+            )?]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
                 raw_config_script: Some(get_default_ovs_defaults_with_topology(
                     intercept_bridging,
@@ -1559,9 +1573,10 @@ fn ovn_encap_systemd_service() -> DpuFlavorSystemdServices {
 fn get_bf4_nvconfig(
     num_of_vfs: u32,
     pf_total_sf: u32,
+    roce_optimized_firmware: bool,
     enable_delay_host_init: bool,
     enable_pci_switch_emulation: bool,
-) -> DpuFlavorNvconfig {
+) -> Result<DpuFlavorNvconfig, crate::error::DpfError> {
     let mut parameters = vec![
         "PF_BAR2_ENABLE=0".to_string(),
         "PER_PF_NUM_SF=1".to_string(),
@@ -1585,12 +1600,17 @@ fn get_bf4_nvconfig(
         parameters.push("PCI_SWITCH_EMULATION_ENABLE=1".to_string());
     }
 
-    DpuFlavorNvconfig {
+    if roce_optimized_firmware {
+        append_roce_optimized_firmware_parameters(&mut parameters);
+        ensure_nvconfig_parameter_budget(&parameters, "BF4 generic")?;
+    }
+
+    Ok(DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
         force: None,
-    }
+    })
 }
 
 /// Returns Astra config files, deriving DHCP ACLs from a configured effective interface inventory.
@@ -1808,9 +1828,10 @@ fn get_bf3_nvconfig(
     num_of_vfs: u32,
     pf_total_sf: u32,
     deployment_type: DpuDeploymentType,
+    roce_optimized_firmware: bool,
     enable_delay_host_init: bool,
     enable_pci_switch_emulation: bool,
-) -> DpuFlavorNvconfig {
+) -> Result<DpuFlavorNvconfig, crate::error::DpfError> {
     let pf_total_sf = if deployment_type == DpuDeploymentType::Bf3Gb200 {
         GB200_B3240_V1_PF_TOTAL_SF
     } else {
@@ -1864,12 +1885,39 @@ fn get_bf3_nvconfig(
         );
     }
 
-    DpuFlavorNvconfig {
+    if roce_optimized_firmware {
+        // GB200 already fills the DPF 32-parameter NVConfig budget with the
+        // platform profile. Skip RoCE rather than failing site bring-up when
+        // BF3 and BF3-GB200 deployments share one site flag.
+        if deployment_type == DpuDeploymentType::Bf3Gb200 {
+            tracing::warn!(
+                "skipping dpu_config.roce_optimized_firmware for BF3 GB200: platform profile already uses the DPF {MAX_DPF_NVCONFIG_PARAMETERS}-parameter NVConfig limit"
+            );
+        } else {
+            append_roce_optimized_firmware_parameters(&mut parameters);
+            ensure_nvconfig_parameter_budget(&parameters, "BF3")?;
+        }
+    }
+
+    Ok(DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
         force: None,
+    })
+}
+
+fn ensure_nvconfig_parameter_budget(
+    parameters: &[String],
+    flavor: &str,
+) -> Result<(), crate::error::DpfError> {
+    if parameters.len() > MAX_DPF_NVCONFIG_PARAMETERS {
+        return Err(crate::error::DpfError::ConfigError(format!(
+            "{flavor} NVConfig has {} parameters; DPF accepts at most {MAX_DPF_NVCONFIG_PARAMETERS}",
+            parameters.len(),
+        )));
     }
+    Ok(())
 }
 
 fn nvconfig_parameter_name(parameter: &str) -> &str {
@@ -4032,6 +4080,7 @@ done
                 DpuDeploymentType::Bf3,
                 3,
                 61,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -4050,6 +4099,7 @@ done
                 &[],
                 5,
                 63,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -4104,6 +4154,7 @@ done
                         deployment_type,
                         DEFAULT_DPU_NUM_OF_VFS,
                         DEFAULT_PF_TOTAL_SF_RESERVED,
+                        false,
                         None,
                         None,
                         ServiceVpcSlots::default(),
@@ -4148,6 +4199,7 @@ done
                 deployment_type,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -4165,6 +4217,7 @@ done
                 &[],
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -4234,15 +4287,54 @@ done
     }
 
     #[test]
+    fn bf3_nvconfig_appends_roce_optimized_firmware_when_enabled() {
+        let parameters = get_bf3_nvconfig(
+            16,
+            DEFAULT_PF_TOTAL_SF_RESERVED,
+            DpuDeploymentType::Bf3,
+            true,
+            false,
+            false,
+        )
+        .unwrap()
+        .parameters
+        .unwrap();
+        assert!(parameters.contains(&"ROCE_CC_PRIO_MASK_P1=255".to_string()));
+        assert!(parameters.contains(&"CNP_DSCP_P1=4".to_string()));
+        assert!(parameters.contains(&"CNP_802P_PRIO_P1=6".to_string()));
+        assert!(parameters.len() <= MAX_DPF_NVCONFIG_PARAMETERS);
+    }
+
+    #[test]
+    fn gb200_skips_roce_optimized_firmware_due_to_nvconfig_budget() {
+        let parameters = get_bf3_nvconfig(
+            16,
+            DEFAULT_PF_TOTAL_SF_RESERVED,
+            DpuDeploymentType::Bf3Gb200,
+            true,
+            false,
+            false,
+        )
+        .unwrap()
+        .parameters
+        .unwrap();
+        assert!(!parameters.iter().any(|p| p.starts_with("ROCE_CC_PRIO_MASK_")));
+        assert!(!parameters.iter().any(|p| p.starts_with("CNP_DSCP_")));
+        assert!(!parameters.iter().any(|p| p.starts_with("CNP_802P_PRIO_")));
+        assert!(parameters.len() <= MAX_DPF_NVCONFIG_PARAMETERS);
+    }
+
+    #[test]
     fn gb200_bf3_nvconfig_appends_the_bounded_profile_in_order() {
         let parameters = |deployment_type| {
             get_bf3_nvconfig(
                 16,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
                 deployment_type,
+                false,
                 true,
                 false,
-            )
+            ).unwrap()
             .parameters
             .unwrap()
         };
@@ -4310,6 +4402,7 @@ done
             deployment_type,
             DEFAULT_DPU_NUM_OF_VFS,
             DEFAULT_PF_TOTAL_SF_RESERVED,
+            false,
             None,
             None,
             ServiceVpcSlots::default(),
@@ -4405,6 +4498,7 @@ done
             deployment_type,
             DEFAULT_DPU_NUM_OF_VFS,
             DEFAULT_PF_TOTAL_SF_RESERVED,
+            false,
             None,
             None,
             ServiceVpcSlots::default(),
@@ -4469,6 +4563,7 @@ done
                 DpuDeploymentType::Bf3,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -4521,6 +4616,7 @@ done
                 DpuDeploymentType::Bf3,
                 16,
                 DEFAULT_PF_TOTAL_SF_RESERVED + 7,
+                false,
                 Some(topology),
                 Some(&interfaces),
                 ServiceVpcSlots::default(),
@@ -5349,6 +5445,7 @@ done
                 deployment_type,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -5393,6 +5490,7 @@ done
                 DpuDeploymentType::Bf3,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                false,
                 None,
                 None,
                 ServiceVpcSlots::default(),
@@ -6349,7 +6447,8 @@ done
             DpuDeploymentType::Bf3,
             false,
             false,
-        );
+            false,
+        ).unwrap();
         value_scenarios!(
             run = |v| v;
             "device is the only allowed wildcard variant" {

@@ -1185,6 +1185,7 @@ fn build_dpf_init_config(
         )
         .services(services)
         .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
+        .roce_optimized_firmware(carbide_config.dpu_config.roce_optimized_firmware)
         .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
         .additional_managed_sf(additional_managed_sf)
         .service_vpc_slots(service_vpc_slots)
