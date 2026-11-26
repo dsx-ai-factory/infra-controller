@@ -621,7 +621,6 @@ func (ms ManageSubnet) createOrUpdateSubnetFromSite(
 			Org:                        vpc.Org,
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   reportedSubnet.DomainID,
 			TenantID:                   vpc.TenantID,
 			ControllerNetworkSegmentID: &controllerSegmentID,
 			RoutingType:                &ipBlock.RoutingType,

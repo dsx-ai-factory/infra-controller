@@ -61,6 +61,8 @@ type APIClient struct {
 
 	DHCPOptionSetAPI *DHCPOptionSetAPIService
 
+	DNSDomainAPI *DNSDomainAPIService
+
 	DPUExtensionServiceAPI *DPUExtensionServiceAPIService
 
 	DPUMachineAPI *DPUMachineAPIService
@@ -171,6 +173,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.BMCCredentialAPI = (*BMCCredentialAPIService)(&c.common)
 	c.CredentialRotationAPI = (*CredentialRotationAPIService)(&c.common)
 	c.DHCPOptionSetAPI = (*DHCPOptionSetAPIService)(&c.common)
+	c.DNSDomainAPI = (*DNSDomainAPIService)(&c.common)
 	c.DPUExtensionServiceAPI = (*DPUExtensionServiceAPIService)(&c.common)
 	c.DPUMachineAPI = (*DPUMachineAPIService)(&c.common)
 	c.DomainAPI = (*DomainAPIService)(&c.common)

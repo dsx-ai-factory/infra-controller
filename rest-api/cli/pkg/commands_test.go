@@ -1574,6 +1574,13 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 	}{
 		{name: "tray factory reset", path: []string{"tray", "factory-reset"}},
 		{name: "domain factory reset", path: []string{"domain", "nvlink", "factory-reset"}},
+		{name: "DNS Domain create", path: []string{"dns-domain", "create"}},
+		{name: "DNS Domain list", path: []string{"dns-domain", "list"}},
+		{name: "DNS Domain get", path: []string{"dns-domain", "get"}},
+		{name: "DNS Domain update", path: []string{"dns-domain", "update"}},
+		{name: "DNS Domain delete", path: []string{"dns-domain", "delete"}},
+		{name: "NVLink Domain list", path: []string{"domain", "list"}},
+		{name: "NVLink Domain get", path: []string{"domain", "get"}},
 		{name: "tenant current", path: []string{"tenant", "current"}},
 		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
 		{name: "service account current", path: []string{"service-account", "current"}},

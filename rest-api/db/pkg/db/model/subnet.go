@@ -85,8 +85,6 @@ type Subnet struct {
 	Site                       *Site      `bun:"rel:belongs-to,join:site_id=id"`
 	VpcID                      uuid.UUID  `bun:"vpc_id,type:uuid,notnull"`
 	Vpc                        *Vpc       `bun:"rel:belongs-to,join:vpc_id=id"`
-	DomainID                   *uuid.UUID `bun:"domain_id,type:uuid"`
-	Domain                     *Domain    `bun:"rel:belongs-to,join:domain_id=id"`
 	TenantID                   uuid.UUID  `bun:"tenant_id,type:uuid"`
 	Tenant                     *Tenant    `bun:"rel:belongs-to,join:tenant_id=id"`
 	ControllerNetworkSegmentID *uuid.UUID `bun:"controller_network_segment_id,type:uuid"`
@@ -149,9 +147,6 @@ func (s *Subnet) ToProto() *corev1.NetworkSegment {
 	config := &corev1.NetworkSegmentConfig{
 		VpcId: &corev1.VpcId{Value: s.VpcID.String()},
 	}
-	if s.DomainID != nil {
-		config.SubdomainId = &corev1.DomainId{Value: s.DomainID.String()}
-	}
 	if s.MTU != nil {
 		mtu := int32(*s.MTU)
 		config.Mtu = &mtu
@@ -183,10 +178,10 @@ func (s *Subnet) ToProto() *corev1.NetworkSegment {
 //   - `s.ID` is preserved on a missing or unparseable `proto.Id`,
 //     because callers pre-validate the UUID before calling.
 //   - `Name` is sourced from the structured `proto.Metadata.Name`.
-//   - Desired-configuration fields (VpcID, DomainID, MTU, prefixes) are
+//   - Desired-configuration fields (VpcID, MTU, prefixes) are
 //     read from the structured `config` only. Deprecated flat mirrors are
 //     not consulted during entity reconstruction.
-//   - Optional pointer fields (DomainID, MTU, IPv4Prefix, IPv4Gateway)
+//   - Optional pointer fields (MTU, IPv4Prefix, IPv4Gateway)
 //     are cleared when the proto omits them OR when the proto value is
 //     invalid (e.g. an unparseable UUID, an unparseable prefix). This
 //     makes `FromProto` a clean reset rather than a partial merge.
@@ -217,12 +212,6 @@ func (s *Subnet) FromProto(proto *corev1.NetworkSegment) {
 	if cfg.VpcId != nil {
 		if id, err := uuid.Parse(cfg.VpcId.Value); err == nil {
 			s.VpcID = id
-		}
-	}
-	s.DomainID = nil
-	if cfg.SubdomainId != nil {
-		if id, err := uuid.Parse(cfg.SubdomainId.Value); err == nil {
-			s.DomainID = &id
 		}
 	}
 	s.MTU = nil
@@ -328,7 +317,6 @@ type SubnetCreateInput struct {
 	Org                        string
 	SiteID                     uuid.UUID
 	VpcID                      uuid.UUID
-	DomainID                   *uuid.UUID
 	TenantID                   uuid.UUID
 	ControllerNetworkSegmentID *uuid.UUID
 	RoutingType                *string
@@ -352,7 +340,6 @@ type SubnetUpdateInput struct {
 	Org                        *string
 	SiteID                     *uuid.UUID
 	VpcID                      *uuid.UUID
-	DomainID                   *uuid.UUID
 	TenantID                   *uuid.UUID
 	ControllerNetworkSegmentID *uuid.UUID
 	IPv4Prefix                 *string
@@ -371,7 +358,6 @@ type SubnetUpdateInput struct {
 type SubnetClearInput struct {
 	SubnetId                   uuid.UUID
 	Description                bool
-	DomainID                   bool
 	ControllerNetworkSegmentID bool
 	IPv4Prefix                 bool
 	IPv4Gateway                bool
@@ -390,7 +376,6 @@ type SubnetFilterInput struct {
 	Names        []string
 	SiteIDs      []uuid.UUID
 	VpcIDs       []uuid.UUID
-	DomainIDs    []uuid.UUID
 	TenantIDs    []uuid.UUID
 	IPv4BlockIDs []uuid.UUID
 	IPv6BlockIDs []uuid.UUID
@@ -420,7 +405,6 @@ var _ bun.BeforeCreateTableHook = (*Subnet)(nil)
 func (it *Subnet) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery) error {
 	query.ForeignKey(`("site_id") REFERENCES "site" ("id")`).
 		ForeignKey(`("vpc_id") REFERENCES "vpc" ("id")`).
-		ForeignKey(`("domain_id") REFERENCES "domain" ("id")`).
 		ForeignKey(`("tenant_id") REFERENCES "tenant" ("id")`).
 		ForeignKey(`("ipv4_block_id") REFERENCES "ip_block" ("id")`).
 		ForeignKey(`("ipv6_block_id") REFERENCES "ip_block" ("id")`)
@@ -476,7 +460,6 @@ func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreat
 		Org:                        input.Org,
 		SiteID:                     input.SiteID,
 		VpcID:                      input.VpcID,
-		DomainID:                   input.DomainID,
 		TenantID:                   input.TenantID,
 		ControllerNetworkSegmentID: input.ControllerNetworkSegmentID,
 		RoutingType:                input.RoutingType,
@@ -507,7 +490,7 @@ func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreat
 }
 
 // GetByID returns a Subnet by ID
-// includeRelation can be a subset of Vpc, Domain, Tenant
+// includeRelation can be a subset of Vpc, Tenant
 // returns db.ErrDoesNotExist error if the record is not found
 func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
@@ -579,7 +562,7 @@ func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantI
 	return results, nil
 }
 
-// GetAll returns all Subnets filtering by Vpc, Domain, Tenant
+// GetAll returns all Subnets filtering by Vpc, Tenant
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SubnetOrderByDefault in ascending order
@@ -606,9 +589,6 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 	}
 	if filter.VpcIDs != nil {
 		query = query.Where("su.vpc_id IN (?)", bun.In(filter.VpcIDs))
-	}
-	if filter.DomainIDs != nil {
-		query = query.Where("su.domain_id IN (?)", bun.In(filter.DomainIDs))
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("su.tenant_id IN (?)", bun.In(filter.TenantIDs))
@@ -697,11 +677,6 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 		s.VpcID = *input.VpcID
 		updatedFields = append(updatedFields, "vpc_id")
 		cotel.SetAttribute(sbDAOSpan, attribute.String("vpc_id", input.VpcID.String()))
-	}
-	if input.DomainID != nil {
-		s.DomainID = input.DomainID
-		updatedFields = append(updatedFields, "domain_id")
-		cotel.SetAttribute(sbDAOSpan, attribute.String("domain_id", input.DomainID.String()))
 	}
 	if input.TenantID != nil {
 		s.TenantID = *input.TenantID
@@ -797,10 +772,6 @@ func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearI
 	if input.Description {
 		s.Description = nil
 		updatedFields = append(updatedFields, "description")
-	}
-	if input.DomainID {
-		s.DomainID = nil
-		updatedFields = append(updatedFields, "domain_id")
 	}
 	if input.ControllerNetworkSegmentID {
 		s.ControllerNetworkSegmentID = nil

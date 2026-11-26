@@ -245,7 +245,7 @@ func testSubnetBuildDomain(t *testing.T, dbSession *cdb.Session, hostname, org s
 }
 
 // testSubnetBuildSubnet Building Subnet in DB
-func testSubnetBuildSubnet(t *testing.T, dbSession *cdb.Session, name string, tenant *cdbm.Tenant, vpc *cdbm.Vpc, domainID *uuid.UUID, ctrlSegmentID *uuid.UUID, routingType *string, ipv4prefix *string, ipv4gateway *string, ipv4BlockID *uuid.UUID, ipBlockSize int, status string, user *cdbm.User) *cdbm.Subnet {
+func testSubnetBuildSubnet(t *testing.T, dbSession *cdb.Session, name string, tenant *cdbm.Tenant, vpc *cdbm.Vpc, ctrlSegmentID *uuid.UUID, routingType *string, ipv4prefix *string, ipv4gateway *string, ipv4BlockID *uuid.UUID, ipBlockSize int, status string, user *cdbm.User) *cdbm.Subnet {
 	subnetDAO := cdbm.NewSubnetDAO(dbSession)
 
 	subnet, err := subnetDAO.Create(context.Background(), nil, cdbm.SubnetCreateInput{
@@ -254,7 +254,6 @@ func testSubnetBuildSubnet(t *testing.T, dbSession *cdb.Session, name string, te
 		Org:                        tenant.Org,
 		SiteID:                     vpc.SiteID,
 		VpcID:                      vpc.ID,
-		DomainID:                   domainID,
 		TenantID:                   tenant.ID,
 		ControllerNetworkSegmentID: ctrlSegmentID,
 		RoutingType:                routingType,
@@ -349,7 +348,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Subnet 1 receives updates from Site Controller, namely status update
-	subnet1 := testSubnetBuildSubnet(t, dbSession, "test-subnet-1", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, cutil.GetPtr("192.0.1.0"), cutil.GetPtr("192.0.1.0"), nil, 24, cdbm.SubnetStatusProvisioning, tnu)
+	subnet1 := testSubnetBuildSubnet(t, dbSession, "test-subnet-1", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, cutil.GetPtr("192.0.1.0"), cutil.GetPtr("192.0.1.0"), nil, 24, cdbm.SubnetStatusProvisioning, tnu)
 
 	// Subnet 2 & FG is in Deleting state and gets deleted when no longer present in Site Controller inventory
 	sbPrefix, err := ipam.CreateChildIpamEntryForIPBlock(ctx, nil, dbSession, ipamStorage, ipb, 24)
@@ -358,7 +357,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	assert.NoError(t, err)
 	ipv4Gateway, err := ipam.GetFirstIPFromCidr(sbPrefix.Cidr)
 	assert.NoError(t, err)
-	subnet2 := testSubnetBuildSubnet(t, dbSession, "test-subnet-2", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 24, cdbm.SubnetStatusDeleting, tnu)
+	subnet2 := testSubnetBuildSubnet(t, dbSession, "test-subnet-2", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 24, cdbm.SubnetStatusDeleting, tnu)
 	subnet2.IPv4Block = ipb
 
 	// Full Grant subnet deletion
@@ -370,11 +369,11 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = ipam.CreateChildIpamEntryForIPBlock(ctx, nil, dbSession, ipamStorage, ipbFG, 24)
 	assert.NoError(t, err)
-	subnetFG := testSubnetBuildSubnet(t, dbSession, "test-subnet-FG", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4PrefixFG, &ipv4GatewayFG, cutil.GetPtr(ipbFG.ID), 24, cdbm.SubnetStatusDeleting, tnu)
+	subnetFG := testSubnetBuildSubnet(t, dbSession, "test-subnet-FG", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4PrefixFG, &ipv4GatewayFG, cutil.GetPtr(ipbFG.ID), 24, cdbm.SubnetStatusDeleting, tnu)
 	subnetFG.IPv4Block = ipbFG
 
 	// Subnet 3 is missing from Site Controller inventory but was not requested by user to be deleted, hence gets missing flag set
-	subnet3 := testSubnetBuildSubnet(t, dbSession, "test-subnet-3", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, cutil.GetPtr("192.0.1.8"), cutil.GetPtr("192.0.1.8"), nil, 24, cdbm.SubnetStatusProvisioning, tnu)
+	subnet3 := testSubnetBuildSubnet(t, dbSession, "test-subnet-3", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, cutil.GetPtr("192.0.1.8"), cutil.GetPtr("192.0.1.8"), nil, 24, cdbm.SubnetStatusProvisioning, tnu)
 	// Set created earlier than the inventory receipt interval
 	_, err = dbSession.DB.Exec("UPDATE subnet SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), subnet3.ID.String())
 	assert.NoError(t, err)
@@ -387,16 +386,16 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Subnet 4 is missing from Site Controller inventory but does not have controller ID set, hence gets missing flag does not get set
-	subnet4 := testSubnetBuildSubnet(t, dbSession, "test-subnet-4", tn, vpc, nil, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
+	subnet4 := testSubnetBuildSubnet(t, dbSession, "test-subnet-4", tn, vpc, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
 
 	// Subnet 5 is reported as Ready in Controller inventory but is being deleted, so does not get updated
-	subnet5 := testSubnetBuildSubnet(t, dbSession, "test-subnet-5", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
+	subnet5 := testSubnetBuildSubnet(t, dbSession, "test-subnet-5", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
 
 	// Subnet 10 is reported as Terminated in Controller inventory but remains Deleting until it disappears from inventory
-	subnet10 := testSubnetBuildSubnet(t, dbSession, "test-subnet-10", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
+	subnet10 := testSubnetBuildSubnet(t, dbSession, "test-subnet-10", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
 
 	// Subnet 6 was previously missing but is reported as Ready in Controller inventory
-	subnet6 := testSubnetBuildSubnet(t, dbSession, "test-subnet-6", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusError, tnu)
+	subnet6 := testSubnetBuildSubnet(t, dbSession, "test-subnet-6", tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusError, tnu)
 
 	// Subnet 7 is in Deleting state and has no controller ID, gets deleted on inventory update
 	sbPrefix7, err := ipam.CreateChildIpamEntryForIPBlock(ctx, nil, dbSession, ipamStorage, ipb, 24)
@@ -405,14 +404,14 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	assert.NoError(t, err)
 	ipv4Gateway7, err := ipam.GetFirstIPFromCidr(sbPrefix7.Cidr)
 	assert.NoError(t, err)
-	subnet7 := testSubnetBuildSubnet(t, dbSession, "test-subnet-7", tn, vpc, nil, nil, &ipb.RoutingType, &ipv4Prefix7, &ipv4Gateway7, &ipb.ID, 24, cdbm.SubnetStatusDeleting, tnu)
+	subnet7 := testSubnetBuildSubnet(t, dbSession, "test-subnet-7", tn, vpc, nil, &ipb.RoutingType, &ipv4Prefix7, &ipv4Gateway7, &ipb.ID, 24, cdbm.SubnetStatusDeleting, tnu)
 	subnet7.IPv4Block = ipb
 
 	// Subnet 8 & 9 do not have controller ID, but it was created and inventory returns them
-	subnet8 := testSubnetBuildSubnet(t, dbSession, "test-subnet-8", tn, vpc, nil, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
+	subnet8 := testSubnetBuildSubnet(t, dbSession, "test-subnet-8", tn, vpc, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
 
 	// Subnet 9 does not have controller ID, but it was created and inventory returns it
-	subnet9 := testSubnetBuildSubnet(t, dbSession, "test-subnet-9", tn, vpc, nil, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
+	subnet9 := testSubnetBuildSubnet(t, dbSession, "test-subnet-9", tn, vpc, nil, &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
 
 	subnetDAO := cdbm.NewSubnetDAO(dbSession)
 	_, err = subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet6.ID, IsMissingOnSite: cutil.GetPtr(true)})
@@ -423,7 +422,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	pagedSubnets := []*cdbm.Subnet{}
 	pagedInvIds := []string{}
 	for i := 0; i < 38; i++ {
-		subnet := testSubnetBuildSubnet(t, dbSession, fmt.Sprintf("test-vpc-paged-%d", i), tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
+		subnet := testSubnetBuildSubnet(t, dbSession, fmt.Sprintf("test-vpc-paged-%d", i), tn, vpc, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusProvisioning, tnu)
 		// Update creation timestamp to be earlier than inventory processing interval
 		_, err = dbSession.DB.Exec("UPDATE subnet SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), subnet.ID.String())
 		assert.NoError(t, err)
@@ -1299,7 +1298,7 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 	})
 	require.NoError(t, err)
 	existingSubnet := testSubnetBuildSubnet(
-		t, dbSession, "existing-name", authorizedTenant, parentVpc, nil, nil,
+		t, dbSession, "existing-name", authorizedTenant, parentVpc, nil,
 		&ipBlock.RoutingType, cutil.GetPtr("10.0.0.0"), cutil.GetPtr("10.0.0.1"),
 		&ipBlock.ID, 24, cdbm.SubnetStatusReady, authorizedTenantUser,
 	)
@@ -1453,6 +1452,24 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 			},
 			wantSubnet: true,
 			wantName:   "rest-id-parent-vpc-subnet",
+		},
+		{
+			// REST keeps no copy of Core Domains, so the Domain a Network
+			// Segment uses must not block recovery of its Subnet.
+			name: "creates Subnet when the Network Segment uses a Domain",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId:       &corev1.VpcId{Value: parentVpc.ID.String()},
+					SubdomainId: &corev1.DomainId{Value: uuid.NewString()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.7.0.0/24", Gateway: cutil.GetPtr("10.7.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "domain-subnet"},
+			},
+			wantSubnet: true,
+			wantName:   "domain-subnet",
 		},
 		{
 			name: "ignores more-specific TenantManaged SitePrefix IP Block",

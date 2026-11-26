@@ -43,7 +43,6 @@ func TestSubnet_GetSiteID(t *testing.T) {
 func TestSubnet_ToProto(t *testing.T) {
 	subID := uuid.New()
 	vpcID := uuid.New()
-	domainID := uuid.New()
 	prefix := "10.0.0.0"
 	gateway := "10.0.0.1"
 	mtu := 9000
@@ -54,7 +53,6 @@ func TestSubnet_ToProto(t *testing.T) {
 			VpcID:        vpcID,
 			Name:         "subnet-a",
 			Description:  cutil.GetPtr("primary"),
-			DomainID:     &domainID,
 			IPv4Prefix:   &prefix,
 			IPv4Gateway:  &gateway,
 			PrefixLength: 16,
@@ -72,8 +70,7 @@ func TestSubnet_ToProto(t *testing.T) {
 		require.NotNil(t, proto.Config)
 		require.NotNil(t, proto.Config.VpcId)
 		assert.Equal(t, vpcID.String(), proto.Config.VpcId.Value)
-		require.NotNil(t, proto.Config.SubdomainId)
-		assert.Equal(t, domainID.String(), proto.Config.SubdomainId.Value)
+		assert.Nil(t, proto.Config.SubdomainId)
 		require.NotNil(t, proto.Config.Mtu)
 		assert.Equal(t, int32(9000), *proto.Config.Mtu)
 		assert.Equal(t, corev1.NetworkSegmentType_TENANT, proto.Config.SegmentType)
@@ -123,6 +120,8 @@ func TestSubnet_FromProto(t *testing.T) {
 		assert.Equal(t, vpcID, s.VpcID)
 	})
 
+	// REST keeps no copy of Core Domains, so the Domain a Network Segment
+	// uses is read past without affecting the other fields.
 	t.Run("populates fields from structured config and status", func(t *testing.T) {
 		mtu := int32(9000)
 		proto := &corev1.NetworkSegment{
@@ -147,8 +146,6 @@ func TestSubnet_FromProto(t *testing.T) {
 		assert.Equal(t, "subnet-a", s.Name)
 		require.NotNil(t, s.Description)
 		assert.Equal(t, "primary", *s.Description)
-		require.NotNil(t, s.DomainID)
-		assert.Equal(t, domainID, *s.DomainID)
 		require.NotNil(t, s.MTU)
 		assert.Equal(t, 9000, *s.MTU)
 		require.NotNil(t, s.IPv4Prefix)
@@ -164,7 +161,6 @@ func TestSubnet_FromProto(t *testing.T) {
 			VpcID:        vpcID,
 			Name:         "stale-name",
 			Description:  cutil.GetPtr("stale"),
-			DomainID:     &domainID,
 			MTU:          cutil.GetPtr(1500),
 			IPv4Prefix:   cutil.GetPtr("192.168.0.0"),
 			IPv4Gateway:  cutil.GetPtr("192.168.0.1"),
@@ -179,7 +175,6 @@ func TestSubnet_FromProto(t *testing.T) {
 		assert.Nil(t, s.Description)
 		// VpcID is a required ID field; with config absent it is preserved.
 		assert.Equal(t, vpcID, s.VpcID)
-		assert.Nil(t, s.DomainID)
 		assert.Nil(t, s.MTU)
 		assert.Nil(t, s.IPv4Prefix)
 		assert.Nil(t, s.IPv4Gateway)
@@ -194,7 +189,6 @@ func TestSubnet_FromProto(t *testing.T) {
 			ID:           subID,
 			Name:         "stale-name",
 			Description:  cutil.GetPtr("stale"),
-			DomainID:     &domainID,
 			MTU:          &mtu,
 			IPv4Prefix:   &existing,
 			IPv4Gateway:  &existingGW,
@@ -212,7 +206,6 @@ func TestSubnet_FromProto(t *testing.T) {
 		s.FromProto(proto)
 		assert.Equal(t, "fresh-name", s.Name)
 		assert.Nil(t, s.Description)
-		assert.Nil(t, s.DomainID)
 		assert.Nil(t, s.MTU)
 		assert.Nil(t, s.IPv4Prefix)
 		assert.Nil(t, s.IPv4Gateway)
@@ -236,18 +229,6 @@ func TestSubnet_FromProto(t *testing.T) {
 		}
 		s.FromProto(proto)
 		assert.Equal(t, subID, s.ID)
-	})
-
-	t.Run("clears DomainID when proto subdomain is unparseable", func(t *testing.T) {
-		s := &Subnet{ID: subID, DomainID: &domainID, Name: "x"}
-		proto := &corev1.NetworkSegment{
-			Metadata: &corev1.Metadata{Name: "x"},
-			Config: &corev1.NetworkSegmentConfig{
-				SubdomainId: &corev1.DomainId{Value: "not-a-uuid"},
-			},
-		}
-		s.FromProto(proto)
-		assert.Nil(t, s.DomainID)
 	})
 
 	t.Run("clears IPv4Prefix when proto prefix is malformed", func(t *testing.T) {
@@ -410,17 +391,6 @@ func testSubnetBuildVpc(t *testing.T, dbSession *db.Session, infrastructureProvi
 	return vpc
 }
 
-func testSubnetBuildDomain(t *testing.T, dbSession *db.Session, hostname string) *Domain {
-	domain := &Domain{
-		ID:       uuid.New(),
-		Hostname: hostname,
-		Org:      "test",
-	}
-	_, err := dbSession.DB.NewInsert().Model(domain).Exec(context.Background())
-	assert.Nil(t, err)
-	return domain
-}
-
 func testSubnetBuildIPBlock(t *testing.T, dbSession *db.Session, siteID, infrastructureProviderID *uuid.UUID, name string, createdBy *uuid.UUID) *IPBlock {
 	ipBlock := &IPBlock{
 		ID:                       uuid.New(),
@@ -458,7 +428,6 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
 	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -483,7 +452,7 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 			desc: "create one",
 			ss: []Subnet{
 				{
-					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, DomainID: &domain.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6Gateway: &ipv6Gateway, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID, MTU: &mtu,
+					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6Gateway: &ipv6Gateway, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID, MTU: &mtu,
 				},
 			},
 			expectError:        false,
@@ -493,13 +462,13 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 			desc: "create mulitiple, some with null values in nullable fields",
 			ss: []Subnet{
 				{
-					Name: "test1", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, DomainID: &domain.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6Gateway: &ipv6Gateway, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
+					Name: "test1", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6Gateway: &ipv6Gateway, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
 				},
 				{
-					Name: "test2", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, DomainID: nil, TenantID: tenant.ID, ControllerNetworkSegmentID: nil, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: nil, IPv6BlockID: nil, IPv6Gateway: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
+					Name: "test2", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: nil, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: nil, IPv6BlockID: nil, IPv6Gateway: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
 				},
 				{
-					Name: "test3", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, DomainID: &domain.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: nil, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: nil, IPv6Gateway: nil, IPv6BlockID: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
+					Name: "test3", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: nil, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4Gateway: &ipv4Gateway, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: nil, IPv6Gateway: nil, IPv6BlockID: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
 				},
 			},
 			expectError: false,
@@ -508,7 +477,7 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 			desc: "create fails, due to foreign key violation on vpcID",
 			ss: []Subnet{
 				{
-					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: uuid.New(), DomainID: &domain.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
+					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: uuid.New(), TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4BlockID: &ipv4Block.ID, IPv6Prefix: &ipv6Prefix, IPv6BlockID: &ipv6Block.ID, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
 				},
 			},
 			expectError: true,
@@ -517,7 +486,7 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 			desc: "create will succeed when nullable foreign keys have null values",
 			ss: []Subnet{
 				{
-					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, DomainID: nil, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4BlockID: nil, IPv6Prefix: &ipv6Prefix, IPv6BlockID: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
+					Name: "test", Description: cutil.GetPtr("test"), Org: "test", SiteID: site.ID, VpcID: vpc.ID, TenantID: tenant.ID, ControllerNetworkSegmentID: &dummyUUID, RoutingType: cutil.GetPtr(IPBlockRoutingTypeDatacenterOnly), IPv4Prefix: &ipv4Prefix, IPv4BlockID: nil, IPv6Prefix: &ipv6Prefix, IPv6BlockID: nil, PrefixLength: 8, Status: SubnetStatusPending, CreatedBy: user.ID,
 				},
 			},
 			expectError: false,
@@ -553,7 +522,6 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 						Org:                        i.Org,
 						SiteID:                     i.SiteID,
 						VpcID:                      i.VpcID,
-						DomainID:                   i.DomainID,
 						TenantID:                   i.TenantID,
 						ControllerNetworkSegmentID: i.ControllerNetworkSegmentID,
 						RoutingType:                i.RoutingType,
@@ -596,7 +564,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
 	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -613,7 +580,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,
@@ -643,7 +609,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 		expectedErrVal     error
 		expectedVpcID      *uuid.UUID
 		expectedTenantID   *uuid.UUID
-		expectedDomainID   *uuid.UUID
 		verifyChildSpanner bool
 	}{
 		{
@@ -654,7 +619,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			expectedError:      false,
 			expectedVpcID:      nil,
 			expectedTenantID:   nil,
-			expectedDomainID:   nil,
 			verifyChildSpanner: true,
 		},
 		{
@@ -666,7 +630,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			expectedErrVal:   db.ErrDoesNotExist,
 			expectedVpcID:    nil,
 			expectedTenantID: nil,
-			expectedDomainID: nil,
 		},
 		{
 			desc:             "GetById with the Vpc relation",
@@ -676,7 +639,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			expectedError:    false,
 			expectedVpcID:    &vpc.ID,
 			expectedTenantID: nil,
-			expectedDomainID: nil,
 		},
 		{
 			desc:             "GetById with the Vpc and Tenant relations",
@@ -686,17 +648,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			expectedError:    false,
 			expectedVpcID:    &vpc.ID,
 			expectedTenantID: &tenant.ID,
-			expectedDomainID: nil,
-		},
-		{
-			desc:             "GetById with the Vpc, Tenant, and Domain relations",
-			id:               subnet.ID,
-			subnet:           subnet,
-			paramRelations:   []string{"Vpc", "Tenant", "Domain"},
-			expectedError:    false,
-			expectedVpcID:    &vpc.ID,
-			expectedTenantID: &tenant.ID,
-			expectedDomainID: &domain.ID,
 		},
 	}
 	for _, tc := range tests {
@@ -742,7 +693,6 @@ func TestSubnetSQLDAO_GetCountByStatus(t *testing.T) {
 	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
 	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -759,7 +709,6 @@ func TestSubnetSQLDAO_GetCountByStatus(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,
@@ -889,8 +838,6 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 	tenant3 := testSubnetBuildTenant(t, dbSession, "testTenant3")
 	vpc1 := testSubnetBuildVpc(t, dbSession, ip, site, tenant1, "testVpc1")
 	vpc2 := testSubnetBuildVpc(t, dbSession, ip, site, tenant2, "testVpc2")
-	domain1 := testSubnetBuildDomain(t, dbSession, "testDomain1")
-	domain2 := testSubnetBuildDomain(t, dbSession, "testDomain2")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -914,7 +861,6 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 					Org:                        "test",
 					SiteID:                     site.ID,
 					VpcID:                      vpc1.ID,
-					DomainID:                   &domain1.ID,
 					TenantID:                   tenant1.ID,
 					ControllerNetworkSegmentID: &dummyUUID,
 					RoutingType:                &ipv4Block.RoutingType,
@@ -938,7 +884,6 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 					Org:                        "test",
 					SiteID:                     site.ID,
 					VpcID:                      vpc2.ID,
-					DomainID:                   &domain2.ID,
 					TenantID:                   tenant2.ID,
 					ControllerNetworkSegmentID: &dummyUUID,
 					RoutingType:                &ipv4Block.RoutingType,
@@ -1040,22 +985,15 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 			expectedError: false,
 		},
 		{
-			desc:          "GetAll with Domain filter returns objects",
-			filter:        SubnetFilterInput{DomainIDs: []uuid.UUID{domain2.ID}},
-			page:          paginator.PageInput{},
-			expectedCount: totalCount / 2,
-			expectedError: false,
-		},
-		{
-			desc:          "GetAll with Vpc, Tenant, and Domain filters returns objects",
-			filter:        SubnetFilterInput{DomainIDs: []uuid.UUID{domain1.ID}, TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
+			desc:          "GetAll with Vpc and Tenant filters returns objects",
+			filter:        SubnetFilterInput{TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
 			page:          paginator.PageInput{},
 			expectedCount: totalCount / 2,
 			expectedError: false,
 		},
 		{
 			desc:          "GetAll with limit returns objects",
-			filter:        SubnetFilterInput{DomainIDs: []uuid.UUID{domain1.ID}, TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
+			filter:        SubnetFilterInput{TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
 			page:          paginator.PageInput{Offset: cutil.GetPtr(0), Limit: cutil.GetPtr(5)},
 			expectedCount: 5,
 			expectedTotal: cutil.GetPtr(totalCount / 2),
@@ -1063,7 +1001,7 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 		},
 		{
 			desc:          "GetAll with offset returns objects",
-			filter:        SubnetFilterInput{DomainIDs: []uuid.UUID{domain1.ID}, TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
+			filter:        SubnetFilterInput{TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
 			page:          paginator.PageInput{Offset: cutil.GetPtr(5)},
 			expectedCount: 10,
 			expectedTotal: cutil.GetPtr(totalCount / 2),
@@ -1071,7 +1009,7 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 		},
 		{
 			desc:   "GetAll with order by returns objects",
-			filter: SubnetFilterInput{DomainIDs: []uuid.UUID{domain1.ID}, TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
+			filter: SubnetFilterInput{TenantIDs: []uuid.UUID{tenant1.ID}, VpcIDs: []uuid.UUID{vpc1.ID}},
 			page: paginator.PageInput{OrderBy: &paginator.OrderBy{
 				Field: "name",
 				Order: paginator.OrderDescending,
@@ -1166,8 +1104,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 	tenant2 := testSubnetBuildTenant(t, dbSession, "testTenant2")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
 	vpc2 := testSubnetBuildVpc(t, dbSession, ip, site, tenant2, "testVpc2")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
-	domain2 := testSubnetBuildDomain(t, dbSession, "testDomain2")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv4Block2 := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block2", &user.ID)
@@ -1188,7 +1124,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,
@@ -1218,7 +1153,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 		expectedOrg                        *string
 		expectedSiteID                     *uuid.UUID
 		expectedVpcID                      *uuid.UUID
-		expectedDomainID                   *uuid.UUID
 		expectedTenantID                   *uuid.UUID
 		expectedControllerNetworkSegmentID *uuid.UUID
 		expectedIpv4Prefix                 *string
@@ -1243,7 +1177,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				Org:                        cutil.GetPtr("updatedOrg"),
 				SiteID:                     &site.ID,
 				VpcID:                      &vpc2.ID,
-				DomainID:                   &domain2.ID,
 				TenantID:                   &tenant2.ID,
 				ControllerNetworkSegmentID: &dummyUUID2,
 				IPv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1263,7 +1196,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 			expectedOrg:                        cutil.GetPtr("updatedOrg"),
 			expectedSiteID:                     &site.ID,
 			expectedVpcID:                      &vpc2.ID,
-			expectedDomainID:                   &domain2.ID,
 			expectedTenantID:                   &tenant2.ID,
 			expectedControllerNetworkSegmentID: &dummyUUID2,
 			expectedIpv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1286,7 +1218,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				Description:                cutil.GetPtr("otherDescription"),
 				Org:                        nil,
 				VpcID:                      &vpc.ID,
-				DomainID:                   &domain.ID,
 				TenantID:                   &tenant.ID,
 				ControllerNetworkSegmentID: &dummyUUID,
 				IPv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1306,7 +1237,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 			expectedOrg:                        cutil.GetPtr("updatedOrg"),
 			expectedSiteID:                     &site.ID,
 			expectedVpcID:                      &vpc.ID,
-			expectedDomainID:                   &domain.ID,
 			expectedTenantID:                   &tenant.ID,
 			expectedControllerNetworkSegmentID: &dummyUUID,
 			expectedIpv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1327,7 +1257,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				Description:                cutil.GetPtr("updatedDescription"),
 				SiteID:                     &dummyUUID,
 				VpcID:                      nil,
-				DomainID:                   &domain2.ID,
 				TenantID:                   &tenant2.ID,
 				ControllerNetworkSegmentID: &dummyUUID2,
 				IPv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1346,7 +1275,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				Name:                       cutil.GetPtr("updatedName"),
 				Description:                cutil.GetPtr("updatedDescription"),
 				VpcID:                      &dummyUUID,
-				DomainID:                   &domain2.ID,
 				TenantID:                   &tenant2.ID,
 				ControllerNetworkSegmentID: &dummyUUID2,
 				IPv4Prefix:                 cutil.GetPtr("172.0.0.1/24"),
@@ -1367,7 +1295,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				Org:                        cutil.GetPtr("test"),
 				SiteID:                     &site.ID,
 				VpcID:                      &vpc.ID,
-				DomainID:                   &domain.ID,
 				TenantID:                   &tenant.ID,
 				ControllerNetworkSegmentID: &dummyUUID,
 				IPv4Prefix:                 &ipv4Prefix,
@@ -1388,7 +1315,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 			expectedOrg:                        cutil.GetPtr("test"),
 			expectedSiteID:                     &site.ID,
 			expectedVpcID:                      &vpc.ID,
-			expectedDomainID:                   &domain.ID,
 			expectedTenantID:                   &tenant.ID,
 			expectedControllerNetworkSegmentID: &dummyUUID,
 			expectedIpv4Prefix:                 &ipv4Prefix,
@@ -1407,7 +1333,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			fmt.Println("domainID=", *tc.input.DomainID)
 			var previousUpdated time.Time
 			if !tc.expectedError {
 				predecessor, getErr := ssd.GetByID(ctx, nil, tc.input.SubnetId, nil)
@@ -1422,7 +1347,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 					Org:                        tc.input.Org,
 					SiteID:                     tc.input.SiteID,
 					VpcID:                      tc.input.VpcID,
-					DomainID:                   tc.input.DomainID,
 					TenantID:                   tc.input.TenantID,
 					ControllerNetworkSegmentID: tc.input.ControllerNetworkSegmentID,
 					IPv4Prefix:                 tc.input.IPv4Prefix,
@@ -1448,10 +1372,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedOrg, got.Org)
 				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
 				assert.Equal(t, *tc.expectedVpcID, got.VpcID)
-				assert.Equal(t, tc.expectedDomainID == nil, got.DomainID == nil)
-				if tc.expectedDomainID != nil {
-					assert.Equal(t, *tc.expectedDomainID, *got.DomainID)
-				}
 				assert.Equal(t, *tc.expectedTenantID, got.TenantID)
 				assert.Equal(t, tc.expectedControllerNetworkSegmentID == nil, got.ControllerNetworkSegmentID == nil)
 				if tc.expectedControllerNetworkSegmentID != nil {
@@ -1514,7 +1434,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
 	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -1532,7 +1451,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,
@@ -1557,7 +1475,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,
@@ -1586,7 +1503,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 
 		expectedError                      bool
 		expectedDescription                *string
-		expectedDomainID                   *uuid.UUID
 		expectedControllerNetworkSegmentID *uuid.UUID
 		expectedIpv4Prefix                 *string
 		expectedIpv4Gateway                *string
@@ -1603,7 +1519,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			subnet: subnet1,
 			input: SubnetClearInput{
 				Description:                true,
-				DomainID:                   false,
 				ControllerNetworkSegmentID: false,
 				IPv4Prefix:                 true,
 				IPv4Gateway:                true,
@@ -1615,7 +1530,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 
 			expectedError:                      false,
 			expectedDescription:                nil,
-			expectedDomainID:                   subnet1.DomainID,
 			expectedControllerNetworkSegmentID: subnet1.ControllerNetworkSegmentID,
 			expectedIpv4Prefix:                 nil,
 			expectedIpv4Gateway:                nil,
@@ -1632,7 +1546,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			subnet: subnet1,
 			input: SubnetClearInput{
 				Description:                false,
-				DomainID:                   true,
 				ControllerNetworkSegmentID: true,
 				IPv4Prefix:                 false,
 				IPv4BlockID:                true,
@@ -1642,7 +1555,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 
 			expectedError:                      false,
 			expectedDescription:                nil,
-			expectedDomainID:                   nil,
 			expectedControllerNetworkSegmentID: nil,
 			expectedIpv4Prefix:                 nil,
 			expectedIpv4BlockID:                nil,
@@ -1666,7 +1578,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			subnet: subnet2,
 			input: SubnetClearInput{
 				Description:                true,
-				DomainID:                   true,
 				ControllerNetworkSegmentID: true,
 				IPv4Prefix:                 true,
 				IPv4Gateway:                true,
@@ -1679,7 +1590,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 
 			expectedError:                      false,
 			expectedDescription:                nil,
-			expectedDomainID:                   nil,
 			expectedControllerNetworkSegmentID: nil,
 			expectedIpv4Prefix:                 nil,
 			expectedIpv4Gateway:                nil,
@@ -1697,7 +1607,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 				ctx, nil, SubnetClearInput{
 					SubnetId:                   tc.subnet.ID,
 					Description:                tc.input.Description,
-					DomainID:                   tc.input.DomainID,
 					ControllerNetworkSegmentID: tc.input.ControllerNetworkSegmentID,
 					IPv4Prefix:                 tc.input.IPv4Prefix,
 					IPv4Gateway:                tc.input.IPv4Gateway,
@@ -1713,10 +1622,6 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			assert.Equal(t, tc.expectedDescription == nil, got.Description == nil)
 			if tc.expectedDescription != nil {
 				assert.Equal(t, *tc.expectedDescription, *got.Description)
-			}
-			assert.Equal(t, tc.expectedDomainID == nil, got.DomainID == nil)
-			if tc.expectedDomainID != nil {
-				assert.Equal(t, *tc.expectedDomainID, *got.DomainID)
 			}
 			assert.Equal(t, tc.expectedControllerNetworkSegmentID == nil, got.ControllerNetworkSegmentID == nil)
 			if tc.expectedControllerNetworkSegmentID != nil {
@@ -1838,7 +1743,6 @@ func TestSubnetSQLDAO_Delete(t *testing.T) {
 	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
 	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
 	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
 	user := testSubnetBuildUser(t, dbSession, "testUser")
 	ipv4Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv4Block", &user.ID)
 	ipv6Block := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipv6Block", &user.ID)
@@ -1855,7 +1759,6 @@ func TestSubnetSQLDAO_Delete(t *testing.T) {
 			Org:                        "test",
 			SiteID:                     site.ID,
 			VpcID:                      vpc.ID,
-			DomainID:                   &domain.ID,
 			TenantID:                   tenant.ID,
 			ControllerNetworkSegmentID: &dummyUUID,
 			RoutingType:                &ipv4Block.RoutingType,

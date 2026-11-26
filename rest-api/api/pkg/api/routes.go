@@ -1373,6 +1373,32 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetNVLinkDomainHandler(dbSession, tc, scp, cfg),
 		},
+		// DNS Domain (DNS zone) endpoints (Provider Admin).
+		{
+			Path:    apiPathPrefix + "/domain/dns",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateDNSDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/dns",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllDNSDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/dns/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetDNSDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/dns/:id",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateDNSDomainHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/dns/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteDNSDomainHandler(dbSession, scp),
+		},
 		{
 			Path:    apiPathPrefix + "/rack",
 			Method:  http.MethodGet,

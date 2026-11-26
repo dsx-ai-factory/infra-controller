@@ -4,11 +4,13 @@
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::MachineInterfaceId;
 use carbide_uuid::network::NetworkSegmentId;
-use db::{ObjectColumnFilter, TransactionVending as _};
+use db::ObjectColumnFilter;
 use model::network_segment::NetworkSegmentSearchConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{NetworkPrefix, NetworkSegmentCreationRequest, NetworkSegmentType};
-use rpc::protos::dns::{CreateDomainRequest, DomainDeletionRequest, UpdateDomainRequest};
+use rpc::protos::dns::{
+    CreateDomainRequest, DomainDeletionRequest, DomainSearchQuery, UpdateDomainRequest,
+};
 use sqlx::PgPool;
 use tonic::{Code, Request};
 
@@ -195,6 +197,77 @@ async fn test_unreferenced_domain_delete_is_idempotent(pool: PgPool) {
     assert_eq!(second_delete.deleted, first_delete.deleted);
 }
 
+// A Network Segment's reverse zone is a compatibility row the network
+// lifecycle owns. FindDomain returns it, so the Domain API must refuse to
+// delete or update it by ID.
+#[crate::sqlx_test]
+async fn test_domain_api_rejects_writes_to_network_segment_reverse_zone(pool: PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    env.api
+        .create_network_segment(Request::new(network_segment_request(
+            NetworkSegmentId::new(),
+            "reverse-zone-segment",
+            "192.0.2.0/24",
+            "192.0.2.1",
+            None,
+        )))
+        .await
+        .unwrap();
+
+    let reverse_zones = env
+        .api
+        .find_domain(Request::new(DomainSearchQuery {
+            id: None,
+            name: Some("2.0.192.in-addr.arpa".to_string()),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .domains;
+    assert_eq!(
+        reverse_zones.len(),
+        1,
+        "the segment creates one reverse zone"
+    );
+    let reverse_zone_id = DomainId::try_from(reverse_zones[0].id.unwrap()).unwrap();
+    let before = db::dns::domain::find_by_uuid(&env.pool, reverse_zone_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let delete_error = env
+        .api
+        .delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(reverse_zone_id),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(delete_error.code(), Code::InvalidArgument);
+    assert!(delete_error.message().contains("reverse DNS zone"));
+
+    let update_error = env
+        .api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: Some(reverse_zone_id),
+                default_ttl: Some(600),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(update_error.code(), Code::InvalidArgument);
+    assert!(update_error.message().contains("reverse DNS zone"));
+
+    let after = db::dns::domain::find_by_uuid(&env.pool, reverse_zone_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after.deleted.is_none());
+    assert_eq!(after.default_ttl, before.default_ttl);
+    assert_eq!(after.updated, before.updated);
+}
+
 #[crate::sqlx_test]
 async fn test_domain_update_rejects_deleted_domain(pool: PgPool) {
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
@@ -236,41 +309,21 @@ async fn test_domain_update_rejects_deleted_domain(pool: PgPool) {
 #[crate::sqlx_test]
 async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(pool: PgPool) {
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
-    let domain_name = "2.0.192.in-addr.arpa".to_string();
-    // The Domain API rejects reverse zones, so the reverse-zone lock used to
-    // hold deletion open needs a compatibility row as network lifecycle (or
-    // a pre-existing deployment) persists it, not an API-created domain.
-    let rejected = env
-        .api
-        .create_domain(Request::new(CreateDomainRequest {
-            name: domain_name.clone(),
-            default_ttl: None,
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(rejected.code(), Code::InvalidArgument);
-    let mut fixture_txn = env.pool.txn_begin().await.unwrap();
-    let domain_id = db::dns::domain::persist(
-        model::dns::NewDomain::new(domain_name.clone()),
-        fixture_txn.as_mut(),
-    )
-    .await
-    .unwrap()
-    .id;
-    fixture_txn.commit().await.unwrap();
+    let domain_id = create_domain(&env, "concurrent-delete.example").await;
     let segment_id = NetworkSegmentId::new();
 
-    let mut reverse_zone_blocker = env.api.txn_begin().await.unwrap();
+    // A row lock on the Domain holds the deletion open after it has taken the
+    // Domain's delete lock and before it writes the row.
+    let mut row_blocker = env.api.txn_begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut reverse_zone_blocker)
+        .fetch_one(&mut row_blocker)
         .await
         .unwrap();
-    db::dns::lock_reverse_zone_names(
-        &mut reverse_zone_blocker,
-        std::slice::from_ref(&domain_name),
-    )
-    .await
-    .unwrap();
+    sqlx::query("SELECT 1 FROM domains WHERE id = $1 FOR UPDATE")
+        .bind(domain_id)
+        .execute(row_blocker.as_mut())
+        .await
+        .unwrap();
 
     let delete_api = env.api.clone();
     let deletion_task = tokio::spawn(async move {
@@ -280,7 +333,7 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
             }))
             .await
     });
-    let deletion_pid = wait_for_blocked_query(&env.pool, blocker_pid, "dns:reverse-zone:").await;
+    let deletion_pid = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE domains").await;
 
     let create_api = env.api.clone();
     let creation_task = tokio::spawn(async move {
@@ -295,7 +348,7 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
             .await
     });
     wait_for_blocked_query(&env.pool, deletion_pid, "pg_advisory_xact_lock_shared").await;
-    reverse_zone_blocker.commit().await.unwrap();
+    row_blocker.commit().await.unwrap();
 
     deletion_task.await.unwrap().unwrap();
     let error = creation_task.await.unwrap().unwrap_err();

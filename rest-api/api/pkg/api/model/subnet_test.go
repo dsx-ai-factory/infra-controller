@@ -107,7 +107,6 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 	subID := uuid.New()
 	vpcID := uuid.New()
-	domainID := uuid.New()
 	prefix := "10.0.0.0"
 	gateway := "10.0.0.1"
 	mtu := 9000
@@ -116,7 +115,6 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		ID:           subID,
 		VpcID:        vpcID,
 		Name:         "subnet-a",
-		DomainID:     &domainID,
 		IPv4Prefix:   &prefix,
 		IPv4Gateway:  &gateway,
 		PrefixLength: 16,
@@ -136,8 +134,7 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		require.NotNil(t, req.Id)
 		assert.Equal(t, subID.String(), req.Id.Value)
 		assert.Equal(t, "subnet-a", req.Name)
-		require.NotNil(t, req.SubdomainId)
-		assert.Equal(t, domainID.String(), req.SubdomainId.Value)
+		assert.Nil(t, req.SubdomainId)
 		require.NotNil(t, req.VpcId)
 		assert.Equal(t, vpcID.String(), req.VpcId.Value)
 		require.NotNil(t, req.Mtu)

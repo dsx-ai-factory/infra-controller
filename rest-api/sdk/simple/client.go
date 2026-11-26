@@ -29,6 +29,13 @@ type ClientInterface interface {
 	GetIpBlocks(ctx context.Context, paginationFilter *PaginationFilter) ([]IpBlock, *standard.PaginationResponse, *ApiError)
 	GetIpBlock(ctx context.Context, id string) (*IpBlock, *ApiError)
 
+	// DNS Domain (DNS zone) management interfaces
+	CreateDNSDomain(ctx context.Context, request DNSDomainCreateRequest) (*DNSDomain, *ApiError)
+	GetDNSDomains(ctx context.Context, domainFilter *DNSDomainFilter, paginationFilter *PaginationFilter) ([]DNSDomain, *standard.PaginationResponse, *ApiError)
+	GetDNSDomain(ctx context.Context, id string) (*DNSDomain, *ApiError)
+	UpdateDNSDomain(ctx context.Context, id string, request DNSDomainUpdateRequest) (*DNSDomain, *ApiError)
+	DeleteDNSDomain(ctx context.Context, id string) *ApiError
+
 	// InfiniBand Partition management interfaces
 	CreateInfinibandPartition(ctx context.Context, request InfinibandPartitionCreateRequest) (*InfinibandPartition, *ApiError)
 	GetInfinibandPartitions(ctx context.Context, paginationFilter *PaginationFilter) ([]InfinibandPartition, *standard.PaginationResponse, *ApiError)
@@ -240,6 +247,53 @@ func (c *Client) UpdateInstance(ctx context.Context, id string, request Instance
 	logger.Info().Msgf("Updating Instance for org: %s", c.Config.Org)
 
 	return NewInstanceManager(c).Update(ctx, id, request)
+}
+
+// DNS Domain
+func (c *Client) CreateDNSDomain(ctx context.Context, request DNSDomainCreateRequest) (*DNSDomain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Creating Domain for org: %s", c.Config.Org)
+
+	return NewDNSDomainManager(c).Create(ctx, request)
+}
+func (c *Client) GetDNSDomains(ctx context.Context, domainFilter *DNSDomainFilter, paginationFilter *PaginationFilter) ([]DNSDomain, *standard.PaginationResponse, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Getting all Domains for org: %s", c.Config.Org)
+
+	return NewDNSDomainManager(c).GetDNSDomains(ctx, domainFilter, paginationFilter)
+}
+func (c *Client) GetDNSDomain(ctx context.Context, id string) (*DNSDomain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Getting Domain for org: %s", c.Config.Org)
+
+	return NewDNSDomainManager(c).Get(ctx, id)
+}
+func (c *Client) UpdateDNSDomain(ctx context.Context, id string, request DNSDomainUpdateRequest) (*DNSDomain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Updating Domain for org: %s", c.Config.Org)
+
+	return NewDNSDomainManager(c).Update(ctx, id, request)
+}
+func (c *Client) DeleteDNSDomain(ctx context.Context, id string) *ApiError {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Deleting Domain for org: %s", c.Config.Org)
+
+	return NewDNSDomainManager(c).Delete(ctx, id)
 }
 
 // IpBlock
