@@ -70,7 +70,8 @@ pub(crate) const DHCP_SERVER_SERVICE_IMAGE_NAME: &str = "forge-dhcp-server";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.43";
+pub(crate) const DTS_SERVICE_HELM_VERSION_BF3: &str = "1.27.8";
+pub(crate) const DTS_SERVICE_HELM_VERSION_BF4: &str = "1.25.43";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -206,7 +207,8 @@ pub(crate) fn default_dts_service() -> DpfServiceConfig {
         name: DTS_SERVICE_NAME.to_string(),
         helm_repo_url: DEFAULT_DOCA_HELM_REGISTRY.to_string(),
         helm_chart: DTS_SERVICE_HELM_NAME.to_string(),
-        helm_version: DTS_SERVICE_HELM_VERSION.to_string(),
+        // Resolve the hardware-specific default once the deployment type is known.
+        helm_version: String::new(),
         docker_repo_url: String::new(),
         docker_image_tag: String::new(),
         docker_image_pull_secret: None,

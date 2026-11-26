@@ -1602,6 +1602,10 @@ At least one fixed service-VPC slot must be configured before a supported deploy
 
 Each entry under `[dpf.services]` accepts a chart-native `extra_helm_values` table. NICo deep-merges it over generated `DPUServiceTemplate` values. Nested scalars and arrays replace generated values. DPF applies NICo's deployment-specific `DPUServiceConfiguration` values after the template values. Top-level and per-deployment service fields both overlay the service's built-in defaults.
 
+DTS selects its default Helm chart version by deployment hardware: BF3 and BF3 GB200 use `1.27.8`; generic BF4 and BF4 Astra use `1.25.43`. Omit `helm_version` or set it to an empty string to use this automatic selection. A nonempty version in `[dpf.services.dts]` applies to deployments that inherit the site-wide services. A `[dpf.deployments.<name>.services]` block replaces those services, so only a version in that block's `dts` entry overrides its hardware default. Configuration changes take effect after an API restart and follow the DPF service-update maintenance gate.
+
+`nico-admin-cli dpf service-version` reports the resolved mandatory-service versions for each configured deployment, including the derived BF3 GB200 deployment. The Service column uses each deployment's service-template name, such as `dts`, `dts-bf3gb200`, `dts-bf4generic`, or `dts-bf4astra`, and compares it with the live template of that exact name.
+
 The topology-derived `[dpf.services.doca_hbn.extra_helm_values.resources]` value `nvidia.com/bf_sf` is reserved: NICo restores the effective HBN interface count after applying operator overrides so the SF request, interface assignment, and startup configuration cannot diverge.
 
 ```toml

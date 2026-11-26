@@ -17,6 +17,8 @@
 
 use ::rpc::forge as rpc;
 use carbide_dpf::dpu_node_cr_name;
+use carbide_dpf::sdk::deployment_cr_suffix;
+use carbide_dpf::types::{DpuDeploymentType, ServiceTemplateVersion};
 use carbide_uuid::machine::HostMachineId;
 use db::ObjectFilter;
 use db::machine::find_one;
@@ -27,6 +29,7 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
+use crate::cfg::file::DpfConfig;
 use crate::handlers::utils::convert_and_log_machine_id;
 
 pub(crate) async fn modify_dpf_state(
@@ -147,16 +150,6 @@ pub(crate) async fn get_dpf_service_versions(
 ) -> Result<Response<rpc::DpfServiceVersionsResponse>, Status> {
     log_request_data(&request);
 
-    let cfg = &api.runtime_config.dpf.services;
-    let configured = [
-        &cfg.dts,
-        &cfg.doca_hbn,
-        &cfg.dpu_agent,
-        &cfg.dhcp_server,
-        &cfg.fmds,
-        &cfg.otel,
-    ];
-
     let live = if let Some(ops) = api.dpf_sdk.as_ref() {
         ops.list_service_template_versions()
             .await
@@ -165,23 +158,120 @@ pub(crate) async fn get_dpf_service_versions(
         Vec::new()
     };
 
-    let services = configured
-        .iter()
-        .map(|svc_cfg| {
-            let matched = live
-                .iter()
-                .find(|t| t.deployment_service_name == svc_cfg.name);
-            rpc::DpfServiceVersion {
-                service: svc_cfg.name.clone(),
-                config_helm_version: svc_cfg.helm_version.clone(),
-                config_docker_image_tag: svc_cfg.docker_image_tag.clone(),
+    Ok(Response::new(rpc::DpfServiceVersionsResponse {
+        services: service_versions(&api.runtime_config.dpf, &live),
+    }))
+}
+
+fn service_versions(
+    config: &DpfConfig,
+    live: &[ServiceTemplateVersion],
+) -> Vec<rpc::DpfServiceVersion> {
+    let bf3_gb200 = config.deployments.bf3.bf3_gb200();
+    let mut services = Vec::new();
+    for (deployment_type, deployment) in [
+        (DpuDeploymentType::Bf3, Some(&config.deployments.bf3)),
+        (DpuDeploymentType::Bf3Gb200, Some(&bf3_gb200)),
+        (
+            DpuDeploymentType::Bf4Generic,
+            config.deployments.bf4_generic.as_ref(),
+        ),
+        (
+            DpuDeploymentType::Bf4Astra,
+            config.deployments.bf4_astra.as_ref(),
+        ),
+    ] {
+        let Some(deployment) = deployment else {
+            continue;
+        };
+        let resolved = config.resolved_services_for(deployment, deployment_type);
+        let suffix = deployment_cr_suffix(deployment_type);
+        for svc_cfg in [
+            resolved.base.dts,
+            resolved.base.doca_hbn,
+            resolved.base.dpu_agent,
+            resolved.base.dhcp_server,
+            resolved.base.fmds,
+            resolved.base.otel,
+        ] {
+            let cr_name = if suffix.is_empty() {
+                svc_cfg.name.clone()
+            } else {
+                format!("{}-{suffix}", svc_cfg.name)
+            };
+            let matched = live.iter().find(|t| t.cr_name == cr_name);
+            services.push(rpc::DpfServiceVersion {
+                service: cr_name,
+                config_helm_version: svc_cfg.helm_version,
+                config_docker_image_tag: svc_cfg.docker_image_tag,
                 live_helm_version: matched.map(|t| t.helm_version.clone()).unwrap_or_default(),
                 live_docker_image_tag: matched
                     .map(|t| t.docker_image_tag.clone())
                     .unwrap_or_default(),
-            }
-        })
-        .collect();
+            });
+        }
+    }
+    services
+}
 
-    Ok(Response::new(rpc::DpfServiceVersionsResponse { services }))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cfg::file::{DpfDeploymentConfig, DpfDeploymentsConfig, DpfMandatoryServicesConfig};
+
+    #[test]
+    fn dpf_dts_helm_version_reporting_uses_deployment_templates() {
+        let mut astra_services = DpfMandatoryServicesConfig::default();
+        astra_services.dts.helm_version = "astra-version".to_string();
+        let config = DpfConfig {
+            deployments: DpfDeploymentsConfig {
+                bf4_generic: Some(DpfDeploymentConfig::default()),
+                bf4_astra: Some(DpfDeploymentConfig {
+                    services: Some(Box::new(astra_services)),
+                    ..DpfDeploymentConfig::default()
+                }),
+                ..DpfDeploymentsConfig::default()
+            },
+            ..DpfConfig::default()
+        };
+        // All templates share the service name. Listing order must not determine the match.
+        let live = [
+            ("dts-obsolete", "obsolete-version"),
+            ("dts-bf4generic", "1.25.43"),
+            ("dts-bf4astra", "astra-version"),
+            ("dts", "1.27.8"),
+        ]
+        .into_iter()
+        .map(|(cr_name, helm_version)| ServiceTemplateVersion {
+            cr_name: cr_name.to_string(),
+            deployment_service_name: "dts".to_string(),
+            helm_repo_url: String::new(),
+            helm_chart: None,
+            helm_version: helm_version.to_string(),
+            docker_image_tag: String::new(),
+        })
+        .collect::<Vec<_>>();
+
+        let versions = service_versions(&config, &live);
+        let dts_versions = versions
+            .iter()
+            .filter(|service| service.service.starts_with("dts"))
+            .map(|service| {
+                (
+                    service.service.as_str(),
+                    service.config_helm_version.as_str(),
+                    service.live_helm_version.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dts_versions,
+            vec![
+                ("dts", "1.27.8", "1.27.8"),
+                ("dts-bf3gb200", "1.27.8", ""),
+                ("dts-bf4generic", "1.25.43", "1.25.43"),
+                ("dts-bf4astra", "astra-version", "astra-version"),
+            ]
+        );
+    }
 }
