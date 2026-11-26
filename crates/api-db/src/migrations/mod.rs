@@ -21,6 +21,8 @@ use sqlx::PgPool;
 use sqlx::migrate::{MigrateError, Migrator};
 
 #[cfg(test)]
+mod machine_validation_lenovo_7dhecto1ww;
+#[cfg(test)]
 mod prefix_overlap_scope;
 #[cfg(test)]
 mod resource_pool_allocation;
