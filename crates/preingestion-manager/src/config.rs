@@ -26,6 +26,7 @@ pub struct PreingestionManagerConfig {
     pub concurrency_limit: usize,
     pub hgx_bmc_gpu_reboot_delay: Duration,
     pub max_concurrent_bfb_copies: usize,
+    pub multipart_upload_timeout: Duration,
     pub autoupdate: bool,
     pub no_reset_retries: bool,
     pub firmware_download_cache_directory: PathBuf,

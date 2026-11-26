@@ -19,10 +19,15 @@ use std::path::PathBuf;
 
 use carbide_firmware::downloader::FirmwareDownloadConfig;
 use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
-use carbide_utils::config::as_duration;
+use carbide_utils::config::{as_duration, as_std_duration};
 use chrono::Duration;
-use duration_str::deserialize_duration_chrono;
-use serde::{Deserialize, Serialize};
+use duration_str::{deserialize_duration, deserialize_duration_chrono};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Smallest accepted `multipart_upload_timeout`.
+const MIN_MULTIPART_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+/// Largest accepted `multipart_upload_timeout`.
+const MAX_MULTIPART_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_hours(8);
 
 /// Global firmware management settings controlling
 /// update policies, concurrency, and retry behavior.
@@ -125,6 +130,14 @@ pub struct FirmwareGlobal {
     pub requires_manual_upgrade: bool,
     #[serde(default = "FirmwareGlobal::max_concurrent_bfb_copies_default")]
     pub max_concurrent_bfb_copies: usize,
+    /// Timeout for one Redfish multipart firmware upload.
+    /// Default is 60 minutes. Accepted range is 1 minute to 8 hours.
+    #[serde(
+        default = "FirmwareGlobal::multipart_upload_timeout_default",
+        deserialize_with = "deserialize_multipart_upload_timeout",
+        serialize_with = "as_std_duration"
+    )]
+    pub multipart_upload_timeout: std::time::Duration,
 }
 
 impl FirmwareGlobal {
@@ -153,6 +166,7 @@ impl FirmwareGlobal {
             hgx_bmc_gpu_reboot_delay: FirmwareGlobal::hgx_bmc_gpu_reboot_delay_default(),
             requires_manual_upgrade: false,
             max_concurrent_bfb_copies: FirmwareGlobal::max_concurrent_bfb_copies_default(),
+            multipart_upload_timeout: FirmwareGlobal::multipart_upload_timeout_default(),
         }
     }
 
@@ -200,6 +214,9 @@ impl FirmwareGlobal {
     pub fn max_concurrent_bfb_copies_default() -> usize {
         10
     }
+    pub fn multipart_upload_timeout_default() -> std::time::Duration {
+        std::time::Duration::from_mins(60)
+    }
 }
 
 impl Default for FirmwareGlobal {
@@ -225,6 +242,22 @@ impl Default for FirmwareGlobal {
             hgx_bmc_gpu_reboot_delay: FirmwareGlobal::hgx_bmc_gpu_reboot_delay_default(),
             requires_manual_upgrade: false,
             max_concurrent_bfb_copies: FirmwareGlobal::max_concurrent_bfb_copies_default(),
+            multipart_upload_timeout: FirmwareGlobal::multipart_upload_timeout_default(),
         }
     }
+}
+
+fn deserialize_multipart_upload_timeout<'de, D>(
+    deserializer: D,
+) -> Result<std::time::Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let timeout = deserialize_duration(deserializer)?;
+    if !(MIN_MULTIPART_UPLOAD_TIMEOUT..=MAX_MULTIPART_UPLOAD_TIMEOUT).contains(&timeout) {
+        return Err(serde::de::Error::custom(
+            "multipart_upload_timeout must be between 1m and 8h",
+        ));
+    }
+    Ok(timeout)
 }

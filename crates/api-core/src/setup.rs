@@ -2365,6 +2365,7 @@ async fn initialize_and_start_controllers<'a>(
                 .firmware_downloader(&downloader)
                 .attestation_enabled(carbide_config.attestation_enabled)
                 .upload_limiter(upload_limiter.clone())
+                .multipart_upload_timeout(carbide_config.firmware_global.multipart_upload_timeout)
                 .machine_validation_config(carbide_config.machine_validation_config.clone())
                 .common_pools(common_pools.clone())
                 .bom_validation(carbide_config.bom_validation)

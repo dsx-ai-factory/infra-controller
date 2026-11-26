@@ -1029,6 +1029,7 @@ TOML section: `[extension_service_state_controller]`.
 | `hgx_bmc_gpu_reboot_delay` | `Duration` | `30s` | Delay after GPU reboot before HGX BMC access. |
 | `requires_manual_upgrade` | `bool` | `false` | Force all firmware upgrades to require admin approval. |
 | `max_concurrent_bfb_copies` | `usize` | `10` | Maximum number of concurrent BFB copy operations. |
+| `multipart_upload_timeout` | `Duration` | `60m` | Timeout for one Redfish multipart firmware upload. Accepts `1m` to `8h`; other values fail configuration loading. Changes require a Core restart. |
 
 Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
 site configuration, and `CARBIDE_API_` overrides before applying defaults.

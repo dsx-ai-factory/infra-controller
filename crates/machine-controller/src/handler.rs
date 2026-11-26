@@ -322,6 +322,7 @@ pub struct MachineStateHandlerBuilder {
     power_options_config: PowerOptionConfig,
     enable_secure_boot: bool,
     hgx_bmc_gpu_reboot_delay: chrono::Duration,
+    multipart_upload_timeout: std::time::Duration,
     dpf_sdk: Option<Arc<dyn DpfOperations>>,
 }
 
@@ -364,6 +365,7 @@ impl MachineStateHandlerBuilder {
             },
             enable_secure_boot: false,
             hgx_bmc_gpu_reboot_delay: chrono::Duration::seconds(30),
+            multipart_upload_timeout: FirmwareGlobal::multipart_upload_timeout_default(),
             dpf_sdk: None,
         }
     }
@@ -465,6 +467,14 @@ impl MachineStateHandlerBuilder {
         self
     }
 
+    pub fn multipart_upload_timeout(
+        mut self,
+        multipart_upload_timeout: std::time::Duration,
+    ) -> Self {
+        self.multipart_upload_timeout = multipart_upload_timeout;
+        self
+    }
+
     pub fn machine_validation_config(
         mut self,
         machine_validation_config: MachineValidationConfig,
@@ -521,7 +531,9 @@ impl MachineStateHandler {
             instance_autoreboot_period: builder.instance_autoreboot_period,
             upgrade_script_state: Default::default(),
             credential_reader: builder.credential_reader,
-            async_firmware_uploader: Arc::new(Default::default()),
+            async_firmware_uploader: Arc::new(AsyncFirmwareUploader::new(
+                builder.multipart_upload_timeout,
+            )),
             hgx_bmc_gpu_reboot_delay: builder
                 .hgx_bmc_gpu_reboot_delay
                 .to_std()
@@ -13464,12 +13476,26 @@ impl UpdateScriptManager {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 struct AsyncFirmwareUploader {
     active_uploads: Arc<Mutex<HashMap<HostMachineId, Option<UploadResult>>>>,
+    multipart_upload_timeout: std::time::Duration,
+}
+
+impl Default for AsyncFirmwareUploader {
+    fn default() -> Self {
+        Self::new(FirmwareGlobal::multipart_upload_timeout_default())
+    }
 }
 
 impl AsyncFirmwareUploader {
+    fn new(multipart_upload_timeout: std::time::Duration) -> Self {
+        Self {
+            active_uploads: Default::default(),
+            multipart_upload_timeout,
+        }
+    }
+
     fn start_upload(
         &self,
         id: HostMachineId,
@@ -13498,12 +13524,13 @@ impl AsyncFirmwareUploader {
         }
         let upload_id = id;
         let upload_address = address.clone();
+        let timeout = self.multipart_upload_timeout;
         let _task = self.spawn_upload_job(id, address, upload_permit, async move {
             let multipart_result = redfish_client
                 .update_firmware_multipart(
                     filename.as_path(),
                     true,
-                    std::time::Duration::from_secs(3600),
+                    timeout,
                     redfish_component_type.clone(),
                 )
                 .await;
