@@ -17,6 +17,7 @@
 
 use ::rpc::forge as rpc;
 use carbide_uuid::machine::{HostMachineId, StableHostMachineId};
+use health_report::HealthReportApplyMode;
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::{Request, Response, Status};
@@ -290,9 +291,11 @@ pub(crate) async fn set_maintenance(
                 Err(CarbideError::NotFoundError { .. }) => return Ok(Response::new(())),
                 Err(err) => return Err(err.into()),
             };
-            let recheck = api
-                .runtime_config
-                .maintenance_end_boot_config_recheck_enabled;
+            let reapply_bios = api.runtime_config.maintenance_end_bios_reapply_enabled;
+            let recheck = reapply_bios
+                || api
+                    .runtime_config
+                    .maintenance_end_boot_config_recheck_enabled;
             let reconciliation = if recheck {
                 crate::handlers::bmc_endpoint_explorer::reverify_host_boot_configuration(
                     &mut txn, machine_id,
@@ -301,16 +304,55 @@ pub(crate) async fn set_maintenance(
             } else {
                 None
             };
+            let reapplying_bios = reapply_bios && reconciliation == Some(true);
+            if reapplying_bios {
+                db::machine::insert_health_report(
+                    &mut txn,
+                    &machine_id.into(),
+                    HealthReportApplyMode::Merge,
+                    &bios_reapply_health_report(triggered_by),
+                    false,
+                )
+                .await?;
+            }
             txn.commit().await?;
             if let Some(eligible) = reconciliation {
-                tracing::info!(
-                    %machine_id,
-                    "Maintenance ended; re-verifying the host BIOS and boot configuration before it is allocated"
-                );
+                if reapplying_bios {
+                    tracing::info!(
+                        %machine_id,
+                        "Maintenance ended; re-applying the host BIOS profile before it is allocated"
+                    );
+                } else {
+                    tracing::info!(
+                        %machine_id,
+                        "Maintenance ended; re-verifying the host BIOS and boot configuration before it is allocated"
+                    );
+                }
                 enqueue_boot_interface_reconciliation(api, machine_id, eligible).await;
             }
         }
     };
 
     Ok(Response::new(()))
+}
+
+fn bios_reapply_health_report(triggered_by: Option<String>) -> health_report::HealthReport {
+    let now = chrono::Utc::now();
+    health_report::HealthReport {
+        source: health_report::BIOS_REAPPLY_MERGE_SOURCE.to_string(),
+        triggered_by,
+        observed_at: Some(now),
+        successes: Vec::new(),
+        alerts: vec![health_report::HealthProbeAlert {
+            id: "BiosReapply".parse().unwrap(),
+            target: None,
+            in_alert_since: Some(now),
+            message: "Re-applying the BIOS profile after maintenance".to_string(),
+            tenant_message: None,
+            classifications: vec![
+                health_report::HealthAlertClassification::prevent_allocations(),
+                health_report::HealthAlertClassification::suppress_external_alerting(),
+            ],
+        }],
+    }
 }
