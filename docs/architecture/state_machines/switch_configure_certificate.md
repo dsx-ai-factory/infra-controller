@@ -5,6 +5,15 @@ certificates during the **Configuring** phase. The handler delegates device
 operations to **Component Manager (CM)**, which in turn calls **Rack Manager
 Service (RMS)** asynchronously and polls job status until completion.
 
+Before switch creation, pre-ingestion also
+[configures switch certificates](../../operations/firmware-updates/pre-ingestion.md#switch-certificates-before-firmware)
+after initial NVOS password rotation and before firmware checks. That stage
+has its own persisted jobs and recovery rules; the post-ingestion workflow
+described here remains in place. Pre-ingestion enters `Failed` if a submission
+call returns an error or an empty job ID, or a successful status response reports
+a failed job. Every polling error retains the saved job for retry. The
+managed-switch skip and error rules below apply after switch creation.
+
 ## Goals
 
 - Install or rotate the switch NVOS certificate as part of initial switch
@@ -33,15 +42,15 @@ state Configuring {
     state DisableMtls {
         [*] --> DisableStart
         DisableStart --> DisableWaitForComplete : job submitted
-        DisableStart --> DisableStart : CM start error (retry next iteration)
-        DisableWaitForComplete --> DisableWaitForComplete : in progress or CM poll error (retry next iteration)
+        DisableStart --> DisableStart : retryable CM start error
+        DisableWaitForComplete --> DisableWaitForComplete : in progress or retryable CM poll error
     }
     DisableMtls --> ConfigureCertificate : job Completed or skipped
     state ConfigureCertificate {
         [*] --> Start
         Start --> WaitForComplete : job submitted
         Start --> Start : CM start error (retry next iteration)
-        WaitForComplete --> WaitForComplete : in progress or CM poll error (retry next iteration)
+        WaitForComplete --> WaitForComplete : in progress or retryable CM poll error
     }
     ConfigureCertificate --> RotateOsPassword : job Completed or skipped
     RotateOsPassword --> FetchInfo : credentials ready
@@ -50,7 +59,7 @@ state Configuring {
 FetchInfo --> Validating : slot and tray lookup complete
 
 DisableMtls --> Error : job Failed, outcome unknown, or unobservable
-ConfigureCertificate --> Error : job Failed
+ConfigureCertificate --> Error : job Failed or no longer observable
 ```
 
 `DisableStart` and `DisableWaitForComplete` are the `Start` and
@@ -116,7 +125,7 @@ disable step was skipped.
 
 | Sub-state | Purpose |
 |-----------|---------|
-| `Start` | Resolve switch endpoint, derive `domain_name`, call CM to start RMS job. |
+| `Start` | Resolve the switch endpoint and call CM with `domain_name = None` to start the RMS job. |
 | `WaitForComplete { job_id }` | Poll CM → RMS for job status until terminal. |
 
 Job status values use `ConfigureSwitchCertificateState`: `Started`,
@@ -155,13 +164,13 @@ uses the state-controller behavior described above.
 ### Service list configuration
 
 `[switch_state_controller].switch_mtls_services` controls certificate bindings
-for both switch state-controller and direct RPC operations. Rack
+for switch pre-ingestion, switch state-controller, and direct RPC operations. Rack
 `ConfigureNmxCluster` uses the effective service list for primary nmx-telemetry
 and only explicitly listed gNMI for the rack-wide batch. A non-empty list
-replaces the switch/direct default. Omission or an empty list uses all four
-values for switch/direct operations and primary nmx-telemetry, but not rack-wide
-gNMI. The switch state controller omits primary-only cluster applications on
-non-primary switches.
+replaces the default list before role filtering. Omission or an empty list
+selects all four values before filtering and includes primary nmx-telemetry,
+but not rack-wide gNMI. Pre-ingestion and the switch state controller's non-primary
+path omit `scale_up_fabric_manager` and `scale_up_fabric_telemetry`.
 
 `[rack_state_controller].nmx_cluster_switch_mtls_services` is deprecated. The
 field remains accepted and ignored. Before RMS V2, rack
@@ -211,7 +220,7 @@ for rack maintenance, and a shared status method:
 |--------|-------|--------|
 | `configure_switch_certificate` | `SwitchEndpoint`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | `job_id: String` |
 | `batch_configure_switch_certificate` | `&[SwitchCertificateEndpoint]`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | parent `job_id: String` |
-| `get_configure_switch_certificate_job_status` | `job_id: &str` | `ConfigureSwitchCertificateJobStatus { state, error }` |
+| `get_configure_switch_certificate_job_status` | `job_id: &str` | `ConfigureSwitchCertificateJobStatus { state, error, failure }` |
 | `batch_disable_switch_mtls` | `&[SwitchEndpoint]`, `services: &[i32]` | parent `job_id: String` |
 | `get_disable_switch_mtls_job_status` | `job_id: &str` | `SwitchMtlsDisableJobStatus { state, error }` |
 
@@ -241,21 +250,29 @@ return `Unsupported` through the default implementation.
 
 `batch_disable_switch_mtls` and `get_disable_switch_mtls_job_status` are
 implemented by the RMS backend. Other backends return `Unsupported` through the
-default implementation, which the switch handler treats as a skipped step.
+default implementation. The managed switch controller skips an unsupported
+submission; an unsupported status lookup transitions it to `Error`.
 
 ## RMS integration
 
 ### Identity resolution (RMS backend only)
 
-Before calling RMS, `RmsBackend`:
+Before calling RMS for single-switch certificate configuration or mTLS disable,
+`RmsBackend`:
 
 1. Looks up `switch.id` and `switch.rack_id` via `find_rms_identities_by_macs`.
-2. Builds `rms::NodeInfo` from the `SwitchEndpoint` and resolved identity.
-3. Passes optional `domain`, `services`, and device info to RMS.
+2. Resolves BMC MACs without a managed RMS identity from expected-switch
+   inventory. This fallback uses the BMC MAC as the RMS node ID and requires an
+   expected rack association. Its rack profile comes from the live rack when
+   set, otherwise the expected rack.
+3. Builds `rms::NodeInfo` from the `SwitchEndpoint` and resolved identity.
+4. Passes device info, services, and the optional certificate domain to RMS.
 
-If the switch has no `rack_id` in the database, identity resolution fails and CM
-returns an internal error (the state handler normally skips earlier when
-`switch.rack_id` is unset during bring-up).
+If neither lookup supplies a usable identity, CM returns `Internal` for
+single-switch certificate configuration or `RejectedBeforeDispatch` for mTLS
+disable. The managed switch handler normally skips both operations earlier
+when `switch.rack_id` is unset during bring-up. Pre-ingestion requires the
+expected switch's rack association before either submission.
 
 ### RMS RPCs
 
@@ -266,7 +283,10 @@ returns an internal error (the state handler normally skips earlier when
 | `batch_disable_switch_mtls` | `NodeSet` of `NodeInfo`, `services[]` | batch status, parent `job_id` |
 | `get_job_status` | `job_id`, `include_child_job_states = true` | `JobStatus` list for the parent and child jobs, each with `execution_state` |
 
-RMS job states are mapped in `map_rms_configure_switch_certificate_job_state`.
+RMS job states are mapped in `map_rms_configure_switch_certificate_job_state`;
+an unrecognized certificate state remains `InProgress`. A certificate-status
+response with an unsuccessful return code maps to `NotFound`, while RPC errors
+map to `Internal`.
 
 The mTLS-disable path uses the last two RPCs:
 
@@ -281,9 +301,9 @@ The mTLS-disable path uses the last two RPCs:
   response to `Pending`, `Completed`, or `Failed`. `Completed` requires the
   parent and every child it declares to be `Completed`. A child that RMS has not
   yet reported keeps the job `Pending`. A failed child or parent is `Failed`,
-  and the child's error is preferred. A missing parent or an unspecified
-  execution state maps to `OperationOutcomeUnknown`. RMS `NotFound` and
-  `InvalidArgument` observations also map to `OperationOutcomeUnknown`.
+  and the child's error is preferred. A missing parent, an unknown or unspecified
+  execution state, or an RMS `NotFound` or `InvalidArgument` observation maps to
+  `OperationOutcomeUnknown`, which the managed switch controller treats as failed.
   `Unimplemented` maps to `Unsupported`. Unavailability, transport errors, and
   other RMS errors surface as generic CM errors, which the switch handler
   retries.
@@ -403,7 +423,9 @@ sequenceDiagram
 
     alt status = Started or InProgress
         SCH->>SCH: wait (retry next iteration)
-    else CM poll error
+    else CM NotFound
+        SCH->>SCH: transition to Error
+    else other CM poll error
         SCH->>SCH: StateHandlerError (retry next iteration in WaitForComplete)
     else status = Completed
         SCH->>SCH: transition to RotateOsPassword
@@ -494,9 +516,10 @@ after job submission:
 }
 ```
 
-The job ID is **only** in controller state (unlike rack firmware upgrade, which
-also stores a separate `firmware_upgrade_job` row). This is sufficient for a
-single-switch, single-job certificate operation.
+For this managed-switch workflow, the job ID is **only** in controller state
+(unlike rack firmware upgrade, which also stores a separate
+`firmware_upgrade_job` row). This is sufficient for a single-switch, single-job
+certificate operation.
 
 ## Implementation map
 
@@ -511,7 +534,7 @@ single-switch, single-job certificate operation.
 | CM facade | `crates/component-manager/src/component_manager.rs` |
 | CM trait | `crates/component-manager/src/nv_switch_manager.rs` |
 | RMS backend | `crates/component-manager/src/rms.rs` |
-| Tests | `crates/api-core/src/tests/switch_state_controller/` |
+| Tests | `crates/switch-controller/tests/integration/` |
 
 ## Testing
 
@@ -525,7 +548,7 @@ Integration tests cover:
 - Maintenance `ReconfigureCertificate` success and failure paths
 
 Run with `DATABASE_URL` set (sqlx test harness), filter:
-`cargo test -p carbide-api-core configure_certificate`.
+`cargo test -p carbide-switch-controller --test integration configure_certificate`.
 
 ## Future work
 

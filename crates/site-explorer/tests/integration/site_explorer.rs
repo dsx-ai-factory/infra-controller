@@ -1442,16 +1442,24 @@ async fn test_exploration_failure_logs_error_once(
 }
 
 #[sqlx_test]
-async fn test_handle_redfish_error_powers_on_machine(
+async fn test_handle_redfish_error_powers_on_primary_machine_address(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use model::allocation_type::AllocationType;
+
     let env = Env::new(pool).await;
 
     let mut machine = env.new_machine("6a:6b:6c:6d:6e:70", "Vendor1");
     machine.discover_dhcp(env.api()).await?;
     let bmc_ip: IpAddr = machine.ip.parse()?;
+    let ipv6: IpAddr = "2001:db8::6e70".parse()?;
 
     let mut txn = env.pool.txn_begin().await?;
+    let interface = db::machine_interface::find_by_ip(txn.as_mut(), bmc_ip)
+        .await?
+        .expect("DHCP created the BMC interface");
+    db::machine_interface_address::insert(&mut txn, interface.id, ipv6, AllocationType::Dhcp)
+        .await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -1469,27 +1477,27 @@ async fn test_handle_redfish_error_powers_on_machine(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
-        explorations_per_run: 1,
+        explorations_per_run: 2,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
         ..Default::default()
     };
     let explorer = env.test_site_explorer(explorer_config);
-    explorer.insert_endpoint_result(
-        bmc_ip,
-        Err(EndpointExplorationError::RedfishError {
-            details: "transient redfish failure".to_string(),
-            response_body: None,
-            response_code: Some(500),
-        }),
-    );
-    explorer
-        .endpoint_explorer()
-        .power_states
-        .lock()
-        .unwrap()
-        .insert(bmc_ip, BmcPowerState::Off);
+    let error = EndpointExplorationError::RedfishError {
+        details: "transient redfish failure".to_string(),
+        response_body: None,
+        response_code: Some(500),
+    };
+    for address in [bmc_ip, ipv6] {
+        explorer.insert_endpoint_result(address, Err(error.clone()));
+        explorer
+            .endpoint_explorer()
+            .power_states
+            .lock()
+            .unwrap()
+            .insert(address, BmcPowerState::Off);
+    }
 
     explorer.run_single_iteration().await?;
 
@@ -1505,8 +1513,103 @@ async fn test_handle_redfish_error_powers_on_machine(
         );
     }
 
-    let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
-    assert_eq!(endpoints.len(), 1, "expected one explored endpoint");
+    let endpoints = db::explored_endpoints::find_by_ips(&env.pool, vec![bmc_ip, ipv6]).await?;
+    assert_eq!(endpoints.len(), 2);
+    for endpoint in endpoints {
+        assert_eq!(endpoint.preingestion_state, PreingestionState::Initial);
+        assert_eq!(endpoint.report.last_exploration_error, Some(error.clone()));
+        assert!(endpoint.last_redfish_bmc_reset.is_none());
+        assert!(endpoint.last_ipmitool_bmc_reset.is_none());
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_handle_redfish_error_resets_only_primary_bmc_address(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::allocation_type::AllocationType;
+
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:15:03", "Vendor1");
+    machine.discover_dhcp(env.api()).await?;
+    let ipv4: IpAddr = machine.ip.parse()?;
+    let ipv6: IpAddr = "2001:db8::1503".parse()?;
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        ..Default::default()
+    };
+    let mut txn = env.pool.txn_begin().await?;
+    let interface = db::machine_interface::find_by_ip(txn.as_mut(), ipv4)
+        .await?
+        .expect("DHCP created the BMC interface");
+    db::machine_interface_address::insert(&mut txn, interface.id, ipv6, AllocationType::Dhcp)
+        .await?;
+    for address in [ipv4, ipv6] {
+        db::explored_endpoints::insert(address, &report, false, &mut txn).await?;
+        db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?;
+    }
+    txn.commit().await?;
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let error = EndpointExplorationError::RedfishError {
+        details: "transient redfish failure".to_string(),
+        response_body: None,
+        response_code: Some(500),
+    };
+    for address in [ipv4, ipv6] {
+        explorer.insert_endpoint_result(address, Err(error.clone()));
+    }
+
+    explorer.run_single_iteration().await?;
+
+    let endpoints = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv4, ipv6]).await?;
+    assert_eq!(endpoints.len(), 2);
+    for endpoint in endpoints {
+        assert_eq!(endpoint.preingestion_state, PreingestionState::Complete);
+        assert_eq!(endpoint.report.last_exploration_error, Some(error.clone()));
+        assert_eq!(
+            endpoint.last_redfish_bmc_reset.is_some(),
+            endpoint.address == ipv4
+        );
+        assert!(endpoint.last_ipmitool_bmc_reset.is_none());
+    }
+
+    // IPv6 becomes the remediation address when it is the interface's only address.
+    let mut txn = env.pool.txn_begin().await?;
+    assert!(
+        db::machine_interface_address::delete_by_interface_family(
+            &mut txn,
+            interface.id,
+            carbide_network::ip::IpAddressFamily::Ipv4,
+            AllocationType::Dhcp,
+        )
+        .await?
+    );
+    db::explored_endpoints::delete(&mut txn, ipv4).await?;
+    txn.commit().await?;
+    explorer.run_single_iteration().await?;
+
+    let endpoints = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6]).await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].preingestion_state, PreingestionState::Complete);
+    assert!(endpoints[0].last_redfish_bmc_reset.is_some());
+    assert!(endpoints[0].last_ipmitool_bmc_reset.is_none());
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     Ok(())
 }
 

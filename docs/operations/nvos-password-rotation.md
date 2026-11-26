@@ -42,11 +42,19 @@ RPC availability alone does not establish compatibility. Each RMS instance must 
 
 ## Initial rotation during pre-ingestion
 
-After BMC reset and successful time synchronization, every switch BMC enters
-`NvosPasswordRotation` before firmware checks or updates. Entry does not depend
+At `Initial`, pre-ingestion selects the allocated IPv4 address on each BMC
+interface when present, otherwise IPv6. Secondary addresses wait in `Initial`
+until their primary completes, then become `Complete` with a skip log. There
+is no automatic fallback when the primary is unavailable or fails. This
+selection is per interface and does not reassign work already in progress;
+see [BMC address selection](firmware-updates/pre-ingestion.md).
+
+After BMC reset and successful time synchronization, the selected switch BMC
+endpoint enters `NvosPasswordRotation` before firmware checks or updates. Entry does not depend
 on a published site target or component-manager availability or backend support.
 Compute-tray and DPU BMCs continue through their existing firmware checks without
-entering `NvosPasswordRotation` or its `CheckFirmware` continuation.
+entering `NvosPasswordRotation`, `SwitchCertificateRotation`, or their
+`CheckFirmware` continuation.
 This work does not require a managed switch entry and is independent of `site_explorer.create_machines`,
 `create_switches`, and `create_power_shelves`. If component-manager dependencies
 are unavailable or the configured backend does not support rotation, the handler
@@ -64,35 +72,28 @@ switch row exists. Missing rack metadata on an existing switch is an identity
 error; NICo does not substitute its expected-switch identity.
 
 Pre-ingestion checks `device_credential_rotation` for the BMC MAC and the
-`nvos` credential type. If the row has a non-null `current_version`, NICo skips
-initial rotation and continues to `CheckFirmware`. That version confirms a
-previously applied site password; the switch controller handles any newer target
-after ingestion. Version `0` is also a confirmed version. A missing row or null
-`current_version` requires rotation, even when the credential store already
+`nvos` credential type. A non-null `current_version` confirms a previously
+applied site password, so another initial rotation is unnecessary. The endpoint
+advances to `SwitchCertificateRotation`; a confirmed password does not skip TLS
+handling. The switch controller handles any newer target after ingestion.
+Version `0` is also a confirmed version.
+A missing row or null `current_version` requires rotation, even when the credential store already
 contains a password different from the expected-switch factory password.
 
-A switch BMC can have separate IPv4 and IPv6 explored endpoints. NICo persists
-one rotation owner per BMC MAC by advancing only one endpoint from `Check` to
-`Rotate`, initially without a job ID. Other aliases remain in `Check` until the
-owner records a confirmed version. The owner retains its claim across restarts
-and while an exploration error or refresh wait excludes it from an iteration.
-
-NICo coordinates claims with a short database transaction that locks the shared
-BMC interface rows and rereads the aliases' persisted states and confirmed
-rotation version. If rotation is needed and no alias owns it, that transaction
-captures the database's site target version and persists the claim. Credential
-validation and RMS calls run later in `Rotate`, after the lock is released.
-Completion atomically records the confirmed version and advances the owner to
-`CheckFirmware`. Claims read alias states before the confirmed version, so a
-waiting alias either sees the owner or observes that version and continues to
-firmware checks without submitting another rotation.
+If rotation is needed, a short transaction locks the BMC interface rows,
+captures the database's site target version, and persists `Rotate` without a job
+ID. Credential validation and RMS calls run later in `Rotate`, after the lock
+is released. Completion atomically records the confirmed version and advances
+the endpoint to `SwitchCertificateRotation`. Certificate handling then advances
+that endpoint to firmware checks or `Failed`. Secondary addresses wait in
+`Initial` until their primary completes the full pre-ingestion workflow.
 
 Rotation authenticates using the stored per-switch credential when available,
 falling back to the expected-switch factory credentials. NICo does not compare
 these credentials to decide whether rotation is needed. Before submission,
 missing or invalid credentials, including a missing or empty captured target
-credential, report an error in `Rotate` and retain the owner, captured target
-version, and absent job ID for retry after repair. Publishing a newer target
+credential, report an error in `Rotate` and retain the endpoint's captured target
+version and absent job ID for retry after repair. Publishing a newer target
 does not replace that claim. If the primary NVOS endpoint cannot be resolved
 during submission, NICo reports an endpoint-resolution
 error identifying the BMC MAC and leaves the state and captured target unchanged
@@ -105,44 +106,51 @@ the expected-switch factory credentials directly for RMS authentication without
 first writing them to the credential store. It submits the current-to-target
 password transition to RMS. This must precede mTLS setup: factory NVOS
 credentials can require a password change before RMS can execute `BatchUnsetMtls`.
-The switch controller performs mTLS
-and certificate setup after ingestion using the rotated password.
+Pre-ingestion then enters `SwitchCertificateRotation` to disable stale mTLS
+bindings over SSH and install the TLS certificate using the rotated password,
+before firmware checks. The switch controller's post-ingestion certificate
+workflow also remains in place. See
+[switch certificates before firmware](firmware-updates/pre-ingestion.md#switch-certificates-before-firmware)
+for service selection, prerequisites, persisted jobs, and recovery.
 
-The owner's NVOS pre-ingestion state stores the captured target version and RMS
+The endpoint's NVOS pre-ingestion state stores the captured target version and RMS
 job ID in `explored_endpoints.preingestion_state`. It persists the target before
 submission, then saves the returned job ID for polling across restarts. A
 pending job resumes without rechecking the recorded credential version.
 Failed, missing, or unknown jobs retry the same captured target. A submitted
-rotation advances to `CheckFirmware` only after RMS
+rotation advances to `SwitchCertificateRotation` only after RMS
 reports success and the captured target password is written to the per-switch
 credential and verified through both the configured writer and effective reader.
 NICo then records that target as `device_credential_rotation.current_version`
-in the same database transaction as the transition to `CheckFirmware`. An
-existing unconfirmed row is updated without deleting it; superseded pending
+in the same database transaction as the transition to `SwitchCertificateRotation`.
+An existing unconfirmed row is updated without deleting it; superseded pending
 operation fields are cleared and attempt history is retained.
 NICo preserves the stored username, or uses the
-expected-switch username when no stored credential exists. Firmware
-checks and any required updates must still finish before pre-ingestion completes.
+expected-switch username when no stored credential exists. Certificate handling,
+firmware checks, and any required updates must still finish before pre-ingestion
+completes.
 If a newer site password is published while the job runs, the switch controller
 handles it after ingestion. This also applies when NICo restarts between
-credential confirmation and recording the transition to firmware checks.
+credential confirmation and recording the transition to certificate handling.
 
 After ingestion, the switch controller reuses the confirmed version. If it
 meets the current site target, the controller does not submit another password
 rotation. Otherwise, it handles the newer target. Switch creation rechecks all
-allocated addresses associated with the BMC interface under the same interface
-lock and waits until each has an explored endpoint in `Complete`. An unexplored
+allocated addresses on interfaces sharing the BMC MAC under the same interface
+locks and waits until each has an explored endpoint in `Complete`. An unexplored
 address or an endpoint with unfinished or failed pre-ingestion blocks creation.
 Finding an existing switch
 entry during NVOS pre-ingestion returns an error and leaves its state,
 credentials, and password jobs unchanged.
 Before switch creation, restarting NICo retains any staged password job and
-continues to firmware checks once the initial rotation is confirmed.
+continues to certificate handling once the initial rotation is confirmed.
 
 Existing endpoints retain their recorded pre-ingestion state. Publishing a
 target does not rerun this step for a BMC that has already completed
-pre-ingestion. Clearing a site exploration error resets only failed
-pre-ingestion; it leaves completed endpoints unchanged.
+pre-ingestion. Clearing a site exploration error resets only the addressed
+endpoint's failed pre-ingestion state; it leaves other endpoints and completed
+pre-ingestion unchanged. Deleting an explored endpoint also leaves its aliases
+unchanged.
 
 Factory `admin/admin` recovery requires an RMS version that can handle the
 expired-password SSH prompt. If RMS loses that job before mTLS is configured,
