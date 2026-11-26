@@ -38,6 +38,8 @@ type MachineGPUInfo struct {
 	Frequency NullableString `json:"frequency,omitempty"`
 	// PCI BusId of the Machine's GPU
 	PciBusId NullableString `json:"pciBusId,omitempty"`
+	// SKU ID of the Machine's GPU, exactly as the host BMC reports it on the Redfish GPU chassis whose serial number matches the GPU's serial number, for example `0x6C070000`. Null when the host BMC does not report a SKU, when no GPU chassis matches the GPU's serial number, or when the matching GPU chassis report different SKUs.
+	Sku NullableString `json:"sku,omitempty"`
 }
 
 // NewMachineGPUInfo instantiates a new MachineGPUInfo object
@@ -401,6 +403,49 @@ func (o *MachineGPUInfo) UnsetPciBusId() {
 	o.PciBusId.Unset()
 }
 
+// GetSku returns the Sku field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MachineGPUInfo) GetSku() string {
+	if o == nil || IsNil(o.Sku.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Sku.Get()
+}
+
+// GetSkuOk returns a tuple with the Sku field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineGPUInfo) GetSkuOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Sku.Get(), o.Sku.IsSet()
+}
+
+// HasSku returns a boolean if a field has been set.
+func (o *MachineGPUInfo) HasSku() bool {
+	if o != nil && o.Sku.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSku gets a reference to the given NullableString and assigns it to the Sku field.
+func (o *MachineGPUInfo) SetSku(v string) {
+	o.Sku.Set(&v)
+}
+
+// SetSkuNil sets the value for Sku to be an explicit nil
+func (o *MachineGPUInfo) SetSkuNil() {
+	o.Sku.Set(nil)
+}
+
+// UnsetSku ensures that no value is present for Sku, not even an explicit nil
+func (o *MachineGPUInfo) UnsetSku() {
+	o.Sku.Unset()
+}
+
 func (o MachineGPUInfo) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -434,6 +479,9 @@ func (o MachineGPUInfo) ToMap() (map[string]interface{}, error) {
 	}
 	if o.PciBusId.IsSet() {
 		toSerialize["pciBusId"] = o.PciBusId.Get()
+	}
+	if o.Sku.IsSet() {
+		toSerialize["sku"] = o.Sku.Get()
 	}
 	return toSerialize, nil
 }

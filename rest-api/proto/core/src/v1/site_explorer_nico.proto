@@ -306,6 +306,8 @@ message Chassis {
   optional string model = 3;
   optional string part_number = 4;
   optional string serial_number = 5;
+  // Redfish `SKU` of the chassis, as reported. Absent when the BMC does not report it.
+  optional string sku = 7;
 }
 
 // `NetworkAdapter` definition. Matches redfish definition

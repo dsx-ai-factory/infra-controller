@@ -425,6 +425,7 @@ impl TryFrom<Gpu> for rpc::machine_discovery::Gpu {
             frequency: gpu.frequency,
             pci_bus_id: gpu.pci_bus_id,
             platform_info,
+            sku: None,
         })
     }
 }
@@ -1401,6 +1402,7 @@ mod tests {
                     frequency: "1 GHz".to_string(),
                     pci_bus_id: "0000:01:00.0".to_string(),
                     platform_info: None,
+                    sku: None,
                 },
                 rpc::machine_discovery::Gpu {
                     name: "GPU with platform".to_string(),
@@ -1419,6 +1421,7 @@ mod tests {
                         module_id: 8,
                         fabric_guid: "fabric-guid".to_string(),
                     }),
+                    sku: None,
                 },
             ],
             #[allow(deprecated)]

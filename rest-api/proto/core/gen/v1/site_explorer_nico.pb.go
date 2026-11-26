@@ -1928,8 +1928,10 @@ type Chassis struct {
 	Model           *string                `protobuf:"bytes,3,opt,name=model,proto3,oneof" json:"model,omitempty"`
 	PartNumber      *string                `protobuf:"bytes,4,opt,name=part_number,json=partNumber,proto3,oneof" json:"part_number,omitempty"`
 	SerialNumber    *string                `protobuf:"bytes,5,opt,name=serial_number,json=serialNumber,proto3,oneof" json:"serial_number,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Redfish `SKU` of the chassis, as reported. Absent when the BMC does not report it.
+	Sku           *string `protobuf:"bytes,7,opt,name=sku,proto3,oneof" json:"sku,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Chassis) Reset() {
@@ -2000,6 +2002,13 @@ func (x *Chassis) GetPartNumber() string {
 func (x *Chassis) GetSerialNumber() string {
 	if x != nil && x.SerialNumber != nil {
 		return *x.SerialNumber
+	}
+	return ""
+}
+
+func (x *Chassis) GetSku() string {
+	if x != nil && x.Sku != nil {
+		return *x.Sku
 	}
 	return ""
 }
@@ -3026,7 +3035,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\f_descriptionB\x14\n" +
 	"\x12_interface_enabledB\x0e\n" +
 	"\f_mac_addressB\x0e\n" +
-	"\f_link_status\"\xb4\x02\n" +
+	"\f_link_status\"\xd3\x02\n" +
 	"\aChassis\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12H\n" +
 	"\x10network_adapters\x18\x02 \x03(\v2\x1d.site_explorer.NetworkAdapterR\x0fnetworkAdapters\x12'\n" +
@@ -3034,11 +3043,13 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tH\x01R\x05model\x88\x01\x01\x12$\n" +
 	"\vpart_number\x18\x04 \x01(\tH\x02R\n" +
 	"partNumber\x88\x01\x01\x12(\n" +
-	"\rserial_number\x18\x05 \x01(\tH\x03R\fserialNumber\x88\x01\x01B\x0f\n" +
+	"\rserial_number\x18\x05 \x01(\tH\x03R\fserialNumber\x88\x01\x01\x12\x15\n" +
+	"\x03sku\x18\a \x01(\tH\x04R\x03sku\x88\x01\x01B\x0f\n" +
 	"\r_manufacturerB\b\n" +
 	"\x06_modelB\x0e\n" +
 	"\f_part_numberB\x10\n" +
-	"\x0e_serial_number\"\x9f\x02\n" +
+	"\x0e_serial_numberB\x06\n" +
+	"\x04_sku\"\x9f\x02\n" +
 	"\x0eNetworkAdapter\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
 	"\fmanufacturer\x18\x02 \x01(\tH\x00R\fmanufacturer\x88\x01\x01\x12\x19\n" +

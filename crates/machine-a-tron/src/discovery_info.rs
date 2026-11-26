@@ -570,6 +570,7 @@ fn nvidia_dgx_h100(host: &HostMachineInfo) -> DiscoveryInfo {
                 ][index]
                     .into(),
                 platform_info: None,
+                sku: None,
             })
             .collect(),
         memory_device_groups: memory_device_groups(32, 65536, "DDR5"),
@@ -772,6 +773,7 @@ fn gb200_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
                     [[2, 1], [4, 3]][board][gpu],
                     (24, 14),
                 )),
+                sku: None,
             })
         })
         .collect()
@@ -802,6 +804,7 @@ fn gb300_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
             ][index]
                 .into(),
             platform_info: Some(gpu_platform_info(host, [2, 1, 4, 3][index], (4, 3))),
+            sku: None,
         })
         .collect()
 }

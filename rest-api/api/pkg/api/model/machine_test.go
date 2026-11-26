@@ -654,6 +654,32 @@ func TestAPIBMCInfo_FromProto(t *testing.T) {
 	}
 }
 
+func TestAPIMachineGPUInfo_FromProtoSkuJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		sku     *string
+		wantSku string
+	}{
+		{name: "renders the SKU as reported by the host BMC", sku: cutil.GetPtr("0x6C070000"), wantSku: `"0x6C070000"`},
+		{name: "renders null when the SKU is not known", wantSku: `null`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gpu := APIMachineGPUInfo{}
+			gpu.FromProto(&corev1.Gpu{Name: "NVIDIA GB300", Sku: tc.sku})
+
+			response, err := json.Marshal(gpu)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(response, &fields))
+			sku, found := fields["sku"]
+			require.True(t, found)
+			assert.JSONEq(t, tc.wantSku, string(sku))
+		})
+	}
+}
+
 func TestAPIMachineMetadata_FromProto(t *testing.T) {
 	cases := []struct {
 		name               string

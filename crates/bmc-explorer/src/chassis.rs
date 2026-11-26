@@ -479,6 +479,7 @@ impl<B: Bmc> ExploredChassis<B> {
             model: hw_id.model.map(|v| v.to_string()),
             part_number: hw_id.part_number.map(|v| v.to_string()),
             serial_number: hw_id.serial_number.map(|v| v.to_string()),
+            sku: self.chassis.raw().sku.clone().flatten(),
             assemblies: self
                 .assemblies
                 .iter()

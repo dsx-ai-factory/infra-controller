@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::machine::MachineId;
@@ -25,8 +25,9 @@ use mac_address::MacAddress;
 use model::firmware::FirmwareComponentType;
 use model::machine_boot_interface::MachineBootInterface;
 use model::site_explorer::{
-    EndpointExplorationReport, ExploredEndpoint, HardwareClassCount, InitialBmcResetPhase,
-    InitialResetPhase, PowerDrainState, PreingestionState, TimeSyncResetPhase,
+    EndpointExplorationReport, ExploredEndpoint, GPU_CHASSIS_ID_PREFIX, GpuChassisSku,
+    HardwareClassCount, InitialBmcResetPhase, InitialResetPhase, PowerDrainState,
+    PreingestionState, TimeSyncResetPhase,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
@@ -189,6 +190,53 @@ pub async fn find_report_by_ip(
         .into_iter()
         .next()
         .map(|endpoint| endpoint.report))
+}
+
+/// Serial numbers and Redfish SKUs of the GPU chassis, whose IDs start with
+/// [`GPU_CHASSIS_ID_PREFIX`], in the reports of the BMCs at `ips`, keyed by BMC
+/// address. Chassis without a serial number or a non-empty SKU are omitted, and
+/// so are BMCs without such chassis. Empty input performs no read.
+pub async fn find_gpu_chassis_skus_by_ips(
+    db: impl DbReader<'_>,
+    ips: &[IpAddr],
+) -> Result<HashMap<IpAddr, Vec<GpuChassisSku>>, DatabaseError> {
+    if ips.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(FromRow)]
+    struct GpuChassisSkuRow {
+        address: IpAddr,
+        serial_number: String,
+        sku: String,
+    }
+
+    let query =
+        "SELECT ee.address, chassis->>'SerialNumber' AS serial_number, chassis->>'SKU' AS sku
+        FROM explored_endpoints ee
+        CROSS JOIN LATERAL jsonb_array_elements(ee.exploration_report->'Chassis') AS chassis
+        WHERE ee.address = ANY($1)
+          AND starts_with(chassis->>'Id', $2)
+          AND chassis->>'SerialNumber' IS NOT NULL
+          AND chassis->>'SKU' <> ''";
+    let rows = sqlx::query_as::<_, GpuChassisSkuRow>(query)
+        .bind(ips)
+        .bind(GPU_CHASSIS_ID_PREFIX)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut skus_by_ip = HashMap::<IpAddr, Vec<GpuChassisSku>>::new();
+    for row in rows {
+        skus_by_ip
+            .entry(row.address)
+            .or_default()
+            .push(GpuChassisSku {
+                serial_number: row.serial_number,
+                sku: row.sku,
+            });
+    }
+    Ok(skus_by_ip)
 }
 
 // PostgreSQL's default trim removes only ASCII space. Match Rust's `str::trim`
@@ -1411,6 +1459,60 @@ mod tests {
             cases.iter().filter(|c| c.candidate_expected).count()
         );
         assert_eq!(found.len(), cases.iter().filter(|c| c.expected).count());
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn gpu_chassis_sku_lookup_returns_requested_gpu_chassis_with_sku(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fn report(chassis: &[(&str, Option<&str>, Option<&str>)]) -> EndpointExplorationReport {
+            EndpointExplorationReport {
+                endpoint_type: EndpointType::Bmc,
+                chassis: chassis
+                    .iter()
+                    .map(|(id, serial_number, sku)| Chassis {
+                        id: (*id).to_string(),
+                        serial_number: serial_number.map(str::to_string),
+                        sku: sku.map(str::to_string),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        let gpu_bmc: IpAddr = "192.0.2.1".parse()?;
+        let non_gpu_bmc: IpAddr = "192.0.2.2".parse()?;
+        let unrequested_bmc: IpAddr = "192.0.2.3".parse()?;
+        let mut txn = pool.txn_begin().await?;
+        let gpu_report = report(&[
+            ("HGX_GPU_0", Some("1653A"), Some("0x6C070000")),
+            ("HGX_GPU_1", Some("1653A"), Some("0x6C070000")),
+            ("HGX_GPU_2", None, Some("0x6C070000")),
+            ("HGX_GPU_3", Some("1653B"), Some("")),
+            ("HGX_GPU_4", Some("1653B"), None),
+            ("HGX_CPU_0", Some("1653A"), Some("0x00000001")),
+        ]);
+        insert(gpu_bmc, &gpu_report, false, &mut txn).await?;
+        let non_gpu_report = report(&[("Chassis_0", Some("1653A"), Some("0x6C070000"))]);
+        insert(non_gpu_bmc, &non_gpu_report, false, &mut txn).await?;
+        let unrequested_report = report(&[("HGX_GPU_0", Some("1653C"), Some("0x6D070000"))]);
+        insert(unrequested_bmc, &unrequested_report, false, &mut txn).await?;
+
+        let gpu_chassis = GpuChassisSku {
+            serial_number: "1653A".to_string(),
+            sku: "0x6C070000".to_string(),
+        };
+        assert_eq!(
+            find_gpu_chassis_skus_by_ips(&mut txn, &[gpu_bmc, non_gpu_bmc]).await?,
+            HashMap::from([(gpu_bmc, vec![gpu_chassis.clone(), gpu_chassis])]),
+        );
+        assert!(
+            find_gpu_chassis_skus_by_ips(&mut txn, &[])
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 

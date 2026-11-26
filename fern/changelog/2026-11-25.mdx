@@ -1,0 +1,18 @@
+---
+tags: ["unreleased", "rest-api"]
+---
+
+## Upcoming: GPU SKU IDs in Machine metadata
+
+[Retrieve all Machines](api:GET/v2/org/:org/nico/machine),
+[Retrieve a Machine](api:GET/v2/org/:org/nico/machine/:machineId), and
+[Update Machine](api:PATCH/v2/org/:org/nico/machine/:machineId) now report
+`metadata.gpus[].sku` when `includeMetadata=true`. The value is the GPU's SKU ID,
+exactly as the host BMC reports it on the Redfish GPU chassis whose serial number
+matches the GPU's serial number, for example `0x6C070000`.
+
+The value is `null` when the host BMC does not report a SKU, when no GPU chassis
+matches the GPU's serial number, or when the matching GPU chassis report different
+SKUs. A Machine reports its SKUs after Site Explorer has explored its host BMC with
+a NICo Core build that collects them and Site inventory has synced the Machine to
+the REST API.

@@ -511,6 +511,8 @@ type APIMachineGPUInfo struct {
 	Frequency *string `json:"frequency"`
 	// PciBusId is the PCI BusId of the Machine's GPU
 	PciBusId *string `json:"pciBusId"`
+	// Sku is the SKU ID of the Machine's GPU as reported by the host BMC, null when it is not known
+	Sku *string `json:"sku"`
 }
 
 // APIMachineDisk is the data structure to capture API representation of a disk of a Machine.
@@ -564,6 +566,7 @@ func (gpu *APIMachineGPUInfo) FromProto(protoGpu *corev1.Gpu) {
 	gpu.TotalMemory = &protoGpu.TotalMemory
 	gpu.Frequency = &protoGpu.Frequency
 	gpu.PciBusId = &protoGpu.PciBusId
+	gpu.Sku = protoGpu.Sku
 }
 
 // APIMachineNetworkInterface is the data structure to capture API representation of a Machine's Network Interface Info

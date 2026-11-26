@@ -2114,6 +2114,9 @@ pub struct Chassis {
     pub part_number: Option<String>,
     /// SerialNumber on the chassis resource. Older reports may contain the compute-tray serial here.
     pub serial_number: Option<String>,
+    /// Redfish `SKU` of the chassis, as reported. Absent in older reports.
+    #[serde(default, rename = "SKU", skip_serializing_if = "Option::is_none")]
+    pub sku: Option<String>,
     /// Assembly members collected for this chassis, in BMC order. Absent in older reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assemblies: Vec<ChassisAssembly>,
@@ -2140,6 +2143,36 @@ impl Chassis {
             .map(str::trim)
             .none_if_empty()
             .or_else(|| self.serial_number.as_deref().map(str::trim))
+    }
+}
+
+/// Chassis ID prefix that NVIDIA HMCs use for GPU module chassis, such as `HGX_GPU_0`.
+pub const GPU_CHASSIS_ID_PREFIX: &str = "HGX_GPU_";
+
+/// Serial number and Redfish `SKU` of one GPU chassis in a stored exploration report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuChassisSku {
+    pub serial_number: String,
+    pub sku: String,
+}
+
+impl GpuChassisSku {
+    /// Returns the SKU of the host-discovered GPU with `gpu_serial`.
+    ///
+    /// A GPU board can carry several GPUs under one serial, so a serial can match
+    /// several GPU chassis. The SKU is returned only when every match reports the
+    /// same value; no match, or matches that disagree, return `None`.
+    pub fn sku_for_gpu_serial<'a>(gpu_chassis: &'a [Self], gpu_serial: &str) -> Option<&'a str> {
+        let gpu_serial = gpu_serial.trim();
+        if gpu_serial.is_empty() {
+            return None;
+        }
+        let mut skus = gpu_chassis
+            .iter()
+            .filter(|chassis| chassis.serial_number.trim() == gpu_serial)
+            .map(|chassis| chassis.sku.as_str());
+        let sku = skus.next()?;
+        skus.all(|other| other == sku).then_some(sku)
     }
 }
 
@@ -4927,6 +4960,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                sku: None,
                 assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
@@ -5158,6 +5192,7 @@ mod tests {
                 model: None,
                 serial_number: Some("MT2242XZ00NX".to_string()),
                 part_number: None,
+                sku: None,
                 assemblies: Vec::new(),
                 network_adapters: vec![],
                 physical_slot_number: None,
@@ -5611,6 +5646,69 @@ mod tests {
                     "PcieDevices": [],
                     "PowerState": "On"
                 }) => Yields(None),
+            }
+        );
+    }
+
+    /// The chassis SKU is stored under the Redfish `SKU` key, and reports saved
+    /// before it was collected still deserialize without one.
+    #[test]
+    fn chassis_sku_uses_redfish_key_and_is_optional() {
+        let chassis = Chassis {
+            id: "HGX_GPU_0".to_string(),
+            sku: Some("0x6C070000".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&chassis).unwrap();
+        assert_eq!(json["SKU"], "0x6C070000");
+        assert_eq!(serde_json::from_value::<Chassis>(json).unwrap(), chassis);
+
+        let older = serde_json::json!({ "Id": "HGX_GPU_0", "SerialNumber": "1653" });
+        let chassis = serde_json::from_value::<Chassis>(older).unwrap();
+        assert_eq!(chassis.sku, None);
+        assert!(serde_json::to_value(&chassis).unwrap().get("SKU").is_none());
+    }
+
+    /// A GPU gets a SKU only when every GPU chassis carrying its serial agrees on
+    /// one value. Serials compare after trimming; SKUs are returned as reported.
+    #[test]
+    fn gpu_chassis_sku_for_gpu_serial() {
+        fn chassis(serial_number: &str, sku: &str) -> GpuChassisSku {
+            GpuChassisSku {
+                serial_number: serial_number.to_string(),
+                sku: sku.to_string(),
+            }
+        }
+
+        value_scenarios!(
+            run = |(gpu_chassis, gpu_serial): (Vec<GpuChassisSku>, &str)| {
+                GpuChassisSku::sku_for_gpu_serial(&gpu_chassis, gpu_serial).map(str::to_string)
+            };
+            "single matching chassis" {
+                (vec![chassis("1653A", "0x6C070000"), chassis("1653B", "0x6D070000")], "1653B")
+                    => Some("0x6D070000".to_string()),
+            }
+
+            "board serial shared by GPUs with the same SKU" {
+                (vec![chassis("1653A", "0x6C070000"), chassis("1653A", "0x6C070000")], "1653A")
+                    => Some("0x6C070000".to_string()),
+            }
+
+            "board serial shared by GPUs with different SKUs" {
+                (vec![chassis("1653A", "0x6C070000"), chassis("1653A", "0x6D070000")], "1653A")
+                    => None,
+            }
+
+            "serials compare after trimming" {
+                (vec![chassis(" 1653A ", "0x6C070000")], "1653A\n") => Some("0x6C070000".to_string()),
+            }
+
+            "no chassis with the GPU serial" {
+                (vec![chassis("1653A", "0x6C070000")], "1653C") => None,
+            }
+
+            "blank GPU serial does not match a blank chassis serial" {
+                (vec![chassis("", "0x6C070000")], " ") => None,
             }
         );
     }

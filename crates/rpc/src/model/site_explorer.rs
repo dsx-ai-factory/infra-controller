@@ -289,6 +289,7 @@ impl From<Chassis> for rpc::site_explorer::Chassis {
             model: chassis.model,
             part_number: chassis.part_number,
             serial_number,
+            sku: chassis.sku,
             network_adapters: chassis
                 .network_adapters
                 .into_iter()

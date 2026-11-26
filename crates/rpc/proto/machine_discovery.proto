@@ -214,6 +214,11 @@ message Gpu {
   string frequency = 7;
   string pci_bus_id = 8;
   GpuPlatformInfo platform_info = 9;
+  // SKU ID of the GPU, exactly as the host BMC reports Redfish `SKU` on the GPU chassis
+  // (`HGX_GPU_*`) whose `SerialNumber` matches `serial`. Core sets it in machine responses
+  // only when every matching chassis reports the same SKU, and omits it otherwise.
+  // Machine discovery does not report it; Core ignores it in discovery input.
+  optional string sku = 10;
 }
 
 // A single physical memory device (DIMM). Deprecated in favor of

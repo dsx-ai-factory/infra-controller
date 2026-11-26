@@ -82,6 +82,38 @@ async fn explore_dgx_gb300() {
 }
 
 #[test]
+async fn explore_dgx_gb300_reports_gpu_chassis_sku_as_reported() {
+    let h = test_support::dgx_gb300_bmc().await;
+    h.state.injection.put(vec![bmc_mock::injection::Rule {
+        id: "gpu_sku".into(),
+        selector: bmc_mock::injection::Selector::Path {
+            method: Some("GET".into()),
+            glob: "/redfish/v1/Chassis/HGX_GPU_0".into(),
+        },
+        action: bmc_mock::injection::Action::JsonMerge(serde_json::json!({
+            "SKU": "0x6C070000",
+        })),
+        remaining: None,
+    }]);
+
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
+
+    let sku = |id: &str| {
+        report
+            .chassis
+            .iter()
+            .find(|chassis| chassis.id == id)
+            .unwrap_or_else(|| panic!("{id} chassis must be present"))
+            .sku
+            .as_deref()
+    };
+    assert_eq!(sku("HGX_GPU_0"), Some("0x6C070000"));
+    assert_eq!(sku("HGX_GPU_1"), None);
+}
+
+#[test]
 async fn explore_dgx_gb300_skips_erot_bmc_chassis() {
     let h = test_support::dgx_gb300_bmc().await;
     let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
