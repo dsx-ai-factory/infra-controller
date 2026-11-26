@@ -58,6 +58,15 @@ fn command_tree() -> Command {
     root
 }
 
+fn sorted_visible_subcommands(cmd: &Command) -> Vec<&Command> {
+    let mut children: Vec<_> = cmd
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set() && child.get_name() != "help")
+        .collect();
+    children.sort_unstable_by_key(|child| child.get_name());
+    children
+}
+
 pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
     let root = command_tree();
 
@@ -80,10 +89,7 @@ pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
     // used to build the domain index pages.
     let mut top_level: Vec<(String, String, CliDomain)> = Vec::new();
 
-    for sub in root.get_subcommands() {
-        if sub.is_hide_set() || sub.get_name() == "help" {
-            continue;
-        }
+    for sub in sorted_visible_subcommands(&root) {
         let name = sub.get_name().to_string();
         let about = first_line(&styled(sub.get_about()));
         let domain = domain_for_command(&name).ok_or_else(|| {
@@ -105,8 +111,6 @@ pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
 
         top_level.push((name, about, domain));
     }
-
-    top_level.sort_by(|a, b| a.0.cmp(&b.0));
 
     for domain in DOMAINS {
         let rows: Vec<&(String, String, CliDomain)> =
@@ -146,10 +150,7 @@ fn render_node(
         body
     };
 
-    let children: Vec<&Command> = cmd
-        .get_subcommands()
-        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
-        .collect();
+    let children = sorted_visible_subcommands(cmd);
 
     std::fs::write(
         dir.join(format!("{}.md", stem(&path))),
@@ -207,7 +208,7 @@ fn render_command_page(
         domain.title(),
         slug(domain),
     );
-    s
+    escape_mdx_literals(s)
 }
 
 fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)]) -> String {
@@ -231,10 +232,50 @@ fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)])
         };
         let _ = writeln!(s, "| [`{name}`](./commands/{name}/{name}.md) | {about} |");
     }
-    s
+    escape_mdx_literals(s)
 }
 
 // ---- helpers ----
+
+/// Fern parses Markdown as MDX. Keep literal braces in prose and shell
+/// substitutions in inline code from being interpreted as expressions or JSX.
+fn escape_mdx_literals(mut markdown: String) -> String {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let mut edits = Vec::new();
+    let mut in_code_block = false;
+    for (event, range) in Parser::new_ext(&markdown, Options::ENABLE_TABLES).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            Event::Text(_) if !in_code_block => {
+                for (offset, _) in markdown[range.clone()].match_indices(['{', '}']) {
+                    let pos = range.start + offset;
+                    let backslashes = markdown.as_bytes()[..pos]
+                        .iter()
+                        .rev()
+                        .take_while(|&&byte| byte == b'\\')
+                        .count();
+                    if backslashes.is_multiple_of(2) {
+                        edits.push((pos..pos, "\\"));
+                    }
+                }
+            }
+            Event::Code(_) => {
+                // CommonMark renders newlines inside a code span as spaces.
+                for (offset, _) in markdown[range.clone()].match_indices('\n') {
+                    let pos = range.start + offset;
+                    edits.push((pos..pos + 1, " "));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (range, replacement) in edits.into_iter().rev() {
+        markdown.replace_range(range, replacement);
+    }
+    markdown
+}
 
 /// The page stem for a command path: the path below the binary joined with '-'
 /// (`["nico-admin-cli", "vpc", "show"]` -> `"vpc-show"`). Both the file name
@@ -643,6 +684,21 @@ mod tests {
     }
 
     #[test]
+    fn reference_lists_visible_subcommands_alphabetically() {
+        let command = clap::Command::new("parent").subcommands([
+            clap::Command::new("show"),
+            clap::Command::new("hidden").hide(true),
+            clap::Command::new("help"),
+            clap::Command::new("create"),
+        ]);
+        let names: Vec<_> = super::sorted_visible_subcommands(&command)
+            .into_iter()
+            .map(clap::Command::get_name)
+            .collect();
+        assert_eq!(names, ["create", "show"]);
+    }
+
+    #[test]
     #[ignore = "requires pandoc on PATH"]
     fn man_conversion_preserves_apostrophes() {
         let dir = tempfile::tempdir().unwrap();
@@ -671,6 +727,21 @@ mod tests {
                 ".\\\" Generated documentation\n" => (true, true),
             }
         );
+    }
+
+    #[test]
+    fn mdx_preserves_literal_braces_and_multiline_code_spans() {
+        let input = concat!(
+            r#"JSON: {"id":1}, \{literal\}."#,
+            "\n\n",
+            "| Shell |\n|---|\n| `echo ${var}` |\n\n",
+            "`source\n<(cli bash)`\n\n",
+            "```sh\necho ${var}\n```\n",
+        );
+        let expected = input
+            .replace(r#"{"id":1}"#, r#"\{"id":1\}"#)
+            .replace("source\n<", "source <");
+        assert_eq!(super::escape_mdx_literals(input.to_owned()), expected);
     }
 
     #[test]

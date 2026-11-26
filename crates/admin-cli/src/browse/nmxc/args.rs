@@ -55,7 +55,7 @@ impl From<NmxcOperationArg> for forgerpc::NmxcBrowseOperation {
 
 #[derive(Parser, Debug)]
 #[command(
-    long_about = "Run an NMX-C browse operation via the API server.\n\n--operation is required. Exactly one endpoint selector must be specified: --chassis-serial or --rack-id. Providing both selectors is rejected.",
+    long_about = "Run an NMX-C browse operation through the API server.\n\n--operation is required. Exactly one endpoint selector must be specified: --chassis-serial or --rack-id. Providing both selectors is rejected.",
     after_long_help = "\
 EXAMPLES:
 

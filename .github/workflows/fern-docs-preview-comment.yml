@@ -15,7 +15,7 @@
 
 # Workflow 2 of 2 for Fern doc previews.
 #
-# Triggered by workflow_run after "Preview Fern Docs: Build" completes.
+# A same-repository PR or an approved copy-pr-bot build supplies the validated site.
 # Downloads the fern/ artifact, builds a preview with DOCS_FERN_TOKEN, and
 # posts a stable :herb: comment on the PR. This workflow never checks out the
 # PR branch directly, keeping secrets isolated from untrusted code.
@@ -27,7 +27,7 @@ name: "Preview Fern Docs: Comment"
 
 on:
   workflow_run:
-    workflows: ["Preview Fern Docs: Build"]
+    workflows: ["Preview Fern Docs: Build", "NICo Core CI"]
     types: [completed]
 
 permissions:
@@ -38,7 +38,11 @@ jobs:
   # Build workflow can "succeed" with collect skipped (fork PR); then no artifact.
   artifact-present:
     runs-on: linux-amd64-cpu4
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.name == 'Preview Fern Docs: Build' ||
+       (github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'pull-request/')))
     outputs:
       exists: ${{ steps.check.outputs.exists }}
     steps:
@@ -80,7 +84,11 @@ jobs:
           node-version: '24.22.1'
 
       - name: Install Fern CLI
-        run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=$(node -p 'require(process.env.GITHUB_WORKSPACE + "/fern/fern.config.json").version')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          npm install -g "fern-api@$version"
 
       - name: Generate preview URL
         id: generate-docs

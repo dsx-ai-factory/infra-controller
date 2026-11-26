@@ -51,7 +51,7 @@ pub(crate) enum Cmd {
     ComponentPowerControl(power_control::Args),
 
     #[clap(
-        about = "Rotate or reinstall switch NVOS mTLS certificates via the switch Maintenance phase",
+        about = "Rotate or reinstall switch NVOS mTLS certificates during the switch Maintenance phase",
         visible_alias = "rotate-switch-certificate"
     )]
     ConfigureSwitchCertificate(configure_switch_certificate::Args),

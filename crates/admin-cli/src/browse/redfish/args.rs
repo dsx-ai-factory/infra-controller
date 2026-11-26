@@ -21,7 +21,7 @@ use clap::Parser;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Browse a Redfish resource tree via the API server (no BMC --address needed):
+Browse a Redfish resource tree through the API server (no BMC --address needed):
     $ nico-admin-cli browse redfish --uri /redfish/v1/Systems
 
 ")]

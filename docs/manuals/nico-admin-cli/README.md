@@ -3,16 +3,18 @@
 `nico-admin-cli` is the command-line tool for managing a NICo site. It
 communicates with `nico-api` over gRPC with mutual TLS (mTLS).
 
-For building the CLI, connecting to `nico-api`, TLS flag reference, logging,
-and a quick connectivity check, see [`nico-admin-cli.md`](../nico-admin-cli.md).
-For the mTLS certificate lifecycle and server-side auth configuration, see
-[`nico-api-auth.md`](../nico-api-auth.md).
+Use the [NICo Admin CLI guide](../nico-admin-cli.md) to build the CLI,
+configure TLS and logging, and test the connection to `nico-api`.
+The [mTLS and authorization guide](../nico-api-auth.md) explains how to manage
+client certificates and configure authentication on the API server.
 
 ## Command reference
 
-| Domain | Commands |
+Choose a domain to browse its commands.
+
+| Domain | What you can manage |
 |--------|----------|
-| [Hardware](./hardware.md) | Machines, BMC, DPUs, firmware, attestation, Redfish, MLX |
-| [Network](./network.md) | VPCs, peerings, prefixes, segments, security groups, IB/NVLink, IP/domain lookups |
-| [Tenant](./tenant.md) | Tenants, instances, compute allocations, expected-inventory, OS images, iPXE, extension services |
+| [Hardware](./hardware.md) | Machines, BMCs, DPUs, firmware, attestation, Redfish, and MLX devices |
+| [Network](./network.md) | VPCs, peerings, prefixes, segments, security groups, InfiniBand and NVLink partitions, and IP address and domain lookups |
+| [Tenant](./tenant.md) | Tenants, instances, compute allocations, expected inventory, OS images, iPXE templates, and extension services |
 | [Admin](./admin.md) | CLI and system utilities |

@@ -8199,6 +8199,7 @@ dependencies = [
  "pandoc",
  "prettytable-rs",
  "prost",
+ "pulldown-cmark",
  "regex",
  "reqwest 0.13.4",
  "serde",
