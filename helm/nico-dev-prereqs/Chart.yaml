@@ -1,0 +1,5 @@
+apiVersion: v2
+name: nico-dev-prereqs
+description: Declarative prerequisites for the local NICo development stack
+type: application
+version: 0.1.0

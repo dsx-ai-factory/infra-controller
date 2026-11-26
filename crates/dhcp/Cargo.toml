@@ -54,6 +54,7 @@ test-support = [
 [dev-dependencies]
 eyre = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 # Self-dependency so the crate's own integration tests see the `test-support` helpers.
 carbide-dhcp = { path = ".", features = ["test-support"] }

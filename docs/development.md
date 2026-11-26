@@ -5,7 +5,7 @@ environment.
 
 ## Local environment prep
 
-1. Install rust by following the directions [here](https://www.rust-lang.org/tools/install).
+1. Install Rust by following the [Rust installation guide](https://www.rust-lang.org/tools/install).
    You will need to use the rustup based installation method to use the same Rust compiler utilized by the CI toolchain.
    You can find the target compiler version in `rust-toolchain.toml` in the root of this directory
    If rustup is installed, you can switch toolchain versions using `rustup toolchain`.
@@ -33,25 +33,24 @@ environment.
 
    Fedora - `sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose`
 
-5. Install ISC kea using your system package manager
+5. Install the pinned ISC Kea LTS packages for native hook builds and tests. On Debian/Ubuntu, run from the repository root:
 
-   Arch - `sudo pacman -S kea`
+   ```bash
+   sudo sh dev/docker/setup-kea-repository.sh
+   sudo apt-get update
+   kea_version=$(cat dev/docker/kea.version)
+   sudo apt-get install -y libboost-dev kea-common- \
+     "isc-kea-common=${kea_version}" "isc-kea-hooks=${kea_version}" \
+     "isc-kea-dev=${kea_version}" "isc-kea-dhcp4=${kea_version}" \
+     "isc-kea-dhcp6=${kea_version}"
+   sudo sh dev/docker/build-kea.sh "${kea_version}"
+   sudo dpkg -i /kea-packages/isc-kea-common.deb
+   sudo usermod -aG _kea "$(id -un)"
+   ```
 
-   Debian/Ubuntu
-    - Install required libraries
-        - `sudo apt-get install -y libboost-dev`
-        - download libssl1 from [here](http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/) and install `sudo dpkg -i <downloaded-lib>`.  `libssl1.1_1.1.0g-2ubuntu4_amd64.deb` is known to work but there are newer versions that haven't been tested
+   The source build applies the DHCPv6 handoff contract required by the hook; stock packages alone are insufficient. See [Kea Runtime Compatibility](provisioning/dhcpv6-deployment.md#kea-runtime-compatibility).
 
-   - Install kea, but might be out of date:
-     ```
-     sudo apt-get update && sudo apt-get install -y isc-kea-dhcp4-server isc-kea-dev
-     ```
-   - Or, but has only been tested with Ubuntu 23.10, install kea:
-     ```
-     sudo apt-get update && sudo apt-get install -y kea-dev kea-dhcp4-server
-     ```
-
-   Fedora - `sudo dnf install -y kea kea-devel kea-libs`
+   Start a fresh login session to activate the `_kea` group membership. Use the repository's compiler container on other distributions so the hook and daemon versions match. See [Upgrade Kea to 3.0 LTS](provisioning/kea-lts-upgrade.md) for configuration, file-path, and lease-state requirements.
 
 6. You can install PostgreSQL locally, but it might be easier to start a
    docker container when you need to. The docker container is handy when running `cargo test` manually.
@@ -75,7 +74,7 @@ environment.
 
 8. Install `direnv` using your package manager
 
-   It would be best to install `direnv` on your host. `direnv` requires a shell hook to work.  See `man direnv` (after install) for
+   It would be best to install `direnv` on your host. `direnv` requires a shell hook to work. See `man direnv` (after install) for
    more information on setting it up. Once you clone the `infra-controller` repo, you need to run `direnv allow` the first time you cd into your local copy.
    Running `direnv allow` exports the necessary environmental variables while in the repo and cleans up when not in the repo.
 
@@ -91,7 +90,6 @@ environment.
    Fedora - `sudo dnf install -y direnv`
 
 9. Install golang using whatever method is most convenient for you. `nico-vpc` (which is in a subtree of the `nico-provisioner` repo uses golang)
-
 10. Install GRPC client `grpcurl`.
 
     Arch - `sudo pacman -S grpcurl`
@@ -194,19 +192,23 @@ The DPU has an ARM core. To build software that runs there such as `nico-dpu-age
 Here's how I did it.
 
 One time build:
- - copy / edit the Docker file from the repo into `myarm/Dockerfile`.
- - delete these lines:
-```
+
+- copy / edit the Docker file from the repo into `myarm/Dockerfile`.
+- delete these lines:
+
+```text
  RUN /root/.cargo/bin/cargo install cargo-cache cargo-make mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 sccache && /root/.cargo/bin/cargo cache -r registry-index,registry-sources
  RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
  RUN cd /usr/local/bin && curl -fL https://getcli.jfrog.io | sh
 ```
- - `docker build -t myarm myarm` # give it a cooler name
- - `docker run -it -v /home/user/src/infra-controller:/infra-controller myarm /bin/bash`
+
+- `docker build -t myarm myarm` # give it a cooler name
+- `docker run -it -v /home/user/src/infra-controller:/infra-controller myarm /bin/bash`
 
 Daily usage:
- - `docker start <container id or name>`
- - `docker attach <container id or name>`
+
+- `docker start <container id or name>`
+- `docker attach <container id or name>`
 
 Now that you're in the container go into `/infra-controller` and work normally (`cargo build --release`). The binary rust produces will be aarch64. You can `scp` it to a DPU and run it.
 
@@ -219,4 +221,4 @@ Remember to `strip` before you scp so that scp goes faster. scp to DPU example (
 Set up a QEMU host for your docker-compose services to manage:
 
 1. [Build iPXE and bootable artifacts image](bootable_artifacts.md)
-1. [Start QEMU server](development/vm_pxe_client.md)
+2. [Start QEMU server](development/vm_pxe_client.md)

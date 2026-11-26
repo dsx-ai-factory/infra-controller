@@ -19,3 +19,34 @@ tests:
     asserts:
       - notExists:
           path: data.VAULT_NAMESPACE
+
+  - it: preserves the established Core database defaults
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: data.DB_PORT
+          value: "5432"
+      - equal:
+          path: data.DB_NAME
+          value: nico_system_nico
+  - it: carries an externally managed database endpoint to Core
+    documentIndex: 1
+    set:
+      postgresql.enabled: false
+      postgresql.host: other-db.test.svc
+      postgresql.port: 5433
+      postgresql.database: other_database
+    asserts:
+      - equal:
+          path: data
+          value:
+            DB_HOST: other-db.test.svc
+            DB_PORT: "5433"
+            DB_NAME: other_database
+
+  - it: rejects a connection override inconsistent with the provisioned database
+    set:
+      postgresql.database: other_database
+    asserts:
+      - failedTemplate:
+          errorMessage: Non-default postgresql.port or postgresql.database requires postgresql.enabled=false
