@@ -22,17 +22,30 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 
 ARG KEA_VERSION
 
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
   ipmitool \
   iproute2 \
   iputils-ping \
-  kea-dhcp4-server=${KEA_VERSION} \
+  isc-kea-common=${KEA_VERSION} \
+  isc-kea-hooks=${KEA_VERSION} \
+  isc-kea-dhcp4=${KEA_VERSION} \
+  isc-kea-dhcp6=${KEA_VERSION} \
   libssh-4 \
   libudev1 \
   tpm2-tools \
   && rm -rf /var/lib/apt/lists/*
+
+COPY --from=artifacts /artifacts/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
+
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
 
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
 

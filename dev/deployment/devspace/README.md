@@ -7,6 +7,8 @@ The process is broken into two steps:
 1. Bootstrap Kubernetes prerequisites. (This only needs to be done once per cluster.)
 2. Run `devspace deploy -n nico-system --profile full` to deploy code from this repo
 
+Deployment hooks require Python 3 as well as Bash, jq, Helm, and kubectl. The DHCP service-address rewrite uses Python's JSON serialization to preserve floating-point values required by Kea.
+
 The intent is that the app deploy path stays the same whether the prerequisites are:
 
 - installed by the provided bootstrap script, or
@@ -325,7 +327,9 @@ cluster's IP family when recreating it.
 
 [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh) installs native
 dependencies for `cargo test` and `cargo test --profile ci-tests`, including Kea,
-test certificates, and PostgreSQL. Test PostgreSQL permits at least 1,000
+test certificates, and PostgreSQL. It rebuilds the pinned Kea allocation library
+on the host distribution with the DHCPv6 handoff patch. See
+[Kea Runtime Compatibility](../../../docs/provisioning/dhcpv6-deployment.md#kea-runtime-compatibility). Test PostgreSQL permits at least 1,000
 connections, matching CI's parallel-test budget. Increasing an older container's
 limit restarts that container without deleting its data; do not prepare the host
 during tests. Both Kea AppArmor profiles retain permissions for other checkouts

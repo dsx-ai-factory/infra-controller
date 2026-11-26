@@ -212,7 +212,8 @@ nico-dhcp:
 
       ## Subnets the DHCP server serves leases on.
       subnet4:
-        - subnet: "10.0.0.0/24"
+        - id: 1 # Preserve the existing effective subnet ID when upgrading.
+          subnet: "10.0.0.0/24"
           pools:
             - "10.0.0.100-10.0.0.200"
 
@@ -230,7 +231,7 @@ nico-dhcp:
       # rebindTimer: 1800
       # validLifetime: 3600
       # declineProbationPeriod: 900
-      # hookLibraryPath: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+      # hookLibraryPath: /usr/lib/kea/hooks/libdhcp.so
       # additionalHooksLibraries: []
       # loggers:
       #   - name: kea-dhcp4

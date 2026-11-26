@@ -5,13 +5,28 @@
 
 FROM nico-devspace-core-artifacts AS artifacts
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+
+ARG KEA_VERSION
+
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
-  kea-dhcp4-server \
+  isc-kea-common=${KEA_VERSION} \
+  isc-kea-hooks=${KEA_VERSION} \
+  isc-kea-dhcp4=${KEA_VERSION} \
+  isc-kea-dhcp6=${KEA_VERSION} \
   && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /usr/lib/x86_64-linux-gnu/kea/hooks /var/lib/kea /var/run/kea
+COPY --from=artifacts /artifacts/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
 
-COPY --from=artifacts /artifacts/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
+
+RUN mkdir -p /usr/lib/kea/hooks /var/lib/kea /var/run/kea
+
+COPY --from=artifacts /artifacts/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
