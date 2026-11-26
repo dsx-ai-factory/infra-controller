@@ -92,12 +92,14 @@ Site Explorer report with the device now using that address. An exploration
 report from the previous IP owner can mislead pairing and discovery.
 
 Fix duplicate assignments and DHCP reservations first. If a stale endpoint
-is not part of a managed host, remove only that exploration record with
+does not belong to an ingested machine, switch, or power shelf, remove only that
+exploration record with
 [`site-explorer delete`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-delete.md).
 Site Explorer can rediscover a reachable endpoint on a later exploration.
-The API rejects deletion when the endpoint belongs to a managed host.
-Investigate its identity with the lifecycle owner rather than force-deleting
-the host to clear the report.
+The API rejects deletion of an ingested device's BMC or PMC endpoint; see
+[pre-ingestion failures and retries](../../operations/firmware-updates/pre-ingestion.md#failures-and-retries)
+for ownership checks and rediscovery behavior. Investigate its identity with
+the lifecycle owner rather than force-deleting the inventory to clear the report.
 
 ### DPU IP Conflicts
 

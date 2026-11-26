@@ -279,5 +279,8 @@ endpoint as a last resort and allow it to be discovered again:
 nico-admin-cli -a <core-api-url> site-explorer delete --address <bmc-ip>
 ```
 
-NICo rejects explored-endpoint deletion after the endpoint belongs to a managed
-host.
+NICo rejects explored-endpoint deletion for BMC endpoints of ingested hosts,
+DPUs, and switches, and PMC endpoints of ingested power shelves. If an endpoint
+record is removed directly from the database while its interface ownership and
+IP address association remain intact, Site Explorer marks the recreated endpoint
+`Complete` on rediscovery and skips pre-ingestion.
