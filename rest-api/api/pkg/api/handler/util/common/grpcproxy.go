@@ -4,6 +4,7 @@
 package common
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -52,8 +53,56 @@ func ExecuteCoreGRPC(
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
+	return executeCoreGRPCFresh(ctx, stc, fullMethod, req, resp, responsePermissive, secretKey, secretFields...)
+}
+
+// responseDecoding selects how a proxy reply is decoded into the caller's
+// response message.
+type responseDecoding int
+
+const (
+	// responsePermissive discards unknown fields and tolerates an absent reply.
+	responsePermissive responseDecoding = iota
+	// responseStrict requires a JSON object reply and rejects unknown fields
+	// and enum names with a 502.
+	responseStrict
+)
+
+// ExecuteCoreGRPCStrictResponse behaves like ExecuteCoreGRPC but refuses a
+// reply it cannot faithfully represent. resp is required. The reply must be a
+// JSON object that decodes into resp without discarding unknown fields or enum
+// names, so a site emitting a newer contract than this REST understands gets a
+// visible 502 instead of a silently truncated answer. An empty object decodes
+// normally; callers validate required fields and enum numbers themselves.
+func ExecuteCoreGRPCStrictResponse(
+	ctx context.Context,
+	stc tclient.Client,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	secretKey string,
+	secretFields ...string,
+) *cutil.APIError {
+	if resp == nil {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Core proxy request requires a response message", fmt.Errorf("strict response decoding for %s without a response message", fullMethod))
+	}
+	return executeCoreGRPCFresh(ctx, stc, fullMethod, req, resp, responseStrict, secretKey, secretFields...)
+}
+
+// executeCoreGRPCFresh gives every request a fresh workflow ID, so concurrent
+// identical Core calls never coalesce.
+func executeCoreGRPCFresh(
+	ctx context.Context,
+	stc tclient.Client,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	decoding responseDecoding,
+	secretKey string,
+	secretFields ...string,
+) *cutil.APIError {
 	workflowID := fmt.Sprintf("core-grpc-%s-%s", path.Base(fullMethod), uuid.NewString())
-	return executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, secretKey, secretFields...)
+	return executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, decoding, secretKey, secretFields...)
 }
 
 // ExecuteCoreGRPCWithConflictPolicy proxies a Core request with a caller-supplied
@@ -79,7 +128,7 @@ func ExecuteCoreGRPCWithConflictPolicy(
 	if strings.TrimSpace(workflowID) == "" {
 		return cutil.NewAPIError(http.StatusInternalServerError, "Core proxy request requires a workflow ID", nil)
 	}
-	apiErr := executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
+	apiErr := executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, conflictPolicy, responsePermissive, secretKey, secretFields...)
 	if apiErr == nil {
 		return nil
 	}
@@ -120,7 +169,7 @@ func ExecuteFlowGRPC(
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
-	return executeGRPCProxy(ctx, stc, grpcproxy.Flow, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
+	return executeGRPCProxy(ctx, stc, grpcproxy.Flow, fullMethod, req, resp, workflowID, conflictPolicy, responsePermissive, secretKey, secretFields...)
 }
 
 // ProxyFlowGRPC dispatches one already-validated request to Flow through the
@@ -230,6 +279,7 @@ func executeGRPCProxy(
 	resp proto.Message,
 	workflowID string,
 	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
+	decoding responseDecoding,
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
@@ -318,11 +368,37 @@ func executeGRPCProxy(
 		return cutil.NewAPIError(code, werr.Error(), nil).WithCause(resultErr)
 	}
 
+	if decoding == responseStrict {
+		return decodeStrictResponse(backend, fullMethod, out.ResponseJSON, resp)
+	}
 	if resp != nil && len(out.ResponseJSON) > 0 {
 		decodeErr := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(out.ResponseJSON, resp)
 		if decodeErr != nil {
 			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to decode %s proxy response", backend.Label), fmt.Errorf("decode response for %s: %w", fullMethod, decodeErr))
 		}
+	}
+	return nil
+}
+
+// decodeStrictResponse decodes a reply that must be a JSON object fully
+// understood by resp's descriptor. Every failure is a 502: the site answered,
+// but not with anything this REST can represent faithfully. The reply may
+// describe a committed mutation, so the cause stays private and the caller
+// chooses the public recovery guidance.
+func decodeStrictResponse(backend grpcproxy.Backend, fullMethod string, responseJSON []byte, resp proto.Message) *cutil.APIError {
+	invalid := func(cause error) *cutil.APIError {
+		return cutil.NewAPIError(http.StatusBadGateway, fmt.Sprintf("Received an invalid %s proxy response", backend.Label), nil).
+			WithCause(fmt.Errorf("decode response for %s: %w", fullMethod, cause))
+	}
+	trimmed := bytes.TrimSpace(responseJSON)
+	// protojson rejects malformed JSON; this check rejects an empty reply and
+	// any reply that is not a JSON object.
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return invalid(errors.New("response is not a JSON object"))
+	}
+	err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(trimmed, resp)
+	if err != nil {
+		return invalid(err)
 	}
 	return nil
 }

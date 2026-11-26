@@ -742,6 +742,12 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{
+		"attestation job fail|jobId",
+		"attestation job get|jobId",
+		"attestation job waive|jobId",
+		"attestation profile delete|hardwareClass",
+		"attestation profile get|hardwareClass",
+		"attestation profile update|hardwareClass",
 		"measured-boot machine remove|id",
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
