@@ -210,6 +210,30 @@ async fn ensure_staged_rotation(
     expected_attempt: i32,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::automation::resume_nvos(
+        &pool,
+        bmc_mac_address,
+        target_version,
+        expected_attempt,
+        ensure_staged_rotation_inner(
+            switch_id,
+            bmc_mac_address,
+            target_version,
+            expected_attempt,
+            ctx,
+        ),
+    )
+    .await
+}
+
+async fn ensure_staged_rotation_inner(
+    switch_id: &SwitchId,
+    bmc_mac_address: mac_address::MacAddress,
+    target_version: i32,
+    expected_attempt: i32,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
     let component_manager = ctx.services.component_manager.clone().ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!(
             "switch {switch_id}: component manager is unavailable for NVOS password submission"
@@ -360,6 +384,26 @@ async fn retry_staged_rotation(
 
 /// Polls work already staged before a prior dispatch.
 async fn reconcile_staged_rotation(
+    switch_id: &SwitchId,
+    bmc_mac_address: mac_address::MacAddress,
+    operation: &db::credential_rotation::DeviceRotationOperationState,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
+    let Some(target) = operation.rotating_to_version else {
+        return reconcile_staged_rotation_inner(switch_id, bmc_mac_address, operation, ctx).await;
+    };
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::automation::resume_nvos(
+        &pool,
+        bmc_mac_address,
+        target,
+        operation.rotate_attempts,
+        reconcile_staged_rotation_inner(switch_id, bmc_mac_address, operation, ctx),
+    )
+    .await
+}
+
+async fn reconcile_staged_rotation_inner(
     switch_id: &SwitchId,
     bmc_mac_address: mac_address::MacAddress,
     operation: &db::credential_rotation::DeviceRotationOperationState,

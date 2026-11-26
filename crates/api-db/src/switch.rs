@@ -397,9 +397,13 @@ pub async fn try_update_controller_state(
             .bind(switch_id)
             .bind(expected_version)
             .bind(maintenance_request.map(sqlx::types::Json))
-            .fetch_optional(txn)
+            .fetch_optional(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new( "try_update_controller_state", e))?;
+
+    if query_result.is_some() {
+        crate::cm_action::automation::switch_transition(txn, &switch_id, new_state).await;
+    }
 
     Ok(match query_result {
         Some(_) => ConditionalWrite::Applied(()),

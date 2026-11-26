@@ -348,9 +348,19 @@ pub async fn try_update_controller_state(
             .bind(new_version)
             .bind(rack_id)
             .bind(expected_version)
-            .fetch_optional(txn)
+            .fetch_optional(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
+
+    if let Some(rack) = &query_result {
+        crate::cm_action::automation::rack_transition(
+            txn,
+            rack_id,
+            new_state,
+            rack.config.maintenance_requested.is_some(),
+        )
+        .await;
+    }
 
     Ok(match query_result {
         Some(_) => ConditionalWrite::Applied(()),
