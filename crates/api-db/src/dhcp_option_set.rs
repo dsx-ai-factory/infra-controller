@@ -153,6 +153,19 @@ pub async fn update(
         })
 }
 
+/// Returns whether any instance, including one still terminating, boots from the DhcpOptionSet.
+pub async fn is_used_for_external_boot(
+    conn: impl DbReader<'_>,
+    id: &DhcpOptionSetId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (SELECT 1 FROM instances WHERE os_external_boot_id = $1)";
+    sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_one(conn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Deletes a DhcpOptionSet owned by the given tenant.
 pub async fn delete(
     txn: &mut PgConnection,

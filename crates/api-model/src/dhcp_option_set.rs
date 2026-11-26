@@ -28,6 +28,9 @@ use crate::ConfigValidationError;
 use crate::metadata::Metadata;
 use crate::tenant::TenantOrganizationId;
 
+/// A DHCPv4 option holds at most 255 bytes; IPv6 uses the same limit.
+const MAX_BOOT_URL_BYTES: usize = 255;
+
 /// DhcpOptionSet is a tenant-owned set of values that replace
 /// the values NICo sends in its DHCP replies.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,14 +104,59 @@ impl DhcpOptions {
         }
         Ok(())
     }
+
+    /// Returns whether the set has an IPv4 or IPv6 boot URL, which the External OS requires.
+    pub fn has_boot_url(&self) -> bool {
+        self.v4.as_ref().is_some_and(|v4| v4.boot_url.is_some())
+            || self.v6.as_ref().is_some_and(|v6| v6.boot_url.is_some())
+    }
+}
+
+/// Values that replace NICo's DHCP defaults for one host; unset values keep NICo's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DhcpOverrides {
+    pub boot_url_v4: Option<String>,
+    pub boot_url_v6: Option<String>,
+    pub dns_servers_v4: Vec<Ipv4Addr>,
+    pub dns_servers_v6: Vec<Ipv6Addr>,
+}
+
+impl From<&DhcpOptions> for DhcpOverrides {
+    fn from(options: &DhcpOptions) -> Self {
+        Self {
+            boot_url_v4: options.v4.as_ref().and_then(|v4| v4.boot_url.clone()),
+            boot_url_v6: options.v6.as_ref().and_then(|v6| v6.boot_url.clone()),
+            dns_servers_v4: options
+                .v4
+                .as_ref()
+                .map(|v4| v4.dns_servers.clone())
+                .unwrap_or_default(),
+            dns_servers_v6: options
+                .v6
+                .as_ref()
+                .map(|v6| v6.dns_servers.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationError> {
     let Some(boot_url) = boot_url else {
         return Ok(());
     };
+    if boot_url.len() > MAX_BOOT_URL_BYTES {
+        return Err(ConfigValidationError::invalid_value(format!(
+            "boot URL must be at most {MAX_BOOT_URL_BYTES} bytes"
+        )));
+    }
+    // Hosts receive the stored string, so it must already be in the parser's normalized form.
     match url::Url::parse(boot_url) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.as_str() == boot_url => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => {
+            Err(ConfigValidationError::invalid_value(format!(
+                "boot URL `{boot_url}` is not in normalized form; use `{url}`"
+            )))
+        }
         _ => Err(ConfigValidationError::invalid_value(format!(
             "boot URL `{boot_url}` must be a valid http or https URL"
         ))),

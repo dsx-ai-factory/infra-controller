@@ -103,7 +103,7 @@ pub unsafe extern "C" fn machine_get_boot_options_ipv6(
         &request,
         machine.inner.booturl.as_deref(),
         config.provisioning_server_ipv6,
-        !config.dns_servers_ipv6.is_empty(),
+        !machine.inner.dns_servers.is_empty() || !config.dns_servers_ipv6.is_empty(),
     );
     DhcpV6BootOptions {
         url: DhcpByteBuffer::from_vec(selected.url),

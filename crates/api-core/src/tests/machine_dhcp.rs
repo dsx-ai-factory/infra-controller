@@ -3799,10 +3799,14 @@ async fn attach_bare_instance(
     machine_id: impl MachineIdSubtypeTrait,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.pool.txn_begin().await?;
-    sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
-        .bind(machine_id.to_machine_id())
-        .execute(txn.as_mut())
-        .await?;
+    // DHCP loads the host snapshot, so the row needs the columns every instance has.
+    sqlx::query(
+        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config) \
+         VALUES ($1, 'exit', '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb)",
+    )
+    .bind(machine_id.to_machine_id())
+    .execute(txn.as_mut())
+    .await?;
     txn.commit().await?;
     Ok(())
 }
@@ -3940,6 +3944,129 @@ async fn test_dhcp_allows_zero_dpu_host_with_instance(
         .into_inner();
 
     assert_eq!(response.mac_address, host_mac.to_string());
+
+    Ok(())
+}
+
+// Kea answers zero-DPU hosts from Core's record, so a Ready instance that boots
+// via its option set must get the tenant values there.
+#[crate::sqlx_test]
+async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(vec![
+                IpNetwork::new(
+                    FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY.network(),
+                    FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY.prefix(),
+                )
+                .unwrap(),
+                IpNetwork::new(
+                    FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.network(),
+                    FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.prefix(),
+                )
+                .unwrap(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_host_inband_network_segment(&env.api, None).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+
+    common::api_fixtures::tenant::create_fixture_tenant(&env, "Tenant1").await?;
+    let set_id = env
+        .api
+        .create_dhcp_option_set(tonic::Request::new(
+            rpc::forge::CreateDhcpOptionSetRequest {
+                id: None,
+                tenant_organization_id: "Tenant1".to_string(),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "tenant boot".to_string(),
+                    ..Default::default()
+                }),
+                options: Some(rpc::forge::DhcpOptions {
+                    v4: Some(rpc::forge::DhcpOptionsV4 {
+                        boot_url: Some("http://boot.example.com/x.efi".to_string()),
+                        dns_servers: vec!["10.0.0.53".to_string()],
+                    }),
+                    v6: None,
+                }),
+            },
+        ))
+        .await?
+        .into_inner()
+        .dhcp_option_set
+        .and_then(|set| set.id)
+        .unwrap();
+
+    // A Ready instance on the host.
+    let mut txn = env.pool.txn_begin().await?;
+    sqlx::query(
+        "INSERT INTO instances (machine_id, tenant_org, os_ipxe_script, network_config, nvlink_config) \
+         VALUES ($1, 'Tenant1', 'exit', '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb)",
+    )
+    .bind(mh.host().id.to_machine_id())
+    .execute(txn.as_mut())
+    .await?;
+    db::machine::update_state(
+        txn.as_mut(),
+        &mh.host().id,
+        &model::machine::ManagedHostState::Assigned {
+            instance_state: model::machine::InstanceState::Ready,
+        },
+    )
+    .await?;
+    // Tenant values are served only on the tenant network.
+    let host = mh.host().db_machine(&mut txn).await;
+    let mut netconf = host.network_config.value.clone();
+    netconf.use_admin_network = Some(false);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &mh.host().id,
+            host.network_config.version,
+            &netconf,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    // Tenant values reach the record only when the OS boots via the option set.
+    let (host_mac, gateway) = host_interface_and_gateway(&env, mh.host().id).await?;
+    for (external_boot_set, expected) in [
+        (
+            Some(set_id),
+            (
+                Some("http://boot.example.com/x.efi".to_string()),
+                vec!["10.0.0.53".to_string()],
+            ),
+        ),
+        (None, (None, vec![])),
+    ] {
+        sqlx::query("UPDATE instances SET os_external_boot_id = $1 WHERE machine_id = $2")
+            .bind(external_boot_set)
+            .bind(mh.host().id.to_machine_id())
+            .execute(&env.pool)
+            .await?;
+        let record = env
+            .api
+            .discover_dhcp(
+                DhcpDiscovery::builder(host_mac, FIXTURE_DHCP_RELAY_ADDRESS)
+                    .link_address(gateway.to_string())
+                    .tonic_request(),
+            )
+            .await?
+            .into_inner();
+        assert_eq!(
+            (record.booturl, record.dns_servers),
+            expected,
+            "os_external_boot_id = {external_boot_set:?}"
+        );
+    }
 
     Ok(())
 }

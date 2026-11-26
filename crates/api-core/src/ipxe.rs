@@ -643,6 +643,13 @@ exit ||
                                     qcow_imaging_ipxe
                                 }
                             }
+                            // The DHCP option set's boot URL replaces NICo's iPXE, so a host that still
+                            // reaches NICo boots from disk.
+                            model::os::OperatingSystemVariant::External(_) => exit_instructions(
+                                machine_id,
+                                target.interface_id,
+                                machine.current_state(),
+                            ),
                         };
 
                         if retry_on_failure {

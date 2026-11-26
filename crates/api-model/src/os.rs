@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,6 +49,8 @@ pub enum OperatingSystemVariant {
     /// Reference to any operating system definition by ID (any variant except OS image).
     /// On read, the actual type (iPXE / ipxe_os_definition) is resolved from the row.
     OperatingSystemId(Uuid),
+    /// Boots from the boot URL of the tenant DHCP option set with this ID.
+    External(DhcpOptionSetId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +95,7 @@ impl OperatingSystem {
             OperatingSystemVariant::Ipxe(ipxe) => ipxe.validate(),
             OperatingSystemVariant::OsImage(_id) => Ok(()),
             OperatingSystemVariant::OperatingSystemId(_id) => Ok(()),
+            OperatingSystemVariant::External(_id) => Ok(()),
         }
     }
 

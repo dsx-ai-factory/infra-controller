@@ -140,6 +140,14 @@ async fn convert_instance_to_nice_format(
                             id,
                         ),
                     ) => Some(Cow::Owned(format!("Operating System ID: {}", id))),
+                    Some(::rpc::forge::instance_operating_system_config::Variant::External(
+                        boot,
+                    )) => Some(Cow::Owned(format!(
+                        "External boot DHCP Option Set ID: {}",
+                        boot.dhcp_option_set_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_default()
+                    ))),
                     None => None,
                 })
                 .unwrap_or_default(),

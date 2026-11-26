@@ -88,6 +88,7 @@ fn base_dhcp_response_for_family(
         booturl: None,
         last_invalidation_time: None,
         ntp_servers,
+        dns_servers: vec![],
     }
 }
 

@@ -56,6 +56,7 @@ use model::machine::{
 };
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
 use model::network_segment::{NetworkSegmentControllerState, NetworkSegmentSearchConfig};
+use model::os::OperatingSystemVariant;
 use model::rack_type::select_dpu_nvconfig_profile;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
@@ -733,6 +734,21 @@ async fn get_managed_host_network_config_inner(
                 _ => false,
             };
 
+            let instance_dhcp_options = match instance.config.os.variant {
+                OperatingSystemVariant::External(set_id) if snapshot.use_tenant_dhcp_options() => {
+                    db::dhcp_option_set::find_by_ids(
+                        &mut txn,
+                        std::slice::from_ref(&set_id),
+                        Some(&instance.config.tenant.tenant_organization_id),
+                        false,
+                    )
+                    .await?
+                    .pop()
+                    .map(|set| set.options)
+                }
+                _ => None,
+            };
+
             // Check if there's an NSG on the instance.
             let network_security_group_details = if !suppress_tenant_security_groups
                 && let Some((tenant_id, Some(nsg_id))) = snapshot.instance.as_ref().map(|i| {
@@ -903,6 +919,7 @@ async fn get_managed_host_network_config_inner(
                     },
                     &booturl_override,
                     api.runtime_config.fnn.as_ref(),
+                    instance_dhcp_options.as_ref(),
                 )
                 .await?;
 

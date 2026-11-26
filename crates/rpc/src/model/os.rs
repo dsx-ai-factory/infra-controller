@@ -66,13 +66,21 @@ impl TryFrom<rpc::forge::InstanceOperatingSystemConfig> for OperatingSystem {
             rpc::forge::instance_operating_system_config::Variant::OperatingSystemId(id) => {
                 OperatingSystemVariant::OperatingSystemId(Uuid::from(id))
             }
+            rpc::forge::instance_operating_system_config::Variant::External(boot) => {
+                OperatingSystemVariant::External(boot.dhcp_option_set_id.ok_or(
+                    RpcDataConversionError::MissingArgument("ExternalBoot::dhcp_option_set_id"),
+                )?)
+            }
         };
+        // The set's boot URL is in every DHCP reply, so every boot reaches it.
+        let run_provisioning_instructions_on_every_boot = config
+            .run_provisioning_instructions_on_every_boot
+            || matches!(variant, OperatingSystemVariant::External(_));
 
         Ok(Self {
             variant,
             phone_home_enabled: config.phone_home_enabled,
-            run_provisioning_instructions_on_every_boot: config
-                .run_provisioning_instructions_on_every_boot,
+            run_provisioning_instructions_on_every_boot,
             user_data: config.user_data.or(ipxe_user_data),
         })
     }
@@ -94,6 +102,13 @@ impl TryFrom<OperatingSystem> for rpc::forge::InstanceOperatingSystemConfig {
             }
             OperatingSystemVariant::OperatingSystemId(id) => {
                 rpc::forge::instance_operating_system_config::Variant::OperatingSystemId(id.into())
+            }
+            OperatingSystemVariant::External(id) => {
+                rpc::forge::instance_operating_system_config::Variant::External(
+                    rpc::forge::ExternalBoot {
+                        dhcp_option_set_id: Some(id),
+                    },
+                )
             }
         };
 
