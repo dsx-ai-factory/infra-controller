@@ -69,7 +69,6 @@ async fn create_instance(env: &TestHarness, host: &TestManagedHost) -> InstanceI
         network: InstanceNetworkConfig::default(),
         infiniband: InstanceInfinibandConfig::default(),
         network_security_group_id: None,
-        dhcp_option_set_id: None,
         extension_services: InstanceExtensionServicesConfig::default(),
         nvlink: InstanceNvLinkConfig::default(),
         spxconfig: InstanceSpxConfig::default(),

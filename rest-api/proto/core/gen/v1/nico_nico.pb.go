@@ -13844,8 +13844,6 @@ type VpcConfig struct {
 	// boundary. Core reports this field explicitly. An absent value indicates a
 	// response from a Core version that predates SLAAC support.
 	SlaacEnabled *bool `protobuf:"varint,10,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
-	// DHCP option set used by hosts in this VPC unless an instance sets its own.
-	DhcpOptionSetId *string `protobuf:"bytes,11,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
 	// Private DNS zone this VPC holds, as an FQDN including the trailing dot.
 	// Unset means that the VPC holds no private DNS zone.
 	PrivateDnsZone *string `protobuf:"bytes,12,opt,name=private_dns_zone,json=privateDnsZone,proto3,oneof" json:"private_dns_zone,omitempty"`
@@ -13951,13 +13949,6 @@ func (x *VpcConfig) GetSlaacEnabled() bool {
 		return *x.SlaacEnabled
 	}
 	return false
-}
-
-func (x *VpcConfig) GetDhcpOptionSetId() string {
-	if x != nil && x.DhcpOptionSetId != nil {
-		return *x.DhcpOptionSetId
-	}
-	return ""
 }
 
 func (x *VpcConfig) GetPrivateDnsZone() string {
@@ -14184,11 +14175,9 @@ type VpcCreationRequest struct {
 	// types remain outside that support boundary. False or omission disables
 	// SLAAC. Core evaluates this value only during VPC creation.
 	// `VpcUpdateRequest` cannot change the resulting policy.
-	SlaacEnabled *bool `protobuf:"varint,20,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
-	// DHCP option set used by hosts in this VPC unless an instance sets its own.
-	DhcpOptionSetId *string `protobuf:"bytes,21,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	SlaacEnabled  *bool `protobuf:"varint,20,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *VpcCreationRequest) Reset() {
@@ -14312,13 +14301,6 @@ func (x *VpcCreationRequest) GetSlaacEnabled() bool {
 	return false
 }
 
-func (x *VpcCreationRequest) GetDhcpOptionSetId() string {
-	if x != nil && x.DhcpOptionSetId != nil {
-		return *x.DhcpOptionSetId
-	}
-	return ""
-}
-
 type VpcUpdateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    *VpcId                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -14344,11 +14326,8 @@ type VpcUpdateRequest struct {
 	// preserve the current association, send an empty string to remove it, or
 	// send a non-empty value to replace it.
 	PowerResourceGroup *string `protobuf:"bytes,20,opt,name=power_resource_group,json=powerResourceGroup,proto3,oneof" json:"power_resource_group,omitempty"`
-	// DHCP option set used by hosts in this VPC unless an instance sets its own.
-	// Omitting it or sending an empty string removes the set; a non-empty value replaces it.
-	DhcpOptionSetId *string `protobuf:"bytes,21,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *VpcUpdateRequest) Reset() {
@@ -14433,13 +14412,6 @@ func (x *VpcUpdateRequest) GetRoutingProfileOverrides() *VpcRoutingProfileOverri
 func (x *VpcUpdateRequest) GetPowerResourceGroup() string {
 	if x != nil && x.PowerResourceGroup != nil {
 		return *x.PowerResourceGroup
-	}
-	return ""
-}
-
-func (x *VpcUpdateRequest) GetDhcpOptionSetId() string {
-	if x != nil && x.DhcpOptionSetId != nil {
-		return *x.DhcpOptionSetId
 	}
 	return ""
 }
@@ -22456,12 +22428,9 @@ type InstanceConfig struct {
 	// InstanceConfigUpdateRequest, omission preserves the current profile for
 	// compatibility with older clients, an empty string explicitly clears it,
 	// and a non-empty value replaces it.
-	PowerProfile *string `protobuf:"bytes,26,opt,name=power_profile,json=powerProfile,proto3,oneof" json:"power_profile,omitempty"`
-	// DHCP option set for this instance; overrides the VPC's option set per field.
-	// On update, omitting it or sending an empty string removes the set.
-	DhcpOptionSetId *string `protobuf:"bytes,27,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	PowerProfile  *string `protobuf:"bytes,26,opt,name=power_profile,json=powerProfile,proto3,oneof" json:"power_profile,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InstanceConfig) Reset() {
@@ -22553,13 +22522,6 @@ func (x *InstanceConfig) GetSpxconfig() *InstanceSpxConfig {
 func (x *InstanceConfig) GetPowerProfile() string {
 	if x != nil && x.PowerProfile != nil {
 		return *x.PowerProfile
-	}
-	return ""
-}
-
-func (x *InstanceConfig) GetDhcpOptionSetId() string {
-	if x != nil && x.DhcpOptionSetId != nil {
-		return *x.DhcpOptionSetId
 	}
 	return ""
 }
@@ -84237,7 +84199,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\vaccess_tier\x18\t \x01(\rR\n" +
 	"accessTier\x12c\n" +
 	"\"route_targets_on_exports_by_prefix\x18\n" +
-	" \x03(\v2\x18.forge.PrefixRouteTargetR\x1drouteTargetsOnExportsByPrefix\"\x8d\b\n" +
+	" \x03(\v2\x18.forge.PrefixRouteTargetR\x1drouteTargetsOnExportsByPrefix\"\xde\a\n" +
 	"\tVpcConfig\x124\n" +
 	"\x16tenant_organization_id\x18\x01 \x01(\tR\x14tenantOrganizationId\x12-\n" +
 	"\x10tenant_keyset_id\x18\x02 \x01(\tH\x00R\x0etenantKeysetId\x88\x01\x01\x12a\n" +
@@ -84249,10 +84211,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x19routing_profile_overrides\x18\b \x01(\v2!.forge.VpcRoutingProfileOverridesH\x06R\x17routingProfileOverrides\x88\x01\x01\x125\n" +
 	"\x14power_resource_group\x18\t \x01(\tH\aR\x12powerResourceGroup\x88\x01\x01\x12(\n" +
 	"\rslaac_enabled\x18\n" +
-	" \x01(\bH\bR\fslaacEnabled\x88\x01\x01\x120\n" +
-	"\x12dhcp_option_set_id\x18\v \x01(\tH\tR\x0fdhcpOptionSetId\x88\x01\x01\x12-\n" +
-	"\x10private_dns_zone\x18\f \x01(\tH\n" +
-	"R\x0eprivateDnsZone\x88\x01\x01B\x13\n" +
+	" \x01(\bH\bR\fslaacEnabled\x88\x01\x01\x12-\n" +
+	"\x10private_dns_zone\x18\f \x01(\tH\tR\x0eprivateDnsZone\x88\x01\x01B\x13\n" +
 	"\x11_tenant_keyset_idB\x1e\n" +
 	"\x1c_network_virtualization_typeB\x1c\n" +
 	"\x1a_network_security_group_idB&\n" +
@@ -84261,9 +84221,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x15_routing_profile_typeB\x1c\n" +
 	"\x1a_routing_profile_overridesB\x17\n" +
 	"\x15_power_resource_groupB\x10\n" +
-	"\x0e_slaac_enabledB\x15\n" +
-	"\x13_dhcp_option_set_idB\x13\n" +
-	"\x11_private_dns_zone\"\xac\x01\n" +
+	"\x0e_slaac_enabledB\x13\n" +
+	"\x11_private_dns_zoneJ\x04\b\v\x10\fR\x12dhcp_option_set_id\"\xac\x01\n" +
 	"\tVpcStatus\x12\x15\n" +
 	"\x03vni\x18\x01 \x01(\rH\x00R\x03vni\x88\x01\x01\x12b\n" +
 	"\x19effective_routing_profile\x18\x02 \x01(\v2!.forge.VpcEffectiveRoutingProfileH\x01R\x17effectiveRoutingProfile\x88\x01\x01B\x06\n" +
@@ -84281,7 +84240,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x06status\x18\x0e \x01(\v2\x10.forge.VpcStatusH\x00R\x06status\x88\x01\x01\x12(\n" +
 	"\x06config\x18\x11 \x01(\v2\x10.forge.VpcConfigR\x06configB\t\n" +
 	"\a_statusJ\x04\b\x03\x10\x04J\x04\b\a\x10\bJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"J\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0f\x10\x10J\x04\b\x10\x10\x11R\x14tenantOrganizationIdR\x0etenantKeysetIdR\x0edeprecated_vniR\x1bnetwork_virtualization_typeR\x19network_security_group_idR\adpa_vniR#default_nvlink_logical_partition_idR\x03vniR\x14routing_profile_type\"\xbe\b\n" +
+	"J\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0f\x10\x10J\x04\b\x10\x10\x11R\x14tenantOrganizationIdR\x0etenantKeysetIdR\x0edeprecated_vniR\x1bnetwork_virtualization_typeR\x19network_security_group_idR\adpa_vniR#default_nvlink_logical_partition_idR\x03vniR\x14routing_profile_type\"\x8f\b\n" +
 	"\x12VpcCreationRequest\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x122\n" +
 	"\x14tenantOrganizationId\x18\x03 \x01(\tR\x14tenantOrganizationId\x12+\n" +
@@ -84295,9 +84254,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x14routing_profile_type\x18\x11 \x01(\tH\x06R\x12routingProfileType\x88\x01\x01\x12b\n" +
 	"\x19routing_profile_overrides\x18\x12 \x01(\v2!.forge.VpcRoutingProfileOverridesH\aR\x17routingProfileOverrides\x88\x01\x01\x125\n" +
 	"\x14power_resource_group\x18\x13 \x01(\tH\bR\x12powerResourceGroup\x88\x01\x01\x12(\n" +
-	"\rslaac_enabled\x18\x14 \x01(\bH\tR\fslaacEnabled\x88\x01\x01\x120\n" +
-	"\x12dhcp_option_set_id\x18\x15 \x01(\tH\n" +
-	"R\x0fdhcpOptionSetId\x88\x01\x01B\x11\n" +
+	"\rslaac_enabled\x18\x14 \x01(\bH\tR\fslaacEnabled\x88\x01\x01B\x11\n" +
 	"\x0f_tenantKeysetIdB\x1e\n" +
 	"\x1c_network_virtualization_typeB\x05\n" +
 	"\x03_idB\x1c\n" +
@@ -84307,8 +84264,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x15_routing_profile_typeB\x1c\n" +
 	"\x1a_routing_profile_overridesB\x17\n" +
 	"\x15_power_resource_groupB\x10\n" +
-	"\x0e_slaac_enabledB\x15\n" +
-	"\x13_dhcp_option_set_idJ\x04\b\x10\x10\x11\"\xd8\x05\n" +
+	"\x0e_slaac_enabledJ\x04\b\x10\x10\x11J\x04\b\x15\x10\x16R\x12dhcp_option_set_id\"\xa9\x05\n" +
 	"\x10VpcUpdateRequest\x12\x1d\n" +
 	"\x02id\x18\x01 \x01(\v2\r.common.VpcIdR\x02id\x12-\n" +
 	"\x10if_version_match\x18\x02 \x01(\tH\x00R\x0eifVersionMatch\x88\x01\x01\x12\x12\n" +
@@ -84317,14 +84273,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x19network_security_group_id\x18\x11 \x01(\tH\x01R\x16networkSecurityGroupId\x88\x01\x01\x12s\n" +
 	"#default_nvlink_logical_partition_id\x18\x12 \x01(\v2 .common.NVLinkLogicalPartitionIdH\x02R\x1fdefaultNvlinkLogicalPartitionId\x88\x01\x01\x12b\n" +
 	"\x19routing_profile_overrides\x18\x13 \x01(\v2!.forge.VpcRoutingProfileOverridesH\x03R\x17routingProfileOverrides\x88\x01\x01\x125\n" +
-	"\x14power_resource_group\x18\x14 \x01(\tH\x04R\x12powerResourceGroup\x88\x01\x01\x120\n" +
-	"\x12dhcp_option_set_id\x18\x15 \x01(\tH\x05R\x0fdhcpOptionSetId\x88\x01\x01B\x13\n" +
+	"\x14power_resource_group\x18\x14 \x01(\tH\x04R\x12powerResourceGroup\x88\x01\x01B\x13\n" +
 	"\x11_if_version_matchB\x1c\n" +
 	"\x1a_network_security_group_idB&\n" +
 	"$_default_nvlink_logical_partition_idB\x1c\n" +
 	"\x1a_routing_profile_overridesB\x17\n" +
-	"\x15_power_resource_groupB\x15\n" +
-	"\x13_dhcp_option_set_idJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"/\n" +
+	"\x15_power_resource_groupJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x15\x10\x16R\x12dhcp_option_set_id\"/\n" +
 	"\x0fVpcUpdateResult\x12\x1c\n" +
 	"\x03vpc\x18\x01 \x01(\v2\n" +
 	".forge.VpcR\x03vpc\"\x86\x02\n" +
@@ -85030,7 +84984,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"InlineIpxe\x12\x1f\n" +
 	"\vipxe_script\x18\x01 \x01(\tR\n" +
-	"ipxeScriptJ\x04\b\x02\x10\x03\"\xc3\x05\n" +
+	"ipxeScriptJ\x04\b\x02\x10\x03\"\x94\x05\n" +
 	"\x0eInstanceConfig\x12+\n" +
 	"\x06tenant\x18\x01 \x01(\v2\x13.forge.TenantConfigR\x06tenant\x124\n" +
 	"\x02os\x18\x02 \x01(\v2$.forge.InstanceOperatingSystemConfigR\x02os\x126\n" +
@@ -85042,12 +84996,10 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x16dpu_extension_services\x18\x17 \x01(\v2).forge.InstanceDpuExtensionServicesConfigH\x01R\x14dpuExtensionServices\x88\x01\x01\x123\n" +
 	"\x06nvlink\x18\x18 \x01(\v2\x1b.forge.InstanceNVLinkConfigR\x06nvlink\x126\n" +
 	"\tspxconfig\x18\x19 \x01(\v2\x18.forge.InstanceSpxConfigR\tspxconfig\x12(\n" +
-	"\rpower_profile\x18\x1a \x01(\tH\x02R\fpowerProfile\x88\x01\x01\x120\n" +
-	"\x12dhcp_option_set_id\x18\x1b \x01(\tH\x03R\x0fdhcpOptionSetId\x88\x01\x01B\x1c\n" +
+	"\rpower_profile\x18\x1a \x01(\tH\x02R\fpowerProfile\x88\x01\x01B\x1c\n" +
 	"\x1a_network_security_group_idB\x19\n" +
 	"\x17_dpu_extension_servicesB\x10\n" +
-	"\x0e_power_profileB\x15\n" +
-	"\x13_dhcp_option_set_idJ\x04\b\x15\x10\x16\"\xc7\x01\n" +
+	"\x0e_power_profileJ\x04\b\x15\x10\x16J\x04\b\x1b\x10\x1cR\x12dhcp_option_set_id\"\xc7\x01\n" +
 	"\x15InstanceNetworkConfig\x12>\n" +
 	"\n" +
 	"interfaces\x18\x01 \x03(\v2\x1e.forge.InstanceInterfaceConfigR\n" +

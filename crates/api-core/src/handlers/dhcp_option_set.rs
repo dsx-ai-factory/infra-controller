@@ -174,28 +174,6 @@ pub(crate) async fn delete(
     let tenant_organization_id = parse_tenant(&req.tenant_organization_id)?;
 
     let mut txn = api.txn_begin().await?;
-    // Lock the set so it cannot be attached between the check and the delete.
-    if dhcp_option_set::find_by_ids(
-        &mut txn,
-        std::slice::from_ref(&id),
-        Some(&tenant_organization_id),
-        true,
-    )
-    .await?
-    .is_empty()
-    {
-        return Err(CarbideError::NotFoundError {
-            kind: "DhcpOptionSet",
-            id: id.to_string(),
-        }
-        .into());
-    }
-    if dhcp_option_set::is_in_use(&mut txn, &id).await? {
-        return Err(CarbideError::FailedPrecondition(format!(
-            "DhcpOptionSet {id} is in use by an instance or VPC; detach it before deleting"
-        ))
-        .into());
-    }
     dhcp_option_set::delete(&mut txn, &id, &tenant_organization_id).await?;
     txn.commit().await?;
 

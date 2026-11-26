@@ -112,7 +112,6 @@ impl NicoClient {
                     network: None,
                     infiniband: None,
                     network_security_group_id: None,
-                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
