@@ -44,10 +44,11 @@ curl --fail-with-body --silent --show-error \
 
 curl --fail-with-body --silent --show-error \
   --cookie "$cookie_file" \
-  --write-out '\nHTTP %{http_code}\n' \
+  --write-out '%{stderr}HTTP %{http_code}\n' \
   "$admin_url/admin/managed-host.json"
 ```
 
-Verify HTTP 200 from the `managed-host.json` request. If the session expires,
-obtain a new cookie before retrying. The script removes the cookie file and its
-directory on exit.
+The `managed-host.json` request writes its response body to stdout and its HTTP
+status to stderr. Verify HTTP 200 before using the response. If the session
+expires, obtain a new cookie before retrying. The script removes the cookie file
+and its directory on exit.
