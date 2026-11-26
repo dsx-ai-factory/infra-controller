@@ -290,6 +290,8 @@ func (i *Instance) ToReleaseRequestProto() *corev1.InstanceReleaseRequest {
 
 // InstanceCreateInput input parameters for Create method
 type InstanceCreateInput struct {
+	// InstanceID, when set, preserves an ID already known to the Site.
+	InstanceID                             *uuid.UUID
 	Name                                   string
 	Description                            *string
 	TenantID                               uuid.UUID
@@ -386,6 +388,8 @@ type InstanceClearInput struct {
 	Labels                                 bool
 	TpmEkCertificate                       bool
 	PowerProfile                           bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // InstanceFilterInput input parameters for GetAll method
@@ -403,6 +407,8 @@ type InstanceFilterInput struct {
 	OperatingSystemIDs        []uuid.UUID
 	Statuses                  []string
 	SearchQuery               *string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*Instance)(nil)
@@ -557,6 +563,11 @@ func (isd InstanceSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenan
 }
 
 func (isd InstanceSQLDAO) setQueryWithFilter(filter InstanceFilterInput, query *bun.SelectQuery, instanceDAOSpan otrace.Span) (*bun.SelectQuery, error) {
+	// Soft-deleted rows are excluded by default.
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
+
 	// Single-item IN queries are optimized by the query planner to =
 	if filter.InstanceIDs != nil {
 		query = query.Where("i.id IN (?)", bun.In(filter.InstanceIDs))
@@ -834,11 +845,20 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		i.PowerProfile = nil
 		updatedFields = append(updatedFields, "power_profile")
 	}
+	if input.Deleted {
+		i.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, isd.dbSession).NewUpdate().Model(i).Column(updatedFields...).Where("id = ?", input.InstanceID).Exec(ctx)
+		query := db.GetIDB(tx, isd.dbSession).NewUpdate().Model(i).Column(updatedFields...).Where("id = ?", input.InstanceID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -893,8 +913,12 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 	ids := make([]uuid.UUID, 0, len(inputs))
 
 	for _, input := range inputs {
+		id := uuid.New()
+		if input.InstanceID != nil {
+			id = *input.InstanceID
+		}
 		i := Instance{
-			ID:                                     uuid.New(),
+			ID:                                     id,
 			Name:                                   input.Name,
 			Description:                            input.Description,
 			TenantID:                               input.TenantID,

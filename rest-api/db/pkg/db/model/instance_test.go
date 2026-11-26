@@ -313,6 +313,15 @@ func TestInstanceSQLDAO_Create(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
+			desc: "create one with caller-supplied ID",
+			is: []Instance{
+				{
+					ID: uuid.New(), Name: "test-with-id", TenantID: tenant.ID, InfrastructureProviderID: ip.ID, SiteID: site.ID, VpcID: vpc.ID, MachineID: &machine.ID, Status: InstanceStatusReady, CreatedBy: user.ID, Labels: map[string]string{},
+				},
+			},
+			expectError: false,
+		},
+		{
 			desc: "create multiple, some with null fields",
 			is: []Instance{
 				{
@@ -403,9 +412,14 @@ func TestInstanceSQLDAO_Create(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			for _, i := range tc.is {
+				var instanceID *uuid.UUID
+				if i.ID != uuid.Nil {
+					instanceID = &i.ID
+				}
 				got, err := ossd.Create(
 					ctx, nil,
 					InstanceCreateInput{
+						InstanceID:                             instanceID,
 						Name:                                   i.Name,
 						Description:                            i.Description,
 						TenantID:                               i.TenantID,
@@ -433,6 +447,9 @@ func TestInstanceSQLDAO_Create(t *testing.T) {
 				assert.Equal(t, tc.expectError, err != nil)
 				if !tc.expectError {
 					assert.NotNil(t, got)
+					if instanceID != nil {
+						assert.Equal(t, *instanceID, got.ID)
+					}
 				}
 				if i.NetworkSecurityGroupPropagationDetails != nil {
 					assert.True(t, proto.Equal(i.NetworkSecurityGroupPropagationDetails, got.NetworkSecurityGroupPropagationDetails))
@@ -1054,7 +1071,10 @@ func TestInstanceSQLDAO_GetAllIDs(t *testing.T) {
 	siteInstanceIDs := []uuid.UUID{createInstance("instance-1", site, vpc), createInstance("instance-2", site, vpc)}
 	slices.SortFunc(siteInstanceIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 	createInstance("instance-3", site2, vpc2)
-	require.NoError(t, isd.Delete(ctx, nil, createInstance("instance-4", site, vpc)))
+	deletedInstanceID := createInstance("instance-4", site, vpc)
+	require.NoError(t, isd.Delete(ctx, nil, deletedInstanceID))
+	siteInstanceIDsWithDeleted := append(slices.Clone(siteInstanceIDs), deletedInstanceID)
+	slices.SortFunc(siteInstanceIDsWithDeleted, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 
 	// Two Interfaces in the VPC join the same Instance twice.
 	ifcd := NewInterfaceDAO(dbSession)
@@ -1078,6 +1098,11 @@ func TestInstanceSQLDAO_GetAllIDs(t *testing.T) {
 			desc:     "Site filter excludes other Sites and soft-deleted Instances",
 			filter:   InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}},
 			expected: siteInstanceIDs,
+		},
+		{
+			desc:     "IncludeDeleted also returns soft-deleted Instances",
+			filter:   InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}, IncludeDeleted: true},
+			expected: siteInstanceIDsWithDeleted,
 		},
 		{
 			desc:     "VPC filter returns each Instance once",
@@ -3040,6 +3065,22 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 	)
 	assert.Nil(t, err)
 	assert.NotNil(t, i2)
+	i3, err := isd.Create(
+		ctx, nil,
+		InstanceCreateInput{
+			Name:                     "test3",
+			TenantID:                 tenant.ID,
+			InfrastructureProviderID: ip.ID,
+			SiteID:                   site.ID,
+			InstanceTypeID:           &instanceType.ID,
+			VpcID:                    vpc.ID,
+			Labels:                   map[string]string{},
+			Status:                   InstanceStatusTerminating,
+			CreatedBy:                user.ID,
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, isd.Delete(ctx, nil, i3.ID))
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -3048,6 +3089,7 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 		desc                                        string
 		id                                          uuid.UUID
 		instance                                    *Instance
+		paramDeleted                                bool
 		paramDescription                            bool
 		paramMachineID                              bool
 		paramControlledInstanceID                   bool
@@ -3159,6 +3201,21 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 			expectedStatus:                   cutil.GetPtr(InstanceStatusPending),
 			expectedLabels:                   map[string]string{},
 		},
+		{
+			desc:         "Can undelete a soft-deleted Instance",
+			id:           i3.ID,
+			instance:     i3,
+			paramDeleted: true,
+
+			expectedUpdate:                   true,
+			expectedTenantID:                 &tenant.ID,
+			expectedInfrastructureProviderID: &ip.ID,
+			expectedSiteID:                   &site.ID,
+			expectedInstanceTypeID:           &instanceType.ID,
+			expectedVpcID:                    &vpc.ID,
+			expectedStatus:                   cutil.GetPtr(InstanceStatusTerminating),
+			expectedLabels:                   map[string]string{},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -3166,6 +3223,7 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 				ctx, nil,
 				InstanceClearInput{
 					InstanceID:                             tc.id,
+					Deleted:                                tc.paramDeleted,
 					Description:                            tc.paramDescription,
 					MachineID:                              tc.paramMachineID,
 					ControllerInstanceID:                   tc.paramControlledInstanceID,
@@ -3225,6 +3283,7 @@ func TestInstanceSQLDAO_Clear(t *testing.T) {
 					assert.Equal(t, *tc.expectedControllerInstanceID, *got.ControllerInstanceID)
 				}
 				assert.Equal(t, *tc.expectedStatus, got.Status)
+				assert.Nil(t, got.Deleted)
 
 				if tc.expectedUpdate {
 					assert.True(t, got.Updated.After(tc.instance.Updated))

@@ -3330,6 +3330,463 @@ func TestManageInstance_createOrUpdateDpuExtensionServiceDeploymentFromSite(t *t
 	}
 }
 
+func TestSiteInstanceNetworkFromProto(t *testing.T) {
+	vpcID := uuid.New()
+	segmentID := uuid.New()
+	prefixID := uuid.New()
+	device := "BlueField"
+	requestedIP := "192.0.2.10"
+	dualStack := cdbm.InterfaceVpcIPFamilyModeDualStack
+	vpcSelection := func(familyMode corev1.InstanceInterfaceIpFamilyMode) *corev1.InstanceInterfaceConfig_Vpc {
+		return &corev1.InstanceInterfaceConfig_Vpc{Vpc: &corev1.InstanceInterfaceVpcSelection{
+			VpcId:      &corev1.VpcId{Value: vpcID.String()},
+			FamilyMode: familyMode,
+		}}
+	}
+	segment := &corev1.InstanceInterfaceConfig_SegmentId{SegmentId: &corev1.NetworkSegmentId{Value: segmentID.String()}}
+
+	tests := []struct {
+		name    string
+		network *corev1.InstanceNetworkConfig
+		want    *siteInstanceNetwork
+		wantErr string
+	}{
+		{
+			name: "maps automatic network to its Controller VPC",
+			network: &corev1.InstanceNetworkConfig{
+				AutoConfig: &corev1.InstanceNetworkAutoConfig{VpcId: &corev1.VpcId{Value: vpcID.String()}},
+			},
+			want: &siteInstanceNetwork{autoNetwork: true, autoControllerVpcID: &vpcID},
+		},
+		{
+			name: "maps legacy Network Segment field to a Site segment",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				FunctionType:     corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				NetworkSegmentId: &corev1.NetworkSegmentId{Value: segmentID.String()},
+			}}},
+			want: &siteInstanceNetwork{interfaces: []siteInstanceInterface{{
+				input:     cdbm.InterfaceCreateInput{IsPhysical: true, Status: cdbm.InterfaceStatusPending},
+				segmentID: &segmentID,
+			}}},
+		},
+		{
+			name: "maps VPC Prefix with its requested IP address",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				NetworkDetails: &corev1.InstanceInterfaceConfig_VpcPrefixId{VpcPrefixId: &corev1.VpcPrefixId{Value: prefixID.String()}},
+				IpAddress:      &requestedIP,
+			}}},
+			want: &siteInstanceNetwork{interfaces: []siteInstanceInterface{{
+				input: cdbm.InterfaceCreateInput{
+					VpcPrefixID:        &prefixID,
+					IsPhysical:         true,
+					RequestedIpAddress: &requestedIP,
+					Status:             cdbm.InterfaceStatusPending,
+				},
+			}}},
+		},
+		{
+			name: "maps device-bound VPC selection with its family mode",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				FunctionType:      corev1.InterfaceFunctionType_VIRTUAL_FUNCTION,
+				NetworkDetails:    vpcSelection(corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_DUAL_STACK),
+				Device:            &device,
+				DeviceInstance:    1,
+				VirtualFunctionId: cutil.GetPtr(uint32(2)),
+			}}},
+			want: &siteInstanceNetwork{interfaces: []siteInstanceInterface{{
+				input: cdbm.InterfaceCreateInput{
+					VpcIPFamilyMode:   &dualStack,
+					Device:            &device,
+					DeviceInstance:    cutil.GetPtr(1),
+					VirtualFunctionID: cutil.GetPtr(2),
+					Status:            cdbm.InterfaceStatusPending,
+				},
+				controllerVpcID: &vpcID,
+			}}},
+		},
+		{
+			name: "rejects automatic and explicit interfaces together",
+			network: &corev1.InstanceNetworkConfig{
+				AutoConfig: &corev1.InstanceNetworkAutoConfig{VpcId: &corev1.VpcId{Value: vpcID.String()}},
+				Interfaces: []*corev1.InstanceInterfaceConfig{{NetworkDetails: segment}},
+			},
+			wantErr: "both automatic and explicit",
+		},
+		{
+			name: "rejects IPv6 interface configuration",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				NetworkDetails:      segment,
+				Ipv6InterfaceConfig: &corev1.InstanceInterfaceIpv6Config{},
+			}}},
+			wantErr: "IPv6 configuration is not supported",
+		},
+		{
+			name: "rejects device-bound virtual function without an ID",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				FunctionType:   corev1.InterfaceFunctionType_VIRTUAL_FUNCTION,
+				NetworkDetails: vpcSelection(corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_IPV4_ONLY),
+				Device:         &device,
+			}}},
+			wantErr: "without a virtual function ID",
+		},
+		{
+			name: "rejects VPC selection without a family mode",
+			network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+				FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+				NetworkDetails: vpcSelection(corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_UNSPECIFIED),
+			}}},
+			wantErr: "unsupported VPC IP family mode",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := siteInstanceNetworkFromProto(tc.network)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestManageInstance_createOrUpdateInstanceFromSite(t *testing.T) {
+	type fixture struct {
+		user        *cdbm.User
+		ip          *cdbm.InfrastructureProvider
+		site        *cdbm.Site
+		tenant      *cdbm.Tenant
+		vpc         *cdbm.Vpc
+		subnet      *cdbm.Subnet
+		machine     *cdbm.Machine
+		sshKeyGroup *cdbm.SSHKeyGroup
+		instanceID  uuid.UUID
+		reported    *corev1.Instance
+		// existing is an active REST Instance with the reported ID that recovery must leave alone.
+		existing      *cdbm.Instance
+		wantName      string
+		wantCreatedBy uuid.UUID
+		// wantInstanceTypeID is the Instance Type the recovered Instance must carry.
+		wantInstanceTypeID *uuid.UUID
+	}
+
+	const reportedName = "site-instance"
+	reportedMac := "02:00:00:00:00:01"
+
+	buildReadyVpc := func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture, name string) *cdbm.Vpc {
+		vpc := util.TestBuildVpc(t, dbSession, f.ip, f.site, f.tenant, name)
+		vpc.Status = cdbm.VpcStatusReady
+		// Keep Controller and REST IDs distinct so recovery must translate them.
+		vpc.ControllerVpcID = cutil.GetPtr(uuid.New())
+		_, err := dbSession.DB.NewUpdate().Model(vpc).Column("status", "controller_vpc_id").WherePK().Exec(ctx)
+		require.NoError(t, err)
+		return vpc
+	}
+	insertInstance := func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture, id, siteID uuid.UUID, name string, machineID *string) *cdbm.Instance {
+		instance := &cdbm.Instance{
+			ID:                       id,
+			Name:                     name,
+			TenantID:                 f.tenant.ID,
+			InfrastructureProviderID: f.ip.ID,
+			SiteID:                   siteID,
+			VpcID:                    f.vpc.ID,
+			MachineID:                machineID,
+			ControllerInstanceID:     &id,
+			Labels:                   map[string]string{},
+			Status:                   cdbm.InstanceStatusReady,
+			CreatedBy:                f.user.ID,
+		}
+		_, err := dbSession.DB.NewInsert().Model(instance).Exec(ctx)
+		require.NoError(t, err)
+		return instance
+	}
+	softDeleteInstance := func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+		existing := insertInstance(t, ctx, dbSession, f, f.instanceID, f.site.ID, reportedName, &f.machine.ID)
+		interfaceDAO := cdbm.NewInterfaceDAO(dbSession)
+		oldIfc, err := interfaceDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
+			InstanceID: existing.ID, SubnetID: &f.subnet.ID, IsPhysical: true, Status: cdbm.InterfaceStatusReady, CreatedBy: f.user.ID,
+		})
+		require.NoError(t, err)
+		require.NoError(t, interfaceDAO.Delete(ctx, nil, oldIfc.ID))
+		require.NoError(t, cdbm.NewInstanceDAO(dbSession).Delete(ctx, nil, existing.ID))
+		f.wantCreatedBy = f.user.ID
+	}
+
+	tests := []struct {
+		name          string
+		setup         func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture)
+		viaInventory  bool
+		wantRecovered bool
+	}{
+		{
+			name:          "creates missing Instance and assigns its Machine",
+			wantRecovered: true,
+		},
+		{
+			name: "resolves VPC selection by Controller VPC ID",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.reported.Config.Network.Interfaces[0].NetworkDetails = &corev1.InstanceInterfaceConfig_Vpc{Vpc: &corev1.InstanceInterfaceVpcSelection{
+					VpcId:      &corev1.VpcId{Value: f.vpc.ControllerVpcID.String()},
+					FamilyMode: corev1.InstanceInterfaceIpFamilyMode_INSTANCE_INTERFACE_IP_FAMILY_MODE_IPV4_ONLY,
+				}}
+			},
+			wantRecovered: true,
+		},
+		{
+			name:          "inventory reconciles Interface status of the recovered Instance in the same pass",
+			viaInventory:  true,
+			wantRecovered: true,
+		},
+		{
+			name: "undeletes stale soft-deleted Instance and recreates its children",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				softDeleteInstance(t, ctx, dbSession, f)
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Instance)(nil), f.instanceID)
+			},
+			wantRecovered: true,
+		},
+		{
+			name: "suffixes stored name of an undeleted Instance that conflicts with an active Instance",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				softDeleteInstance(t, ctx, dbSession, f)
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Instance)(nil), f.instanceID)
+				insertInstance(t, ctx, dbSession, f, uuid.New(), f.site.ID, reportedName, nil)
+				f.wantName = fmt.Sprintf("%s-recovered-%s", reportedName, f.instanceID.String()[:8])
+			},
+			wantRecovered: true,
+		},
+		{
+			name:  "defers recently soft-deleted Instance",
+			setup: softDeleteInstance,
+		},
+		{
+			name: "defers Instance whose Machine is locked by another Instance operation",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				tx, err := cdb.BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = tx.Rollback() })
+				require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(f.machine.ID), false))
+			},
+		},
+		{
+			name: "skips Instance already created in REST",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.existing = insertInstance(t, ctx, dbSession, f, f.instanceID, f.site.ID, reportedName, nil)
+			},
+		},
+		{
+			name: "takes Instance Type from the Machine when Site reports none",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				instanceType := util.TestBuildInstanceType(t, dbSession, f.ip, f.site, "test-instance-type")
+				f.machine.InstanceTypeID = &instanceType.ID
+				_, err := dbSession.DB.NewUpdate().Model(f.machine).Column("instance_type_id").WherePK().Exec(ctx)
+				require.NoError(t, err)
+				f.wantInstanceTypeID = &instanceType.ID
+			},
+			wantRecovered: true,
+		},
+		{
+			name: "skips Instance ID that exists on another Site",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				otherSite := util.TestBuildSite(t, dbSession, f.ip, "other-site", cdbm.SiteStatusRegistered, nil, f.user)
+				insertInstance(t, ctx, dbSession, f, f.instanceID, otherSite.ID, reportedName, nil)
+			},
+		},
+		{
+			name: "skips Machine already used by another Instance",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				insertInstance(t, ctx, dbSession, f, uuid.New(), f.site.ID, "other-instance", &f.machine.ID)
+			},
+		},
+		{
+			name: "skips unknown Tenant",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.reported.Config.Tenant.TenantOrganizationId = "unknown-tenant-org"
+			},
+		},
+		{
+			name: "skips unknown Machine",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.reported.MachineId = &corev1.MachineId{Id: "unknown-machine"}
+			},
+		},
+		{
+			name: "skips Interfaces in different VPCs",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				otherVpc := buildReadyVpc(t, ctx, dbSession, f, "other-vpc")
+				otherSegmentID := uuid.New()
+				util.TestBuildSubnet(t, dbSession, f.tenant, otherVpc, "other-subnet", cdbm.SubnetStatusReady, &otherSegmentID)
+				f.reported.Config.Network.Interfaces = append(f.reported.Config.Network.Interfaces, &corev1.InstanceInterfaceConfig{
+					FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+					NetworkDetails: &corev1.InstanceInterfaceConfig_SegmentId{SegmentId: &corev1.NetworkSegmentId{Value: otherSegmentID.String()}},
+				})
+			},
+		},
+		{
+			name: "skips Instance terminating on Site",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.reported.Status.Tenant.State = corev1.TenantState_TERMINATING
+			},
+		},
+		{
+			name: "skips unsupported InfiniBand configuration",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				f.reported.Config.Infiniband = &corev1.InstanceInfinibandConfig{
+					IbInterfaces: []*corev1.InstanceIBInterfaceConfig{{}},
+				}
+			},
+		},
+		{
+			name: "suffixes name that conflicts with an active Instance",
+			setup: func(t *testing.T, ctx context.Context, dbSession *cdb.Session, f *fixture) {
+				insertInstance(t, ctx, dbSession, f, uuid.New(), f.site.ID, reportedName, nil)
+				f.wantName = fmt.Sprintf("%s-recovered-%s", reportedName, f.instanceID.String()[:8])
+			},
+			wantRecovered: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbSession := util.TestInitDB(t)
+			t.Cleanup(func() {
+				dbSession.Close()
+			})
+			util.TestSetupSchema(t, dbSession)
+
+			f := &fixture{instanceID: uuid.New(), wantName: reportedName}
+			f.user = util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-org"}, []string{"admin"})
+			f.ip = util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", f.user)
+			f.site = util.TestBuildSite(t, dbSession, f.ip, "test-site", cdbm.SiteStatusRegistered, nil, f.user)
+			f.tenant = util.TestBuildTenant(t, dbSession, "test-tenant", "test-tenant-org", nil, f.user)
+			f.vpc = buildReadyVpc(t, ctx, dbSession, f, "test-vpc")
+			segmentID := uuid.New()
+			f.subnet = util.TestBuildSubnet(t, dbSession, f.tenant, f.vpc, "test-subnet", cdbm.SubnetStatusReady, &segmentID)
+			f.machine = util.TestBuildMachine(t, dbSession, f.ip.ID, f.site.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
+			f.sshKeyGroup = util.TestBuildSSHKeyGroup(t, dbSession, "test-ssh-key-group", f.tenant.Org, nil, f.tenant.ID, nil, cdbm.SSHKeyGroupStatusSynced, f.user.ID)
+			f.wantCreatedBy = f.site.ID
+			f.reported = &corev1.Instance{
+				Id:        &corev1.InstanceId{Value: f.instanceID.String()},
+				MachineId: &corev1.MachineId{Id: f.machine.ID},
+				Metadata:  &corev1.Metadata{Name: reportedName},
+				Config: &corev1.InstanceConfig{
+					Tenant: &corev1.TenantConfig{
+						TenantOrganizationId: f.tenant.Org,
+						TenantKeysetIds:      []string{f.sshKeyGroup.ID.String()},
+					},
+					Network: &corev1.InstanceNetworkConfig{Interfaces: []*corev1.InstanceInterfaceConfig{{
+						FunctionType:   corev1.InterfaceFunctionType_PHYSICAL_FUNCTION,
+						NetworkDetails: &corev1.InstanceInterfaceConfig_SegmentId{SegmentId: &corev1.NetworkSegmentId{Value: segmentID.String()}},
+					}}},
+				},
+				Status: &corev1.InstanceStatus{
+					Tenant: &corev1.InstanceTenantStatus{State: corev1.TenantState_READY},
+					Network: &corev1.InstanceNetworkStatus{
+						ConfigsSynced: corev1.SyncState_SYNCED,
+						Interfaces: []*corev1.InstanceInterfaceStatus{
+							{MacAddress: &reportedMac, Addresses: []string{"192.0.2.10"}},
+						},
+					},
+				},
+			}
+			if tc.setup != nil {
+				tc.setup(t, ctx, dbSession, f)
+			}
+
+			activity := ManageInstance{dbSession: dbSession}
+			var got *cdbm.Instance
+			if tc.viaInventory {
+				tSiteClientPool := testTemporalSiteClientPool(t)
+				tSiteClientPool.IDClientMap[f.site.ID.String()] = &tmocks.Client{}
+				manager := NewManageInstance(dbSession, tSiteClientPool, &tmocks.Client{}, config.GetTestConfig())
+				_, err := manager.UpdateInstancesInDB(ctx, f.site.ID, &corev1.InstanceInventory{Instances: []*corev1.Instance{f.reported}})
+				require.NoError(t, err)
+			} else {
+				got = activity.createOrUpdateInstanceFromSite(ctx, f.site, f.reported)
+			}
+
+			instanceDAO := cdbm.NewInstanceDAO(dbSession)
+			active, _, err := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{
+				InstanceIDs: []uuid.UUID{f.instanceID}, SiteIDs: []uuid.UUID{f.site.ID},
+			}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, f.machine.ID, nil, false)
+			require.NoError(t, err)
+
+			if !tc.wantRecovered {
+				assert.Nil(t, got)
+				if f.existing != nil {
+					require.Len(t, active, 1)
+					assert.True(t, f.existing.Updated.Equal(active[0].Updated))
+				} else {
+					assert.Empty(t, active)
+				}
+				assert.False(t, machine.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+				return
+			}
+
+			require.Len(t, active, 1)
+			recovered := active[0]
+			if !tc.viaInventory {
+				require.NotNil(t, got)
+				assert.Equal(t, f.instanceID, got.ID)
+			}
+			assert.Equal(t, f.wantName, recovered.Name)
+			assert.Equal(t, f.tenant.ID, recovered.TenantID)
+			assert.Equal(t, f.vpc.ID, recovered.VpcID)
+			assert.Equal(t, f.wantCreatedBy, recovered.CreatedBy)
+			assert.Equal(t, f.wantInstanceTypeID, recovered.InstanceTypeID)
+			assert.Equal(t, cdbm.InstanceStatusReady, recovered.Status)
+			require.NotNil(t, recovered.MachineID)
+			assert.Equal(t, f.machine.ID, *recovered.MachineID)
+			require.NotNil(t, recovered.ControllerInstanceID)
+			assert.Equal(t, f.instanceID, *recovered.ControllerInstanceID)
+			assert.True(t, machine.IsAssigned)
+			assert.Equal(t, cdbm.MachineStatusInUse, machine.Status)
+
+			interfaceDAO := cdbm.NewInterfaceDAO(dbSession)
+			assertChildren := func(t *testing.T) {
+				interfaces, _, ierr := interfaceDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{f.instanceID}}, cdbp.PageInput{}, nil)
+				require.NoError(t, ierr)
+				require.Len(t, interfaces, 1)
+				if interfaces[0].SubnetID != nil {
+					assert.Equal(t, f.subnet.ID, *interfaces[0].SubnetID)
+				} else {
+					require.NotNil(t, interfaces[0].VpcID)
+					assert.Equal(t, f.vpc.ID, *interfaces[0].VpcID)
+				}
+				if tc.viaInventory {
+					assert.Equal(t, cdbm.InterfaceStatusReady, interfaces[0].Status)
+					require.NotNil(t, interfaces[0].MacAddress)
+					assert.Equal(t, reportedMac, *interfaces[0].MacAddress)
+				} else {
+					assert.Equal(t, cdbm.InterfaceStatusPending, interfaces[0].Status)
+				}
+
+				associations, _, aerr := cdbm.NewSSHKeyGroupInstanceAssociationDAO(dbSession).GetAll(ctx, nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{
+					InstanceIDs: []uuid.UUID{f.instanceID},
+				}, cdbp.PageInput{}, nil)
+				require.NoError(t, aerr)
+				require.Len(t, associations, 1)
+				assert.Equal(t, f.sshKeyGroup.ID, associations[0].SSHKeyGroupID)
+			}
+			assertChildren(t)
+
+			if !tc.viaInventory {
+				// A repeated report finds the active row and must not recreate its children.
+				assert.Nil(t, activity.createOrUpdateInstanceFromSite(ctx, f.site, f.reported))
+				assertChildren(t)
+			}
+		})
+	}
+}
+
 // Metrics tests with various statusDetails scenarios
 
 // Test Instance Metrics - CREATE operations
