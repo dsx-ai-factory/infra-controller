@@ -132,12 +132,14 @@ impl From<AuthorityArg> for SitePrefixAuthority {
 #[clap(rename_all = "kebab_case")]
 enum RoutingScopeArg {
     DatacenterOnly,
+    Routable,
 }
 
 impl From<RoutingScopeArg> for SitePrefixRoutingScope {
     fn from(value: RoutingScopeArg) -> Self {
         match value {
             RoutingScopeArg::DatacenterOnly => Self::DatacenterOnly,
+            RoutingScopeArg::Routable => Self::Routable,
         }
     }
 }

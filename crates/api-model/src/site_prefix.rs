@@ -47,7 +47,11 @@ pub enum SitePrefixAuthority {
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum SitePrefixRoutingScope {
+    /// Routable only within the datacenter fabric.
     DatacenterOnly,
+    /// Externally routable: the prefix may be advertised beyond the fabric, for
+    /// example a delegated or bring-your-own routable block.
+    Routable,
 }
 
 /// Tenant-facing lifecycle state for a site prefix.
