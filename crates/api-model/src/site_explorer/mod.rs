@@ -507,9 +507,13 @@ impl ExploredEndpoint {
             version = ?matching_inventory.version,
             "Found matching firmware version",
         );
-        matching_inventory.version.as_ref()
+        matching_inventory.reported_version()
     }
 
+    /// Returns the usable versions of every inventory entry that matches the
+    /// component. Entries without a usable version (see
+    /// [`Inventory::reported_version`]) are skipped, so an empty result means
+    /// "nothing to compare", never "current".
     pub fn find_all_versions(
         &self,
         fw_info: &Firmware,
@@ -521,7 +525,7 @@ impl ExploredEndpoint {
         for service in self.report.service.iter() {
             for inventory in service.inventories.iter() {
                 if fw_info.matching_version_id(&inventory.id, firmware_type)
-                    && let Some(ref version) = inventory.version
+                    && let Some(version) = inventory.reported_version()
                 {
                     versions.push(version);
                 };
@@ -2223,6 +2227,18 @@ pub struct DriveIdentity {
     /// The drive's Redfish `MediaType` (`SSD`, `HDD` or `SMR`), for reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+}
+
+impl Inventory {
+    /// The version Redfish reported for this entry, if it is usable. An
+    /// absent, empty or whitespace-only `Version` means the BMC does not know
+    /// it (some BMCs report `"    "` for devices they cannot read), so it must
+    /// compare neither equal nor unequal to a desired version.
+    pub fn reported_version(&self) -> Option<&String> {
+        self.version
+            .as_ref()
+            .filter(|version| !version.trim().is_empty())
+    }
 }
 
 /// The result of one Redfish machine-setup check.
@@ -4648,6 +4664,12 @@ mod tests {
                     ("Other_Component", Some("7.8.9")),
                 ] => Fails,
             }
+
+            // Some BMCs report "    " for devices whose version they cannot read.
+            "blank version is unknown" {
+                vec![("BMC_Firmware", Some(""))] => Fails,
+                vec![("BMC_Firmware", Some("    "))] => Fails,
+            }
         );
     }
 
@@ -4746,6 +4768,18 @@ mod tests {
                     },
                     expect: vec!["1.2.3".to_string(), "3.4.5".to_string()],
                 },
+                Check {
+                    scenario: "skips a matching inventory with an empty or blank version",
+                    input: FindAllVersionsInput {
+                        regex_pattern: r"BMC_Firmware",
+                        inventories: vec![
+                            ("BMC_Firmware_1", Some("1.2.3")),
+                            ("BMC_Firmware_2", Some("")),
+                            ("BMC_Firmware_3", Some("    ")),
+                        ],
+                    },
+                    expect: vec!["1.2.3".to_string()],
+                },
             ],
             |input| {
                 let fw_info = create_test_firmware(FirmwareComponentType::Bmc, input.regex_pattern);
@@ -4758,6 +4792,21 @@ mod tests {
                     .collect()
             },
         );
+    }
+
+    /// The update manager compares the report's `Versions` map with the
+    /// desired versions. A blank Redfish version must stay out of that map:
+    /// recorded as "    " it would read as an installed, wrong version.
+    #[test]
+    fn parse_versions_leaves_blank_versions_out() {
+        let fw_info = create_test_firmware(FirmwareComponentType::Nic, r"^NIC([3-9]|10)$");
+        let mut report =
+            create_test_endpoint(vec![("NIC3", Some("    ")), ("NIC4", Some("    "))]).report;
+
+        let not_found = report.parse_versions(&fw_info);
+
+        assert_eq!(not_found, vec![FirmwareComponentType::Nic]);
+        assert!(report.versions.is_empty());
     }
 
     #[test]
