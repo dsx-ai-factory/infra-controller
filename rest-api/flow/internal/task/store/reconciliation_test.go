@@ -82,12 +82,17 @@ func TestPostgresStore_ListTasksForReconciliation(t *testing.T) {
 		uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 	}
 	for i, status := range []taskcommon.TaskStatus{taskcommon.TaskStatusRunning, taskcommon.TaskStatusCompleted, taskcommon.TaskStatusPending} {
-		require.NoError(t, store.CreateTask(t.Context(), &taskdef.Task{ID: ids[i], RackID: uuid.New(), Status: status, ExecutionID: "run", ExecutorType: taskcommon.ExecutorTypeTemporal, Operation: operation.Wrapper{Type: taskcommon.TaskTypePowerControl, Code: "ForcePowerOff", Info: []byte(`{}`)}}))
+		attributes := taskcommon.TaskAttributes{}
+		if i == 0 {
+			attributes.TraceID = "1234567890abcdef1234567890abcdef"
+		}
+		require.NoError(t, store.CreateTask(t.Context(), &taskdef.Task{ID: ids[i], RackID: uuid.New(), Attributes: attributes, Status: status, ExecutionID: "run", ExecutorType: taskcommon.ExecutorTypeTemporal, Operation: operation.Wrapper{Type: taskcommon.TaskTypePowerControl, Code: "ForcePowerOff", Info: []byte(`{}`)}}))
 	}
 	first, err := store.ListTasksForReconciliation(t.Context(), taskcommon.ExecutorTypeTemporal, uuid.Nil, 1)
 	require.NoError(t, err)
 	require.Len(t, first, 1)
 	require.Equal(t, ids[0], first[0].ID)
+	require.Equal(t, "1234567890abcdef1234567890abcdef", first[0].Attributes.TraceID)
 	// Removing the first page must not shift the cursor past a surviving row.
 	closed := time.Now()
 	_, err = store.FinishTaskExecution(t.Context(), first[0], &taskdef.ExecutionStatus{Status: taskcommon.TaskStatusTerminated, FinishedAt: &closed})
@@ -96,4 +101,5 @@ func TestPostgresStore_ListTasksForReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, next, 1)
 	require.Equal(t, ids[2], next[0].ID)
+	require.Empty(t, next[0].Attributes.TraceID, "legacy tasks remain reconcilable without correlation")
 }

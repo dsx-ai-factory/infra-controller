@@ -20,17 +20,23 @@ func (s *PostgresStore) ListTasksForReconciliation(ctx context.Context, executor
 	if limit <= 0 {
 		return nil, fmt.Errorf("reconciliation limit must be positive")
 	}
-	var rows []model.Task
-	err := s.idb(ctx).NewSelect().Model(&rows).Column("id", "rack_id", "execution_id").
+	var rows []struct {
+		ID          uuid.UUID
+		RackID      uuid.UUID
+		ExecutionID string
+		TraceID     string
+	}
+	err := s.idb(ctx).NewSelect().Model((*model.Task)(nil)).Column("id", "rack_id", "execution_id").
+		ColumnExpr("COALESCE(attributes->>'trace_id', '') AS trace_id").
 		Where("status IN (?)", bun.In([]taskcommon.TaskStatus{taskcommon.TaskStatusPending, taskcommon.TaskStatusRunning})).
 		Where("executor_type = ?", executor).Where("execution_id <> ''").
-		Where("id > ?", afterID).OrderExpr("id ASC").Limit(limit).Scan(ctx)
+		Where("id > ?", afterID).OrderExpr("id ASC").Limit(limit).Scan(ctx, &rows)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks for reconciliation: %w", err)
 	}
 	tasks := make([]*taskdef.Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, &taskdef.Task{ID: row.ID, RackID: row.RackID, ExecutionID: row.ExecutionID})
+		tasks = append(tasks, &taskdef.Task{ID: row.ID, RackID: row.RackID, ExecutionID: row.ExecutionID, Attributes: taskcommon.TaskAttributes{TraceID: row.TraceID}})
 	}
 	return tasks, nil
 }
