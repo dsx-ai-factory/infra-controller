@@ -39,6 +39,19 @@ POSTGRES_USER := postgres
 POSTGRES_PASSWORD := postgres
 POSTGRES_DB := nicotest
 POSTGRES_IMAGE := postgres:14.4-alpine
+# The Rust test harness opens a pool per test process (crates/sqlx-testing
+# defaults to 50, see NICO_TEST_MAX_PG_CONNECTIONS) and test binaries run
+# concurrently, so the server needs room for several of those at once. The
+# PostgreSQL default of 100 is not enough: the api-core suite exhausts it and
+# the failures surface as unrelated-looking assertion errors rather than as a
+# connection problem. Every other PostgreSQL this repository starts already
+# raises the limit.
+#
+# Keep this at or above MAX_TEST_CONNECTIONS (900), the largest budget
+# NICO_TEST_MAX_PG_CONNECTIONS accepts: the harness refuses to start when the
+# server cannot serve the configured budget, and sqlx-testing's own
+# connection_budget test exercises that maximum.
+POSTGRES_MAX_CONNECTIONS := 1000
 
 # Helm chart configuration (for kind-reset-helm / helm-* targets)
 UMBRELLA_CHART := ../helm/rest/nico-rest
@@ -86,7 +99,8 @@ postgres-up:
 		-c synchronous_commit=off \
 		-c full_page_writes=off \
 		-c wal_level=minimal \
-		-c max_wal_senders=0
+		-c max_wal_senders=0 \
+		-c max_connections=$(POSTGRES_MAX_CONNECTIONS)
 
 postgres-down:
 	-docker rm -f $(POSTGRES_CONTAINER_NAME)
