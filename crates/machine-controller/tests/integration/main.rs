@@ -20,6 +20,7 @@ mod bios_restart;
 mod bmc_rotation;
 mod busy_bmc;
 mod controller_state;
+mod decommissioning;
 mod dpu_uefi_rotation;
 mod env;
 mod firmware_upgrade_completion;
