@@ -96,8 +96,24 @@ func NewConfiguration() *Configuration {
 		Debug:         false,
 		Servers: ServerConfigurations{
 			{
-				URL:         "https://nico-rest-api.nico.svc.cluster.local",
-				Description: "Kubernetes Cluster",
+				URL:         "http://nico-rest-api.{namespace}.svc.cluster.local:8388",
+				Description: "Direct in-cluster HTTP access to the Kubernetes Service",
+				Variables: map[string]ServerVariable{
+					"namespace": ServerVariable{
+						Description:  "Kubernetes namespace containing the NICo REST API Service",
+						DefaultValue: "nico-rest",
+					},
+				},
+			},
+			{
+				URL:         "https://{hostname}",
+				Description: "Optional external HTTPS access through a configured TLS ingress or other TLS front door",
+				Variables: map[string]ServerVariable{
+					"hostname": ServerVariable{
+						Description:  "DNS hostname configured for the external TLS endpoint",
+						DefaultValue: "rest-api.example.com",
+					},
+				},
 			},
 		},
 		OperationServers: map[string]ServerConfigurations{},

@@ -151,6 +151,12 @@ The API is available at `http://<node-ip>:30388` (NodePort) or `nico-rest-api.ni
 curl http://<node-ip>:30388/healthz
 ```
 
+Both endpoints use plaintext HTTP. The NodePort is intended for development and
+verification, not production exposure. Terminate production traffic at a TLS
+front door and route to the Service on port `8388`; see the
+[NICo REST ingress setup](../../docs/getting-started/quick-start.md#optional-expose-nico-rest-over-tls-with-ingress)
+for DNS, certificate, and client trust requirements.
+
 ---
 
 ## Distributed Tracing (OpenTelemetry)
