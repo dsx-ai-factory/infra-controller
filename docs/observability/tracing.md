@@ -780,7 +780,7 @@ setting needs a pod restart. There is no runtime toggle like nico-api's `tracing
 |---|---|
 | `nico-rest-api` | `tracing.enabled` is `true` in its config and an OTLP endpoint variable is set |
 | `nico-rest-workflow`, for both the cloud and the site worker | `tracing.enabled` is `true` in the workflow config and an OTLP endpoint variable is set |
-| `nico-rest-site-agent`, `nico-rest-site-manager`, `nico-rest-cert-manager`, `nico-flow`, `nico-ipam`, `nico-nvswitch-manager`, `nico-powershelf-manager` | An OTLP endpoint variable is set |
+| `nico-rest-site-agent`, `nico-rest-site-manager`, `nico-rest-cert-manager`, `nico-flow`, `nico-ipam`, `nico-nvswitch-manager`, `nico-powershelf-manager`, `nico-mcp` | An OTLP endpoint variable is set |
 
 An OTLP endpoint variable is `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
 with a non-empty value. No Helm chart or Kustomize base sets one, so nothing is exported until you
@@ -788,7 +788,8 @@ add it.
 
 A service that does not export still reads an inbound `traceparent` and `tracestate`, and forwards
 them on its own HTTP, gRPC, and Temporal calls. So a hop that does not export leaves a gap in the
-trace rather than splitting it.
+trace rather than splitting it. `nico-mcp` forwards them only to its startup base URL. Without one,
+its REST requests carry no trace context (see [NICo MCP Server](../operations/nico-mcp.md#tracing)).
 
 ### What each service traces
 
@@ -806,6 +807,7 @@ that does not export.
 | `nico-ipam` | Connect RPC server spans |
 | `nico-rest-site-manager` | HTTP server spans, and HTTP client spans for its outbound calls |
 | `nico-rest-cert-manager` | HTTP server spans |
+| `nico-mcp` | A server span for each MCP tool call. [NICo MCP Server](../operations/nico-mcp.md#tracing) describes the span and when the `nico-rest-api` server span is its child |
 
 A database query span records the SQL statement with `?` placeholders, so bound parameter values
 are never exported.
@@ -919,6 +921,7 @@ nico-rest-site-manager:
 The other services take the same variables through their own charts or manifests:
 
 - `nico-rest-site-agent` takes them in its `envConfig` map.
+- `nico-mcp` takes them in the `extraEnv` map of its own chart, `helm/rest/nico-mcp`.
 - `nico-flow` takes a list of `EnvVar` entries in `extraEnv.flow`.
 - `nico-ipam`, `nico-nvswitch-manager`, and `nico-powershelf-manager` read them from their container
   environment.

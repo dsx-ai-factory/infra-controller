@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Tracing environment and pod annotations
+templates:
+  - deployment.yaml
+tests:
+  - it: renders no container environment or pod annotations by default
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env
+      - notExists:
+          path: spec.template.metadata.annotations
+      # The pod keeps the labels the Deployment selects it by.
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            app: nico-mcp
+            app.kubernetes.io/name: nico-mcp
+            app.kubernetes.io/component: mcp
+  - it: renders extraEnv as container environment with string values
+    set:
+      extraEnv:
+        OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+        OTEL_BSP_SCHEDULE_DELAY: 1000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: OTEL_BSP_SCHEDULE_DELAY
+              value: "1000"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4318
+  - it: renders podAnnotations on the pod template
+    set:
+      podAnnotations:
+        instrumentation.opentelemetry.io/inject-sdk: "true"
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations
+          value:
+            instrumentation.opentelemetry.io/inject-sdk: "true"
+  - it: rejects a NICO_ variable in extraEnv
+    set:
+      extraEnv.NICO_BASE_URL: http://nico-rest-api:8388
+    asserts:
+      - failedTemplate:
+          errorMessage: "extraEnv must not set NICO_BASE_URL: configure nico-mcp through chart values, which do not expose tokens"

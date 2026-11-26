@@ -111,6 +111,7 @@ Deployment starts when the registry requires authentication.
 | `replicaCount` | `1` | Number of MCP server replicas. |
 | `nameOverride` | empty | Override for the Deployment and Service name. |
 | `namespaceOverride` | empty | Namespace override; otherwise the Helm release namespace is used. |
+| `podAnnotations` | `{}` | Annotations added to the pod, such as OpenTelemetry Operator injection annotations. |
 | `image.name` | `nico-mcp` | Image name appended to the repository. |
 | `service.type` | `ClusterIP` | Kubernetes Service type. Keep `ClusterIP` for production. |
 | `service.port` | `8080` | Listener and Service port. |
@@ -124,6 +125,7 @@ Deployment starts when the registry requires authentication.
 | `metrics.port` | `9360` | Metrics listener and Service port. Must differ from `service.port` when `metrics.enabled` is `true`; the chart fails to render otherwise. |
 | `resources.requests` | `50m` CPU, `64Mi` memory | Pod resource requests. |
 | `resources.limits` | `250m` CPU, `256Mi` memory | Pod resource limits. |
+| `extraEnv` | `{}` | Extra container environment variables as a map of names to values, mainly the `OTEL_*` variables described in [Tracing](#tracing). The chart fails to render when a name starts with `NICO_`. |
 
 Bearer tokens are intentionally not exposed as chart values. Shared production
 deployments should use the authenticated caller's token instead of a static
@@ -250,6 +252,100 @@ forwarding:
 sum by (tool, status_code) (rate(nico_mcp_rest_requests_total{status_code!~"2.."}[5m]))
 sum by (reason) (increase(nico_mcp_credential_forwarding_rejected_total[1h]))
 ```
+
+## Tracing
+
+`nico-mcp` exports one span for each tool call over OTLP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set.
+Without one, the binary records no spans and opens no connection to a
+collector. It reads the same standard `OTEL_*` variables as the NICo REST
+services, which
+[NICo REST API service tracing](../observability/tracing.md#7-nico-rest-api-service-tracing)
+lists with their defaults and bounds. The default `service.name` is `nico-mcp`
+and the default protocol is `http/protobuf`.
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+nico-mcp \
+  --listen 127.0.0.1:8080 \
+  --base-url https://nico.example.com \
+  --org example-org
+```
+
+The startup log shows which mode the binary is in:
+`tracing enabled, OTLP tracer provider installed` when it exports, and
+`tracing disabled by config` when no endpoint variable is set.
+
+With the Helm chart, set the variables in `extraEnv`:
+
+```yaml
+extraEnv:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4318
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=nico-rest,deployment.environment=prod
+```
+
+The chart renders each `extraEnv` entry as a container environment variable
+and fails to render when a name starts with `NICO_`, so the server settings
+stay in [Chart Values](#chart-values) and a bearer token cannot be set through
+the chart. Direct export needs no pod annotations. `podAnnotations` adds
+annotations to the pod, for example the OpenTelemetry Operator annotation that
+injects the `OTEL_*` variables from an `Instrumentation` resource in place of
+`extraEnv`:
+
+```yaml
+podAnnotations:
+  instrumentation.opentelemetry.io/inject-sdk: "true"
+```
+
+Each call to a tool the server has records one span:
+
+| Field | Value |
+| ----- | ----- |
+| Name | `tools/call` followed by the tool name, such as `tools/call nico_get_all_site`. |
+| Kind | Server. |
+| `mcp.method.name` | `tools/call`. |
+| `gen_ai.operation.name` | `execute_tool`. |
+| `gen_ai.tool.name` | The MCP tool name, such as `nico_get_all_site`. |
+| `error.type` | Present only when the call fails. `tool_error` when the tool returns an error result, such as a NICo REST error or a rejected credential. The JSON-RPC error code when the call is rejected before the tool runs, such as `-32602` for arguments that do not match the tool's input schema. `_OTHER` for any other failure. |
+| Status | `Error` when `error.type` is present, otherwise unset. The status has no description. |
+
+The span name, kind, and attributes above follow the
+[OpenTelemetry semantic conventions for MCP](https://github.com/open-telemetry/semantic-conventions/blob/v1.39.0/docs/gen-ai/mcp.md).
+The span sets no other attribute those conventions list. Two of the ones it
+leaves out are conditionally required for a tool call: `jsonrpc.request.id`,
+left out because the request id is caller input, and
+`rpc.response.status_code`, left out because it would repeat `error.type`.
+A span fails exactly when `nico_mcp_tool_calls_total` counts the call with
+`result="error"`. A call to a tool name the server does not have records no
+span. A span never contains tool arguments, tokens, the NICo REST URL, or
+error text.
+
+`nico-mcp` reads the trace context on the MCP HTTP request, so the tool call
+span joins the caller's trace. It sends that span's context on the NICo REST
+request the tool makes. When NICo REST exports to the same backend, its server
+span is a child of the tool call span, and one trace shows the tool call and
+the REST request beneath it. By default the trace context is the W3C
+`traceparent`, `tracestate`, and `baggage` headers; `OTEL_PROPAGATORS` selects
+other formats. Trace context in the MCP request's `params._meta` is not read.
+
+Without an endpoint variable, `nico-mcp` forwards the caller's trace context
+to NICo REST unchanged, and sends none when the caller sent none. With
+`OTEL_PROPAGATORS=none`, it neither reads nor sends trace context.
+
+Trace context is sent only to the startup base URL. When the server has none
+and a tool call supplies its own `base_url`, the tool call span is still
+recorded, but that REST request carries no trace context, so the caller's
+`tracestate` and `baggage` do not reach a destination the caller selects.
+
+An unknown `OTEL_PROPAGATORS` name is logged at startup as
+`nico-mcp: failed to initialize tracing`. So are an unknown protocol and an
+`OTEL_BSP_*` value outside its range when an endpoint variable is set. The
+server then runs without tracing and forwards no trace context.
+
+On shutdown, after its listeners have drained, `nico-mcp` flushes the spans
+still queued for up to 5 seconds. Keep `config.shutdownTimeout` plus those
+5 seconds within the pod's termination grace period, which the chart leaves at
+the Kubernetes default of 30 seconds.
 
 ## Security Requirements
 

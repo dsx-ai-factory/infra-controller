@@ -20,6 +20,10 @@ spec:
     metadata:
       labels:
         {{- include "nico-mcp.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -62,6 +66,16 @@ spec:
             - containerPort: {{ .Values.metrics.port }}
               name: metrics
             {{- end }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- range $k, $v := . }}
+            {{- if hasPrefix "NICO_" $k }}
+            {{- fail (printf "extraEnv must not set %s: configure nico-mcp through chart values, which do not expose tokens" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
           # The MCP endpoint only answers JSON-RPC POSTs, so use a TCP probe
           # rather than an HTTP health check.
           readinessProbe:
