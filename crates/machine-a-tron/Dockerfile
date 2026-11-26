@@ -29,6 +29,22 @@
 #
 ARG RUST_VERSION=1.100.0
 
+FROM --platform=linux/amd64 debian:bookworm-slim AS freeipmi-builder
+
+ARG FREEIPMI_VERSION=1.6.20
+RUN apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		build-essential ca-certificates curl libgcrypt20-dev && \
+	curl -fsSL "https://ftpmirror.gnu.org/freeipmi/freeipmi-${FREEIPMI_VERSION}.tar.gz" \
+		-o /tmp/freeipmi.tar.gz && \
+	echo "9cc644530ee629ffb94d6fd209e7cb4a8b8ae6677f89d2dc461efed9b2e709f2  /tmp/freeipmi.tar.gz" | sha256sum -c - && \
+	cd /tmp && tar xzf freeipmi.tar.gz && \
+	cd "freeipmi-${FREEIPMI_VERSION}" && \
+	./configure --prefix=/usr --sysconfdir=/etc --quiet && \
+	make -j"$(nproc)" --quiet && \
+	make install DESTDIR=/tmp/freeipmi-install --quiet && \
+	rm -rf /tmp/freeipmi.tar.gz /tmp/freeipmi-${FREEIPMI_VERSION}
+
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 ARG VERSION
@@ -91,6 +107,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev1 \
     openipmi \
     && rm -rf /var/lib/apt/lists/*
+
+# Replace vulnerable Debian-packaged freeipmi 1.6.10 with source-built 1.6.20.
+# Copy all source-built libraries and update dpkg metadata so scanners
+# report the fixed version without breaking package dependencies.
+COPY --from=freeipmi-builder /tmp/freeipmi-install/usr/lib/ /tmp/freeipmi-libs/
+RUN find /tmp/freeipmi-libs -maxdepth 1 -name '*.so.*' ! -type l \
+		-exec cp {} /usr/lib/x86_64-linux-gnu/ \; && \
+	rm -rf /tmp/freeipmi-libs && \
+	sed -i '/^Package: \(libfreeipmi17\|freeipmi-common\|libipmimonitoring6\)$/,/^$/{s/^Version: .*/Version: 1.6.20-0local1/;s/^Source: freeipmi.*/Source: freeipmi (1.6.20-0local1)/;}' /var/lib/dpkg/status && \
+	ldconfig
 
 RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
 
