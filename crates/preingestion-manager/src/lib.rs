@@ -3880,7 +3880,7 @@ impl PreingestionManagerStatic {
                 .update_firmware_multipart(
                     artifact.local_path.as_path(),
                     true,
-                    Duration::from_secs(120),
+                    self.config.multipart_upload_timeout,
                     redfish_component_type,
                 )
                 .await

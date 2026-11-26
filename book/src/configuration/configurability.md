@@ -1081,6 +1081,7 @@ overrides.
 | `hgx_bmc_gpu_reboot_delay` | `30s` | Delay after GPU reboot before HGX BMC is contacted again. |
 | `requires_manual_upgrade` | `false` | Force every firmware upgrade to require explicit administrator approval. |
 | `max_concurrent_bfb_copies` | `10` | Concurrent DPU BFB copies. |
+| `multipart_upload_timeout` | `60m` | Timeout for one Redfish multipart firmware upload. Accepts `1m` to `8h`; other values fail configuration loading. Changes require a Core restart. |
 
 Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
 site configuration, and `CARBIDE_API_` overrides before applying defaults.

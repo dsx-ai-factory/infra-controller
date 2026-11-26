@@ -4159,6 +4159,7 @@ impl CarbideConfig {
                 .to_std()
                 .unwrap_or(std::time::Duration::from_secs(30)),
             max_concurrent_bfb_copies: self.firmware_global.max_concurrent_bfb_copies,
+            multipart_upload_timeout: self.firmware_global.multipart_upload_timeout,
             autoupdate: self.firmware_global.autoupdate,
             no_reset_retries: self.firmware_global.no_reset_retries,
             firmware_download_cache_directory: self
@@ -6051,6 +6052,29 @@ path = "credentials.yaml"
             "outside the initial supported range" {
                 "max_site_prefix_isolation_rules = 65" => Fails,
                 "max_site_prefix_isolation_rules = -1" => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn multipart_upload_timeout_defaults_and_rejects_out_of_range() {
+        scenarios!(
+            run = |patch| Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .merge(Toml::string(patch))
+                .extract::<CarbideConfig>()
+                .map(|config| config.preingestion_manager().multipart_upload_timeout)
+                .map_err(Box::new);
+            "accepted" {
+                "" => Yields(std::time::Duration::from_mins(60)),
+                "[firmware_global]\nmultipart_upload_timeout = \"1m\"" =>
+                    Yields(std::time::Duration::from_mins(1)),
+                "[firmware_global]\nmultipart_upload_timeout = \"8h\"" =>
+                    Yields(std::time::Duration::from_hours(8)),
+            }
+            "outside the supported range" {
+                "[firmware_global]\nmultipart_upload_timeout = \"59s\"" => Fails,
+                "[firmware_global]\nmultipart_upload_timeout = \"28801s\"" => Fails,
             }
         );
     }

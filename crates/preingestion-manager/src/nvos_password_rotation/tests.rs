@@ -28,6 +28,7 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
             concurrency_limit: 2,
             hgx_bmc_gpu_reboot_delay: Duration::ZERO,
             max_concurrent_bfb_copies: 1,
+            multipart_upload_timeout: Duration::from_secs(60),
             autoupdate: false,
             no_reset_retries: false,
             firmware_download_cache_directory: Default::default(),

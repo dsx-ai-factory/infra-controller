@@ -529,6 +529,7 @@ pre-ingestion manager:
 | `firmware_global.hgx_bmc_gpu_reboot_delay` | `30s` | Delay after a GPU reboot before NICo accesses the HGX BMC again. |
 | `firmware_global.requires_manual_upgrade` | `false` | Adds a manually confirmed upgrade gate for MNNVL-capable hosts. |
 | `firmware_global.max_concurrent_bfb_copies` | `10` | Maximum concurrent BFB copies performed by the pre-ingestion manager. |
+| `firmware_global.multipart_upload_timeout` | `60m` | Timeout for one Redfish multipart firmware upload. Accepts `1m` to `8h`; other values fail configuration loading. Changes require a Core restart. |
 
 A pass attempts all endpoints selected at its start; the concurrency limit does
 not cap that selected set. Endpoint tasks can defer work or fail, and submitted
