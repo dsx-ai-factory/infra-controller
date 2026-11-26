@@ -51,11 +51,12 @@ use crate::sink::MetricSemantics;
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Finite histogram boundaries in seconds, covering operations up to one hour.
+/// Finite histogram boundaries in seconds, from one microsecond to one hour.
 pub fn operation_duration_buckets_seconds() -> Vec<f64> {
     vec![
-        1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0, 450.0,
-        600.0, 900.0, 1_200.0, 1_800.0, 3_600.0,
+        0.000_001, 0.000_005, 0.000_01, 0.000_05, 0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.05, 0.1,
+        0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0,
+        300.0, 450.0, 600.0, 900.0, 1_200.0, 1_800.0, 3_600.0,
     ]
 }
 
@@ -1319,6 +1320,49 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
+
+    #[test]
+    fn component_duration_histogram_resolves_fast_and_slow_operations() {
+        check_values(
+            [
+                Check {
+                    scenario: "microsecond processor operation",
+                    input: std::time::Duration::from_micros(1),
+                    expect: Some(0.000_001),
+                },
+                Check {
+                    scenario: "subsecond slowdown",
+                    input: std::time::Duration::from_millis(100),
+                    expect: Some(0.1),
+                },
+                Check {
+                    scenario: "long operation retains existing boundary",
+                    input: std::time::Duration::from_secs(120),
+                    expect: Some(120.0),
+                },
+            ],
+            |duration| {
+                let registry = Registry::new();
+                let metrics = ComponentMetrics::new(&registry, "test").unwrap();
+                metrics.record_operation(ComponentKind::Processor, "processor", duration, true);
+
+                let families = registry.gather();
+                let histogram = families
+                    .iter()
+                    .find(|family| family.name() == "test_component_duration_seconds")
+                    .unwrap()
+                    .get_metric()[0]
+                    .get_histogram();
+                assert_eq!(histogram.sample_count(), 1);
+                assert_eq!(histogram.sample_sum(), duration.as_secs_f64());
+                histogram
+                    .get_bucket()
+                    .iter()
+                    .find(|bucket| bucket.cumulative_count() == 1)
+                    .map(|bucket| bucket.upper_bound())
+            },
+        );
+    }
 
     #[test]
     fn operation_duration_histogram_resolves_slow_collections() {
