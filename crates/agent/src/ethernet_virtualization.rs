@@ -2307,7 +2307,7 @@ fn parse_fdb(fdb_json: &str) -> eyre::Result<HashMap<u32, Vec<Fdb>>> {
         let Some(vlan) = fdb.vlan else {
             continue;
         };
-        if fdb.state == "permanent" {
+        if fdb.is_permanent() {
             continue;
         }
         out.entry(vlan)
@@ -7843,7 +7843,7 @@ esac
             panic!("Expected MAC not found in vlan 21's parsed fdb");
         }
         // "permanent" were filtered out already
-        assert!(!twenty_one.iter().any(|f| f.state == "permanent"));
+        assert!(!twenty_one.iter().any(|f| f.is_permanent()));
         Ok(())
     }
 
