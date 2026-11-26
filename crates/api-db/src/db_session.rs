@@ -61,7 +61,11 @@ impl DbSessionGuard {
             .execute(self.as_pgconn())
             .await
             .map_err(|error| DatabaseError::query(query, error))?;
-        let query = "SELECT set_config('statement_timeout', LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) FROM pg_settings WHERE name = 'statement_timeout'";
+        // `current_setting` includes units such as `5s`; parse the interval to
+        // recover milliseconds without scanning `pg_settings` for the cap.
+        let query = "SELECT set_config('statement_timeout', \
+            LEAST(NULLIF((EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) \
+                * 1000)::bigint, 0), $1::text::bigint)::text, true)";
         sqlx::query(query)
             .bind(timeout_ms.to_string())
             .execute(self.as_pgconn())
@@ -123,14 +127,14 @@ impl DbSessionGuard {
         let mut txn = Transaction::begin_inner(connection).await?;
         crate::set_read_only_snapshot(txn.as_pgconn()).await?;
 
-        // `pg_settings` reports milliseconds. `NULLIF` turns a disabled (zero)
-        // timeout into NULL, which `LEAST` ignores when applying our cap. A
-        // shorter limit remains unchanged. The `true` argument makes this
-        // transaction-local, so the setting resets when the txn ends.
+        // `current_setting` includes units such as `5s`; parse the interval to
+        // recover milliseconds without scanning `pg_settings` for the cap.
+        // `NULLIF` lets our cap replace a disabled timeout; `LEAST` preserves a
+        // shorter limit. The `true` argument limits the change to this transaction.
         sqlx::query(
             "SELECT set_config('statement_timeout', \
-                LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-             FROM pg_settings WHERE name = 'statement_timeout'",
+                LEAST(NULLIF((EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) \
+                    * 1000)::bigint, 0), $1::text::bigint)::text, true)",
         )
         .bind(timeout_ms.to_string())
         .execute(txn.as_pgconn())
@@ -184,8 +188,10 @@ mod tests {
             (0, Duration::from_millis(5000), 5000_i64),
             // A broader site limit must not extend snapshot SQL work.
             (60000, Duration::from_millis(5000), 5000),
-            // Preserve an operator's stricter limit.
-            (1000, Duration::from_millis(5000), 1000),
+            // Include minutes and seconds, not just the interval's seconds field.
+            (61000, Duration::from_millis(5000), 5000),
+            // Preserve an operator's stricter limit without rounding seconds.
+            (1500, Duration::from_millis(5000), 1500),
             // A custom fractional cap must be truncated, not hard-coded or rounded up.
             (0, Duration::from_micros(2_500_999), 2500),
         ] {
@@ -253,10 +259,12 @@ mod tests {
         for (configured_ms, cap, expected_ms) in [
             // A disabled limit uses the requested cap, truncated to whole ms.
             (0, Duration::from_micros(2_500_999), 2500_i64),
-            // A broader operator limit cannot extend this read.
-            (60000, Duration::from_secs(5), 5000),
+            // The largest operator value must parse and still yield our cap.
+            (i32::MAX as i64, Duration::from_secs(5), 5000),
+            // Include minutes and seconds, not just the interval's seconds field.
+            (61000, Duration::from_secs(5), 5000),
             // A tighter operator limit remains authoritative for SQL statements.
-            (1000, Duration::from_secs(5), 1000),
+            (1500, Duration::from_secs(5), 1500),
         ] {
             let mut session = DbSessionGuard::acquire(&pool).await?;
             sqlx::query("SELECT set_config('statement_timeout', $1, false)")

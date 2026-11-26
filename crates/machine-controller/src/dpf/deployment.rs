@@ -72,9 +72,11 @@ impl DeploymentReadConnection {
         let mut txn = db::Transaction::begin_inner(connection).await?;
         // Zero disables the operator timeout; otherwise preserve a shorter
         // value. Transaction scope restores the setting for the next borrower.
+        // `current_setting` includes units such as `5s`; parse the interval to
+        // recover milliseconds without scanning `pg_settings` for the cap.
         let query = "SELECT set_config('statement_timeout', \
-            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-            FROM pg_settings WHERE name = 'statement_timeout'";
+            LEAST(NULLIF((EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) \
+                * 1000)::bigint, 0), $1::text::bigint)::text, true)";
         sqlx::query(query)
             .bind(statement_timeout.as_millis().to_string())
             .execute(txn.as_pgconn())

@@ -21,10 +21,12 @@ pub async fn database_transaction(
     // A dropped SQLx query can retain its pooled connection and any work-lock
     // fence until PostgreSQL finishes the statement and runs the queued rollback.
     // Bound statements to five seconds, preserving any shorter operator limit.
+    // `current_setting` includes units such as `5s`; parse the interval to
+    // recover milliseconds without scanning `pg_settings` for the cap.
     sqlx::query(
         "SELECT set_config('statement_timeout', \
-            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-         FROM pg_settings WHERE name = 'statement_timeout'",
+            LEAST(NULLIF((EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) \
+                * 1000)::bigint, 0), $1::text::bigint)::text, true)",
     )
     .bind(DATABASE_WAIT_TIMEOUT.as_millis().to_string())
     .execute(txn.as_pgconn())
