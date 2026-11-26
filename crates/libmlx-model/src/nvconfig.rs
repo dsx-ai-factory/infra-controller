@@ -96,6 +96,42 @@ impl DpuNvConfigProfile {
     }
 }
 
+/// Persistent mlxconfig / nvconfig assignments mirroring NVIDIA NIC Configuration
+/// Operator `roceOptimized` firmware settings (not runtime PFC/trust/ToS).
+///
+/// Values match
+/// <https://docs.nvidia.com/networking/display/kubernetes2670/nic-conf-operator/configuration-details.html>:
+/// `ROCE_CC_PRIO_MASK_P*=255`, `CNP_DSCP_P*=4`, `CNP_802P_PRIO_P*=6`.
+pub const ROCE_OPTIMIZED_FIRMWARE_PARAMETERS: [&str; 6] = [
+    "ROCE_CC_PRIO_MASK_P1=255",
+    "ROCE_CC_PRIO_MASK_P2=255",
+    "CNP_DSCP_P1=4",
+    "CNP_DSCP_P2=4",
+    "CNP_802P_PRIO_P1=6",
+    "CNP_802P_PRIO_P2=6",
+];
+
+/// Appends RoCE optimized firmware nvconfig parameters that are not already present.
+///
+/// Existing `NAME=...` entries win; only missing names are added. This keeps
+/// platform profiles and site overrides authoritative when they already set a
+/// RoCE-related key.
+pub fn append_roce_optimized_firmware_parameters(parameters: &mut Vec<String>) {
+    let configured_names = parameters
+        .iter()
+        .filter_map(|parameter| parameter.split_once('=').map(|(name, _)| name.to_string()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for parameter in ROCE_OPTIMIZED_FIRMWARE_PARAMETERS {
+        let name = parameter
+            .split_once('=')
+            .map_or(parameter, |(name, _)| name);
+        if !configured_names.contains(name) {
+            parameters.push(parameter.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
@@ -162,6 +198,41 @@ mod tests {
                 "PCI_SWITCH0_UPSTREAM_PORT_BUS=0",
                 "PCI_SWITCH0_UPSTREAM_PORT_PEX=0",
             ],
+        );
+    }
+
+    #[test]
+    fn roce_optimized_firmware_parameters_match_nic_configuration_operator() {
+        assert_eq!(
+            ROCE_OPTIMIZED_FIRMWARE_PARAMETERS,
+            [
+                "ROCE_CC_PRIO_MASK_P1=255",
+                "ROCE_CC_PRIO_MASK_P2=255",
+                "CNP_DSCP_P1=4",
+                "CNP_DSCP_P2=4",
+                "CNP_802P_PRIO_P1=6",
+                "CNP_802P_PRIO_P2=6",
+            ]
+        );
+    }
+
+    #[test]
+    fn append_roce_optimized_firmware_skips_existing_names() {
+        let mut parameters = vec![
+            "LINK_TYPE_P1=ETH".to_string(),
+            "CNP_DSCP_P1=48".to_string(),
+        ];
+        append_roce_optimized_firmware_parameters(&mut parameters);
+        assert!(parameters.contains(&"ROCE_CC_PRIO_MASK_P1=255".to_string()));
+        assert!(parameters.contains(&"CNP_DSCP_P2=4".to_string()));
+        assert!(parameters.contains(&"CNP_DSCP_P1=48".to_string()));
+        assert!(!parameters.contains(&"CNP_DSCP_P1=4".to_string()));
+        assert_eq!(
+            parameters
+                .iter()
+                .filter(|parameter| parameter.starts_with("CNP_DSCP_P1="))
+                .count(),
+            1
         );
     }
 }

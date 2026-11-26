@@ -723,6 +723,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
         config.deployment_type,
         config.num_of_vfs,
         resolved.pf_total_sf,
+        config.roce_optimized_firmware,
         config.intercept_bridging.as_ref(),
         config
             .intercept_bridging

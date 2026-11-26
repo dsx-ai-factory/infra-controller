@@ -4691,6 +4691,15 @@ pub struct DpuConfig {
     #[serde(default)]
     pub num_of_vfs: u32,
 
+    /// When true, DPU provisioning nvconfig includes persistent RoCE firmware
+    /// parameters matching NIC Configuration Operator `roceOptimized`
+    /// (`ROCE_CC_PRIO_MASK_P*`, `CNP_DSCP_P*`, `CNP_802P_PRIO_P*`).
+    /// BF3 GB200 skips these parameters because that platform profile already
+    /// fills the DPF 32-parameter NVConfig limit. Runtime PFC/trust/ToS are
+    /// not applied here. Default is false.
+    #[serde(default)]
+    pub roce_optimized_firmware: bool,
+
     /// Number of complete fixed service-VPC slots per DPU (default zero).
     /// Each slot reserves an HBN SF, a DHCP SF and an isolated bridge with its HBN patch/chain.
     #[serde(default)]
@@ -4758,6 +4767,8 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             num_of_vfs: Option<u32>,
             #[serde(default)]
+            roce_optimized_firmware: Option<bool>,
+            #[serde(default)]
             service_vpc_slot_count: Option<u32>,
             #[serde(default)]
             max_active_service_vpc_interfaces_per_dpu: Option<u32>,
@@ -4796,6 +4807,9 @@ impl<'de> Deserialize<'de> for DpuConfig {
                 .dpu_enable_secure_boot
                 .unwrap_or(default.dpu_enable_secure_boot),
             num_of_vfs,
+            roce_optimized_firmware: partial
+                .roce_optimized_firmware
+                .unwrap_or(default.roce_optimized_firmware),
             service_vpc_slot_count: partial
                 .service_vpc_slot_count
                 .unwrap_or(default.service_vpc_slot_count),
@@ -4938,6 +4952,7 @@ impl Default for DpuConfig {
             ],
             dpu_enable_secure_boot: false,
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
+            roce_optimized_firmware: false,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
             allow_service_vpc_tenant_overlap: false,
@@ -8952,6 +8967,7 @@ underlay_ip_software_plane_id_bit_len = 7
 bootstrap_ca_source = "embedded"
 dpu_enable_secure_boot = true
 num_of_vfs = 64
+roce_optimized_firmware = true
 service_vpc_slot_count = 5
 max_active_service_vpc_interfaces_per_dpu = 5
 allow_service_vpc_tenant_overlap = true
@@ -8971,6 +8987,7 @@ additional_managed_sf = 2
         );
         assert!(config.dpu_config.dpu_enable_secure_boot);
         assert_eq!(config.dpu_config.num_of_vfs, 64);
+        assert!(config.dpu_config.roce_optimized_firmware);
         assert_eq!(config.dpu_config.service_vpc_slot_count, 5);
         assert_eq!(
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,

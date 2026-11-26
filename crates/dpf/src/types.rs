@@ -144,6 +144,11 @@ pub struct InitDpfResourcesConfig {
     /// BF4 Astra always emits `NUM_OF_VFS=46`; this value does not shrink its topology-free static
     /// inventory, but it still bounds VF identities in the shared intercept-bridging topology.
     pub(crate) num_of_vfs: u32,
+    /// When true, append persistent RoCE firmware nvconfig parameters
+    /// (`ROCE_CC_PRIO_MASK_P*`, `CNP_DSCP_P*`, `CNP_802P_PRIO_P*`) to the
+    /// DPUFlavor. Runtime PFC/trust/ToS are not configured here.
+    #[builder(default)]
+    pub(crate) roce_optimized_firmware: bool,
     /// SF capacity reserve for regular BF3 and generic BF4.
     ///
     /// With intercept bridging, it is added to NICo-managed service endpoints and
@@ -242,6 +247,7 @@ impl Default for InitDpfResourcesConfig {
             flavor_name: crate::flavor::DEFAULT_FLAVOR_NAME.to_string(),
             services: Vec::new(),
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
+            roce_optimized_firmware: false,
             pf_total_sf_reserved: DEFAULT_PF_TOTAL_SF_RESERVED,
             additional_managed_sf: 0,
             service_vpc_slots: crate::ServiceVpcSlots::default(),
