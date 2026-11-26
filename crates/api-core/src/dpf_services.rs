@@ -496,6 +496,7 @@ pub(crate) fn doca_hbn_service(
     // An operator Helm overlay may customize other chart values but must not split that contract.
     set_hbn_sf_count(&mut helm_values, interfaces.len());
     ServiceDefinition {
+        critical: true,
         helm_values: Some(helm_values),
 
         config_values: Some(serde_json::json!({
@@ -604,6 +605,7 @@ pub(crate) fn dpu_agent_service(
     bootstrap_ca: &DpfDpuAgentBootstrapCa,
 ) -> ServiceDefinition {
     ServiceDefinition {
+        critical: true,
         helm_values: Some(dpu_agent_helm_values(cfg, bootstrap_ca)),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
@@ -2090,6 +2092,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn service_readiness_labels() {
+        let interfaces = build_dpu_interfaces_vec();
+        let bootstrap_ca = DpfDpuAgentBootstrapCa::default();
+        value_scenarios!(
+            run = |service: ServiceDefinition| {
+                let configuration = build_service_configuration(&service, TEST_NS, "", &BTreeMap::new());
+                let configuration = serde_json::to_value(configuration).expect("serialize service configuration");
+                configuration.pointer("/spec/serviceConfiguration/metadata/labels").cloned()
+            };
+            "boot-critical services carry the DPUService label" {
+                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(serde_json::json!({"svc.dpu.nvidia.com/critical": ""})),
+                doca_hbn_service(
+                    &default_doca_hbn_service(),
+                    &interfaces,
+                    ServiceVpcSlots::default(),
+                ) => Some(serde_json::json!({"svc.dpu.nvidia.com/critical": ""})),
+            }
+            "other services retain their default criticality" {
+                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => None,
+                fmds_service(&default_fmds_service(), &interfaces, false) => None,
+            }
+        );
     }
 
     #[test]
