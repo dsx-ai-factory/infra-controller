@@ -777,19 +777,14 @@ async fn load_ingestion_firmware_inventory(
     services: &crate::context::RackStateHandlerServices,
 ) -> Result<RackFirmwareInventory, StateHandlerError> {
     let mut reader = PgPoolReader::from(services.db_pool.clone());
-    let machine_ids = load_scoped_machines(&mut reader, &rack.id, &MaintenanceScope::default())
+    let mut machine_ids = load_scoped_machines(&mut reader, &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
         .filter(|machine| ready_for_ingestion_firmware(machine))
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
     let off = desired_off_machine_ids(&services.db_pool, &machine_ids).await?;
-    if !off.is_empty() {
-        return Err(StateHandlerError::GenericError(eyre::eyre!(
-            "ingestion firmware cannot target machines whose desired power state is off: {}",
-            format_machine_ids(&off),
-        )));
-    }
+    machine_ids.retain(|id| !off.contains(id));
     let switch_ids = load_scoped_switches(&mut reader, &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
@@ -847,14 +842,16 @@ where
 /// Adds ready compute hosts that arrived after the ingestion firmware snapshot.
 /// Existing child handles remain in the job so subsequent iterations and restarts
 /// poll them without resubmitting devices. Explicit maintenance keeps its scope.
+/// Returns whether hosts still await admission, and the ready hosts excluded
+/// because their desired power state is Off.
 async fn reconcile_ingestion_firmware_machines(
     state: &Rack,
     rack_profile_id: Option<&RackProfileId>,
     job: &mut FirmwareUpgradeJob,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
+) -> Result<(bool, Vec<HostMachineId>), StateHandlerError> {
     if !state.config.ingestion_in_progress || state.config.maintenance_requested.is_some() {
-        return Ok(false);
+        return Ok((false, Vec::new()));
     }
     let mut reader = PgPoolReader::from(ctx.services.db_pool.clone());
     let submitted = submitted_firmware_machine_ids(&mut reader, job).await?;
@@ -867,20 +864,18 @@ async fn reconcile_ingestion_firmware_machines(
                 && !matches!(machine.state.value, ManagedHostState::Assigned { .. })
         })
         .collect::<Vec<_>>();
-    let ready_ids = missing
+    let mut ready_ids = missing
         .iter()
         .filter(|machine| ready_for_ingestion_firmware(machine))
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
     if ready_ids.is_empty() {
-        return Ok(!missing.is_empty());
+        return Ok((!missing.is_empty(), Vec::new()));
     }
     let desired_off = desired_off_machine_ids(&ctx.services.db_pool, &ready_ids).await?;
-    if !desired_off.is_empty() {
-        return Err(StateHandlerError::GenericError(eyre::eyre!(
-            "ingestion firmware cannot target newly discovered machines whose desired power state is off: {}",
-            format_machine_ids(&desired_off),
-        )));
+    ready_ids.retain(|id| !desired_off.contains(id));
+    if ready_ids.is_empty() {
+        return Ok((true, desired_off));
     }
 
     let config_json = configured_profile_firmware_object_json(&state.id, rack_profile_id, ctx)
@@ -964,7 +959,7 @@ async fn reconcile_ingestion_firmware_machines(
     txn.commit()
         .await
         .map_err(StateHandlerError::from_transaction)?;
-    Ok(true)
+    Ok((true, desired_off))
 }
 
 fn machine_firmware_outcome(machine: &HostMachine) -> DeviceFirmwareOutcome {
@@ -3320,19 +3315,31 @@ async fn handle_maintenance_inner(
                     }
                 }
 
+                let mut desired_off_excluded = Vec::new();
                 if state.config.ingestion_in_progress
                     && state.config.maintenance_requested.is_none()
                 {
                     // Existing device controllers consume these results independently
                     // of supplemental admission. Commit before any fallible dispatch
                     // so a late host cannot roll back their firmware completion.
+                    // The aggregate stays open until device evaluation below
+                    // confirms that no host still awaits admission.
+                    if job.status == Some(FirmwareProgressState::Completed) {
+                        job.status = Some(FirmwareProgressState::InProgress);
+                        job.completed_at = None;
+                    }
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                     txn.commit()
                         .await
                         .map_err(StateHandlerError::from_transaction)?;
                     state.firmware_upgrade_job = Some(job.clone());
-                    reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
-                        .await?;
+                    (_, desired_off_excluded) = reconcile_ingestion_firmware_machines(
+                        state,
+                        rack_profile_id,
+                        &mut job,
+                        ctx,
+                    )
+                    .await?;
                     txn = ctx
                         .services
                         .db_pool
@@ -3363,13 +3370,22 @@ async fn handle_maintenance_inner(
                     } => {
                         db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                         state.firmware_upgrade_job = Some(job);
+                        let excluded = if desired_off_excluded.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "; excluded because desired power state is Off: [{}]",
+                                format_machine_ids(&desired_off_excluded)
+                            )
+                        };
                         Ok(StateHandlerOutcome::wait(format!(
-                            "firmware upgrade: waiting for machine/switch/power-shelf controllers (completed={}, failed={}, pending={}/{}; pending devices: [{}])",
+                            "firmware upgrade: waiting for machine/switch/power-shelf controllers (completed={}, failed={}, pending={}/{}; pending devices: [{}]{})",
                             completed,
                             failed,
                             pending,
                             total,
-                            pending_device_ids.join(", ")
+                            pending_device_ids.join(", "),
+                            excluded
                         ))
                         .with_txn(txn))
                     }
@@ -4124,7 +4140,7 @@ async fn handle_maintenance_inner(
                 // and must retain its continuation if the controller stops before
                 // committing the transition below.
                 job.return_to_completed = true;
-                let needs_firmware_wait =
+                let (needs_firmware_wait, _) =
                     reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
                         .await?;
                 let pending = job
@@ -4132,6 +4148,10 @@ async fn handle_maintenance_inner(
                     .as_ref()
                     .is_some_and(|status| !status.is_terminal());
                 if needs_firmware_wait || pending {
+                    if job.status == Some(FirmwareProgressState::Completed) {
+                        job.status = Some(FirmwareProgressState::InProgress);
+                        job.completed_at = None;
+                    }
                     // Also persist the marker when late hosts are not ready and
                     // reconciliation has not submitted a batch yet.
                     let mut txn = ctx
