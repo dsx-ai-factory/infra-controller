@@ -82,7 +82,8 @@ first report and makes the page and form available.
 
 Before starting, obtain the NVLink domain UUID and access to your site's Admin
 web UI over HTTPS. Configure the Admin CLI for the same site. The commands below
-also require `curl` and `jq`. Use the `curl` authentication option that matches
+also require `jq` and curl 7.76.0 or later for `--fail-with-body`.
+Use the curl authentication option that matches
 your deployment's [Admin web UI authentication mode](debug_webui.md#authentication).
 The example ignores curl's default configuration. Add any required TLS options
 explicitly.
@@ -103,16 +104,19 @@ explicitly.
 Choose the apply mode before submitting. Mode values are case-sensitive:
 
 | Submission mode | Effect |
-|---|---|
+| :-------------- | :----- |
 | `Merge` | Adds a source that contributes to the domain's aggregate health when no `Replace` report is active. |
-| `Replace` | Makes this report the domain's aggregate health, masking all merge-mode reports. Only one replacement report is stored; another `Replace` submission replaces it, even with a different source. |
+| `Replace` | Makes this report the domain's aggregate health, masking all merge-mode reports. A new `Replace` overwrites the previous replacement, even with a different source. |
 
 A `Replace` report with no alerts makes the aggregate report contain no alerts,
 even if other sources report failures. Removing the replacement allows the
-stored merge-mode reports to contribute again. Use `Merge` when adding health
-information alongside other sources. Resubmitting the same source overwrites its
-previous report even if you change modes. Use a separate source for a temporary
-replacement if you want the existing report to contribute again later.
+stored merge-mode reports to contribute again. To preserve an existing `Merge`
+report during a temporary replacement, submit the replacement under a different
+source. Reusing a source overwrites its report in either mode.
+
+Before overwriting a report you may need to restore, open **JSON** under
+**Active Health Reports** on the domain health page and save the entry,
+including its mode. To restore an overwritten report, resubmit the saved entry.
 
 1. Set the Admin web UI origin, domain UUID, and your report source. Replace the
    example values with your site's values. Include the scheme and any port in
@@ -124,9 +128,11 @@ replacement if you want the existing report to contribute again later.
    report_source='overrides.sre-team'
    ```
 
-   When available, copy the UUID from the **Domain** column in the target
-   machine's **NVLink GPUs** table. The submission route checks the UUID format
-   and accepts reports for domains missing from inventory.
+   Check the **Domain** column in the target machine's **NVLink GPUs** table.
+   If it shows `00000000-0000-0000-0000-000000000000` or no UUID is available,
+   stop and obtain the assigned domain UUID before submitting. The POST accepts
+   any well-formed UUID, and the CLI can read back a report stored under the
+   wrong UUID.
 
 1. Save a template and prepare your report. This example removes the template's
    sample probes and uses the server's submission time for `observed_at`:
@@ -139,10 +145,18 @@ replacement if you want the existing report to contribute again later.
      nvlink-health-template.json > nvlink-health-report.json
    ```
 
-   Edit `nvlink-health-report.json` to add your actual successful probes and
-   alerts. Use the [health report format](#report-format) for their fields.
-   Keep `source` set to your reporting system or operator identity. Empty
-   `successes` and `alerts` arrays submit a report with no probe results.
+   Edit `nvlink-health-report.json` to add your actual probe results. Each alert
+   in the `alerts` array needs a nonempty `id`, a `message`, and a
+   `classifications` array. For example, a link failure with no classifications
+   has this form.
+
+   ```json
+   {"id": "LinkDown", "message": "Link is down", "classifications": []}
+   ```
+
+   Use the [health report format](#report-format) for the remaining fields.
+   Keep `source` set to your reporting system or operator identity. Keep both
+   `successes` and `alerts` empty to report no probe results.
    The server sets `triggered_by` from the authenticated web user when available.
 
 1. Wrap the report with the selected mode. The Admin HTTP endpoint requires
@@ -168,8 +182,9 @@ replacement if you want the existing report to contribute again later.
    ```
 
    A successful submission returns HTTP 200 with an empty response body.
-   An invalid domain UUID or an unsupported mode, such as `merge`, returns
-   HTTP 400. Missing report fields or malformed JSON fail request validation.
+   Malformed JSON, an invalid domain UUID, or an unsupported mode such as
+   `merge` returns HTTP 400. Valid JSON missing a required field, such as
+   `classifications` on an alert, returns HTTP 422.
    With Basic authentication, missing or invalid credentials return HTTP 401.
    With OAuth2, a missing or expired session redirects you to sign in.
    In automation, continue only if `curl` exits successfully and reports HTTP
@@ -184,7 +199,7 @@ replacement if you want the existing report to contribute again later.
    Open `/admin/nvlink-domain/<DOMAIN_ID>/health` on the same Admin web UI
    endpoint to inspect the report and its aggregate health. You can then use
    **Submit Health Report** for later submissions with the same JSON wrapper.
-   To undo an operator report, [remove its source](#remove-a-report-source).
+   To withdraw the submitted report, [remove its source](#remove-a-report-source).
 
 ## CLI commands
 

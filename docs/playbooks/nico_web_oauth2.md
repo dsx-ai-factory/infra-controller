@@ -13,9 +13,10 @@ as a web redirect URI for the site's Microsoft Entra application.
 Use the OAuth2 client credentials flow to obtain an Admin web UI session for
 automation. The session expires after 10 minutes.
 
-Use a client secret issued for the same Microsoft Entra application configured
-on the site. Have your secret manager provide it in a header file readable only
-by the account running `curl`. The file must contain one line in the form
+Create a dedicated client secret for this team or automation on the site's
+configured Microsoft Entra application. Have your secret manager provide it in
+a header file readable only by the account running `curl`. The file must contain
+one line in the form
 `client_secret: <CLIENT_SECRET>`. Set `client_secret_header_file` to the path to
 this file and `admin_url` to your Admin web UI origin over HTTPS, without a
 trailing slash or `/admin` path.
@@ -23,8 +24,8 @@ trailing slash or `/admin` path.
 In your script, create a private directory for the session cookie. Read the
 header from the file and save the cookie returned by the callback without
 following the redirect. Reuse the cookie file for requests to the same origin.
-The commands ignore curl's default configuration. Add any required TLS options
-explicitly.
+The commands require curl 7.76.0 or later for `--fail-with-body` and ignore
+curl's default configuration. Add any required TLS options explicitly.
 
 ```sh
 umask 077

@@ -1,5 +1,4 @@
 ---
-title: "NICo Debug WebUI"
 description: "Overview of the NICo administrative web interface, authentication modes, and available views."
 ---
 
@@ -63,7 +62,7 @@ provider settings through `nico-api.extraEnv`:
 
 Sessions issued via the standard PKCE flow are persistent for the browser session. A client credentials flow is also supported for automated access (for example, CI pipelines); sessions granted via this flow expire after 10 minutes.
 
-For step-by-step Entra registration and secret management instructions, see [Azure OIDC for Infra Controller Web UI](../playbooks/nico_web_oauth2.md).
+[Configure the redirect URI and obtain an automation session](../playbooks/nico_web_oauth2.md).
 
 ## Available Views
 
