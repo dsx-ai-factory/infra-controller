@@ -115,6 +115,7 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 | [`dpu`](./redfish-dpu.md) | DPU specific operations |
 | [`get-manager`](./redfish-get-manager.md) | Get information about the managers |
 | [`update-firmware-multipart`](./redfish-update-firmware-multipart.md) | Update host firmware |
+| [`simple-update`](./redfish-simple-update.md) | Submit a SimpleUpdate installation and return its task ID without waiting |
 | [`get-task`](./redfish-get-task.md) | Get detailed info on a Redfish task |
 | [`get-tasks`](./redfish-get-tasks.md) | Get a list of Redfish tasks |
 | [`clear-uefi-password`](./redfish-clear-uefi-password.md) | Clear UEFI password |
