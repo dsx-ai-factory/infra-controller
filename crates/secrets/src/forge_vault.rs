@@ -1908,6 +1908,64 @@ mod tests {
     };
     use crate::credentials::CredentialPrefix;
 
+    #[tokio::test]
+    #[ignore = "requires the disposable dependency network qualification services"]
+    async fn credentials_round_trip_through_external_vault() -> eyre::Result<()> {
+        use crate::credentials::{
+            BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
+        };
+
+        let config = VaultConfig {
+            address: Some(std::env::var("NICO_TEST_VAULT_URL")?),
+            token: Some(std::env::var("NICO_TEST_VAULT_TOKEN")?),
+            vault_cacert: Some(std::env::var("NICO_TEST_VAULT_CA")?),
+            kv_mount_location: Some(std::env::var("NICO_TEST_VAULT_MOUNT")?),
+            pki_mount_location: Some("unused".to_string()),
+            pki_role_name: Some("unused".to_string()),
+            ..Default::default()
+        };
+        let mut join_set = JoinSet::new();
+        let cancel_token = CancellationToken::new();
+        let client = super::create_vault_client(
+            &config,
+            Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+            Some((&mut join_set, cancel_token.clone())),
+        )?;
+        let key = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot {
+                bmc_mac_address: mac_address::MacAddress::new([0x02, 0, 0, 0, 0x54, 0x03]),
+            },
+        };
+        let expected = Credentials::UsernamePassword {
+            username: "dependency-qualification".to_string(),
+            password: "disposable-test-value".to_string(),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            eyre::ensure!(
+                client.get_credentials(&key).await?.is_none(),
+                "vault credential must be absent before creation"
+            );
+            client.set_credentials(&key, &expected).await?;
+            let actual = client.get_credentials(&key).await;
+            client.delete_credentials(&key).await?;
+            eyre::ensure!(actual? == Some(expected), "vault credential did not match");
+            eyre::ensure!(
+                client.get_credentials(&key).await?.is_none(),
+                "vault credential must be absent after deletion"
+            );
+            Ok::<_, eyre::Report>(())
+        })
+        .await;
+        cancel_token.cancel();
+        while let Some(task) = join_set.join_next().await {
+            task?;
+        }
+        result??;
+        Ok(())
+    }
+
     #[test]
     fn excluded_vault_prefix_covers_the_directory_and_its_credentials() {
         for (path, expected) in [
