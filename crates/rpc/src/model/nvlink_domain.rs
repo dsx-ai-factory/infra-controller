@@ -7,7 +7,9 @@
 
 use std::collections::HashSet;
 
-use model::nvlink_domain::{NvLinkDomain, NvLinkDomainMember, NvLinkDomainMemberType};
+use model::nvlink_domain::{
+    NvLinkDomain, NvLinkDomainMember, NvLinkDomainMemberType, NvLinkDomainRecord,
+};
 use uuid::Uuid;
 
 use crate::errors::RpcDataConversionError;
@@ -68,6 +70,8 @@ impl TryFrom<forge::CreateNvLinkDomainRequest> for NvLinkDomain {
 impl From<NvLinkDomain> for forge::NvLinkDomain {
     fn from(domain: NvLinkDomain) -> Self {
         Self {
+            status: None,
+            deleted: None,
             id: Some(domain.id.into()),
             rack_group_id: Some(domain.rack_group_id),
             name: domain.name,
@@ -81,6 +85,25 @@ impl From<NvLinkDomain> for forge::NvLinkDomain {
                 })
                 .collect(),
         }
+    }
+}
+
+impl From<NvLinkDomainRecord> for forge::NvLinkDomain {
+    fn from(record: NvLinkDomainRecord) -> Self {
+        let mut domain = Self::from(record.domain);
+        domain.status = record
+            .controller_state
+            .zip(record.controller_state_version)
+            .map(|(state, version)| forge::NvLinkDomainStatus {
+                lifecycle: Some(forge::LifecycleStatus {
+                    state: serde_json::to_string(&state).unwrap_or_default(),
+                    version: version.version_string(),
+                    state_reason: record.controller_state_outcome.map(Into::into),
+                    sla: None,
+                }),
+            });
+        domain.deleted = record.deleted.map(Into::into);
+        domain
     }
 }
 

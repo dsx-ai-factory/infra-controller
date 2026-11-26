@@ -204,7 +204,8 @@ async fn render(
                 "Domain ID",
                 "Rack Group ID",
                 "Name",
-                "Member Positions"
+                "Member Positions",
+                "State"
             ]);
             for domain in domains.domains {
                 let mut member_positions = String::new();
@@ -221,6 +222,17 @@ async fn render(
                     }
                     write!(member_positions, ":{}", member.component_type)?;
                 }
+                let state = domain
+                    .status
+                    .and_then(|status| status.lifecycle)
+                    .map(|lifecycle| {
+                        serde_json::from_str::<model::nvlink_domain::NvLinkDomainState>(
+                            &lifecycle.state,
+                        )
+                        .map(|state| state.to_string())
+                        .unwrap_or(lifecycle.state)
+                    })
+                    .unwrap_or_default();
                 table.add_row(row![
                     domain.id.map(|id| id.value).unwrap_or_default(),
                     domain
@@ -229,6 +241,7 @@ async fn render(
                         .unwrap_or_default(),
                     domain.name.unwrap_or_default(),
                     member_positions,
+                    state,
                 ]);
             }
             if ctx.config.format == OutputFormat::Csv {

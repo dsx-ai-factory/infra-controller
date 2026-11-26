@@ -13343,6 +13343,15 @@ message NvLinkDomain {
   optional string name = 3;
   // Members sorted by rack index, slot index, and component type.
   repeated NvLinkDomainMember members = 4;
+  // Observed controller status. Absent for declarations without lifecycle state.
+  NvLinkDomainStatus status = 5;
+  // Time Core accepted deletion. Member positions remain claimed until removal.
+  google.protobuf.Timestamp deleted = 6;
+}
+
+message NvLinkDomainStatus {
+  // State JSON, state version and last controller outcome, as in RackStatus.
+  LifecycleStatus lifecycle = 1;
 }
 
 message NvLinkDomainMember {

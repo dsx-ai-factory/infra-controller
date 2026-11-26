@@ -35,7 +35,10 @@ struct ControllerRow {
 
 /// Create a controller-owned Domain and initial history in the caller's transaction.
 /// The caller must roll back the entire transaction on failure.
-pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseResult<()> {
+pub async fn create(
+    txn: &mut PgConnection,
+    domain: &NvLinkDomain,
+) -> DatabaseResult<ConfigVersion> {
     super::create(txn, domain).await?;
     let version = ConfigVersion::initial();
     let query = "UPDATE nvlink_domains SET controller_state=$2,
@@ -61,7 +64,7 @@ pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseRe
         version,
     )
     .await?;
-    Ok(())
+    Ok(version)
 }
 
 /// List adopted Domains, including deletion requests that still hold member positions.

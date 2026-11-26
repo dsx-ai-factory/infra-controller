@@ -7,7 +7,7 @@
 
 use carbide_uuid::rack::RackGroupId;
 use config_version::ConfigVersion;
-use model::nvlink_domain::NvLinkDomain;
+use model::nvlink_domain::{NvLinkDomain, NvLinkDomainRecord};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -90,8 +90,8 @@ pub async fn find_ids(
 pub async fn find_by_ids(
     txn: impl DbReader<'_>,
     ids: &[Uuid],
-) -> DatabaseResult<Vec<NvLinkDomain>> {
-    let query = "SELECT d.id, d.rack_group_id, d.name, COALESCE((SELECT jsonb_agg(jsonb_build_object('rack_index', m.rack_index, 'slot_index', m.slot_index, 'component_type', m.component_type) ORDER BY m.rack_index, m.slot_index, m.component_type) FROM nvlink_domain_members m WHERE m.domain_id=d.id), '[]'::jsonb) AS members FROM nvlink_domains d WHERE d.id = ANY($1) ORDER BY d.id";
+) -> DatabaseResult<Vec<NvLinkDomainRecord>> {
+    let query = "SELECT d.id, d.rack_group_id, d.name, d.controller_state, d.controller_state_version, d.controller_state_outcome, d.deleted, COALESCE((SELECT jsonb_agg(jsonb_build_object('rack_index', m.rack_index, 'slot_index', m.slot_index, 'component_type', m.component_type) ORDER BY m.rack_index, m.slot_index, m.component_type) FROM nvlink_domain_members m WHERE m.domain_id=d.id), '[]'::jsonb) AS members FROM nvlink_domains d WHERE d.id = ANY($1) ORDER BY d.id";
     sqlx::query_as(query)
         .bind(ids)
         .fetch_all(txn)

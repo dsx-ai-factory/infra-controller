@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use carbide_uuid::rack::RackGroupId;
 use chrono::{DateTime, Utc};
-use config_version::Versioned;
+use config_version::{ConfigVersion, Versioned};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -31,6 +31,24 @@ pub struct NvLinkDomain {
     /// Positions ordered by rack index, slot index, and component type.
     #[sqlx(json)]
     pub members: Vec<NvLinkDomainMember>,
+}
+
+/// Administrator declaration with its persisted controller observations.
+#[derive(Debug, FromRow)]
+pub struct NvLinkDomainRecord {
+    /// Declared identity and member positions.
+    #[sqlx(flatten)]
+    pub domain: NvLinkDomain,
+    /// Absent for declarations predating controller adoption.
+    #[sqlx(json(nullable))]
+    pub controller_state: Option<NvLinkDomainState>,
+    /// Version of the persisted lifecycle state.
+    pub controller_state_version: Option<ConfigVersion>,
+    /// Last controller iteration outcome.
+    #[sqlx(json(nullable))]
+    pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
+    /// Time deletion was requested.
+    pub deleted: Option<DateTime<Utc>>,
 }
 
 /// A tray position within the domain's rack group.
@@ -99,6 +117,22 @@ pub enum NvLinkDomainState {
     },
     /// Deletion was requested; member positions remain claimed during cleanup.
     Deleting,
+}
+
+impl fmt::Display for NvLinkDomainState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created => f.write_str("Created"),
+            Self::Discovering => f.write_str("Discovering"),
+            Self::Validating { validating_state } => write!(f, "Validating({validating_state})"),
+            Self::Maintenance { maintenance_state } => {
+                write!(f, "Maintenance({maintenance_state})")
+            }
+            Self::Ready => f.write_str("Ready"),
+            Self::Error { cause } => write!(f, "Error({cause})"),
+            Self::Deleting => f.write_str("Deleting"),
+        }
+    }
 }
 
 /// Persisted requests consumed by the Domain lifecycle controller.

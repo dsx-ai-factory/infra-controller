@@ -19,7 +19,7 @@ use carbide_uuid::nvlink::NvLinkDomainId;
 use db::nvlink_domain as domains;
 use health_report::HealthReportApplyMode;
 use model::health::HealthReportSources;
-use model::nvlink_domain::NvLinkDomain;
+use model::nvlink_domain::{NvLinkDomain, NvLinkDomainRecord, NvLinkDomainState};
 use rpc::forge;
 use rpc::forge::HealthReportEntry;
 use tonic::{Request, Response, Status};
@@ -49,11 +49,20 @@ pub(crate) async fn create(
         .try_into()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
-    domains::lifecycle::create(&mut txn, &domain)
+    let version = domains::lifecycle::create(&mut txn, &domain)
         .await
         .map_err(CarbideError::from)?;
     txn.commit().await?;
-    Ok(Response::new(domain.into()))
+    Ok(Response::new(
+        NvLinkDomainRecord {
+            domain,
+            controller_state: Some(NvLinkDomainState::Created),
+            controller_state_version: Some(version),
+            controller_state_outcome: None,
+            deleted: None,
+        }
+        .into(),
+    ))
 }
 
 pub(crate) async fn delete(
