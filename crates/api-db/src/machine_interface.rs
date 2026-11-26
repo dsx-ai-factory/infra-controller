@@ -411,7 +411,8 @@ pub async fn set_boot_interface_id(
     boot_interface_id: &str,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE machine_interfaces SET boot_interface_id=$1 WHERE mac_address=$2";
+    let query = "UPDATE machine_interfaces SET boot_interface_id=$1 \
+                 WHERE mac_address=$2 AND boot_interface_id IS DISTINCT FROM $1";
     sqlx::query(query)
         .bind(boot_interface_id)
         .bind(mac_address)

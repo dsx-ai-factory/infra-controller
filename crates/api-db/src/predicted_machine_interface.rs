@@ -73,8 +73,8 @@ pub async fn set_boot_interface_id(
     mac_address: MacAddress,
     boot_interface_id: &str,
 ) -> Result<(), DatabaseError> {
-    let query =
-        "UPDATE predicted_machine_interfaces SET boot_interface_id = $1 WHERE mac_address = $2";
+    let query = "UPDATE predicted_machine_interfaces SET boot_interface_id = $1 \
+                 WHERE mac_address = $2 AND boot_interface_id IS DISTINCT FROM $1";
     sqlx::query(query)
         .bind(boot_interface_id)
         .bind(mac_address)
@@ -308,6 +308,63 @@ mod test_bulk_host_interfaces {
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    /// Site Explorer refreshes the boot interface id of every pending
+    /// prediction on every pass, inside one transaction. An unchanged id must
+    /// not write or lock the row.
+    #[crate::sqlx_test]
+    async fn set_boot_interface_id_leaves_unchanged_prediction_unlocked(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const BOOT_INTERFACE_ID: &str = "NIC.Slot.1-1";
+
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x92; 32],
+            MachineType::Host,
+        );
+        let mac = MacAddress::new([2, 0, 0, 0, 0x92, 1]);
+
+        let mut setup_txn = pool.txn_begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(setup_txn.as_mut())
+            .await?;
+        let prediction = create(
+            NewPredictedMachineInterface {
+                machine_id: &machine_id,
+                mac_address: mac,
+                expected_network_segment_type:
+                    model::network_segment::NetworkSegmentType::HostInband,
+                boot_interface_id: Some(BOOT_INTERFACE_ID),
+                primary_interface: true,
+            },
+            setup_txn.as_mut(),
+        )
+        .await?;
+        setup_txn.commit().await?;
+
+        let mut explorer_txn = pool.txn_begin().await?;
+        // Same id as the stored prediction: the update must not lock it.
+        set_boot_interface_id(explorer_txn.as_mut(), mac, BOOT_INTERFACE_ID).await?;
+
+        let mut promotion_txn = pool.txn_begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(promotion_txn.as_mut())
+            .await?;
+        // DHCP promotion deletes the same prediction and must not wait.
+        delete(&prediction, promotion_txn.as_mut()).await?;
+        promotion_txn.commit().await?;
+
+        let mut connection = pool.acquire().await?;
+        assert!(
+            find_by_mac_address(&mut *connection, mac).await?.is_none(),
+            "the promotion must delete the prediction"
+        );
+
+        explorer_txn.rollback().await?;
         Ok(())
     }
 }
