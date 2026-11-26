@@ -34,6 +34,9 @@ global:
 ## Override the release namespace (defaults to helm install -n <namespace>)
 namespaceOverride: ""
 
+## Set to false when deploying into a pre-existing namespace (e.g. nico-rest in Kind).
+createNamespace: true
+
 replicas: 1
 serviceAccountName: flow
 automountServiceAccountToken: true

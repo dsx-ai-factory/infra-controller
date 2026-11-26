@@ -33,7 +33,7 @@ spec:
       containers:
         - name: {{ include "nico-bmc-proxy.name" . }}
           image: "{{ include "nico-bmc-proxy.image" . }}"
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default ((.Values.global.image).pullPolicy | default "IfNotPresent") }}
           command:
             {{- toYaml .Values.command | nindent 12 }}
           env:

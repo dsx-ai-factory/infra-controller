@@ -8,6 +8,10 @@ metadata:
 spec:
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
+  {{- with .Values.service.externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   ports:
     - port: {{ .Values.service.port }}
       name: http
