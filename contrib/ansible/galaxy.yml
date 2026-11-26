@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+namespace: nvidia
+name: infra_controller
+version: 0.0.0  # Set by CI at release time from the git tag
+readme: README.md
+authors:
+  - NVIDIA CORPORATION
+description: Ansible collection for NVIDIA Infra Controller (NICo) — automate GPU bare-metal provisioning, VPCs, networking, and instance lifecycle via the REST API
+license:
+  - Apache-2.0
+tags:
+  - nvidia
+  - infra_controller
+  - infrastructure
+  - nico
+  - gpu
+  - bare_metal
+  - networking
+  - cloud
+  - datacenter
+  - openapi
+  - rest_api
+  - automation
+repository: https://github.com/dsx-ai-factory/infra-controller
+# spec_version: "2.0.0"
+changelog: CHANGELOG.md
+build_ignore:
+  - '*.pyc'
+  - '__pycache__'
+  - 'tests/output'
+  - '.pytest_cache'
+  - '*.tar.gz'
