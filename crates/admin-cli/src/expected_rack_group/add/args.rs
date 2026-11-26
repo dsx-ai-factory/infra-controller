@@ -21,6 +21,11 @@ use clap::Parser;
 use crate::expected_rack_group::common::Attributes;
 
 #[derive(Parser, Debug)]
+// Inherited output flags are accepted but have no effect on writes.
+#[command(defer = |cmd| cmd.mut_args(|arg| match arg.get_id().as_str() {
+    "extended" | "sort_by" => arg.hide(true),
+    _ => arg,
+}))]
 #[command(after_long_help = "\
 EXAMPLES:
 

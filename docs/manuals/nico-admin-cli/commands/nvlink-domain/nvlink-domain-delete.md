@@ -20,11 +20,12 @@ cleanup
 
 Legacy declarations without controller state are removed immediately. In
 Created or Discovering, the controller removes the domain and releases
-its positions on reconciliation. From Maintenance onward, the domain
-enters Deleting and retains its positions pending hardware teardown
+its positions on reconciliation. In other lifecycle states, deletion
+enters or remains in Deleting. Hardware teardown is unimplemented, so
+these domains remain in Deleting with their positions reserved
 ([issue #7819](https://github.com/dsx-ai-factory/infra-controller/issues/7819)). Use
-nvlink-domain show `<ID>` to check for removal: NOT_FOUND means the
-declaration is gone.
+nico-admin-cli nvlink-domain show `<ID>` to check for removal. The error
+nvlink_domain not found: `<ID>` means the declaration has been removed.
 
 ## OPTIONS
 

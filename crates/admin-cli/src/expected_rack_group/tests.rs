@@ -425,8 +425,26 @@ async fn json_export_round_trips_and_count_guard_prevents_replace() {
     result.unwrap();
     let path =
         std::env::temp_dir().join(format!("expected-rack-group-{}.json", uuid::Uuid::new_v4()));
+    let help = parse(&["replace-all", "--help"]).unwrap_err().to_string();
+    let example = help
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(r#"{"expected_rack_groups":"#))
+        .expect("replace-all help must include an inventory JSON example")
+        .to_owned();
     for (json, expected) in [
         (output, Some(groups)),
+        (
+            example,
+            Some(forge::ExpectedRackGroupList {
+                expected_rack_groups: vec![forge::ExpectedRackGroup {
+                    rack_group_id: Some("nvl5-gp1-jhb01".parse().unwrap()),
+                    protocol: String::new(),
+                    topology: "gb200_nvl72r1_c2g4".into(),
+                    ..Default::default()
+                }],
+            }),
+        ),
         (
             r#"{"expected_rack_groups":[],"expected_rack_groups_count":0}"#.into(),
             Some(forge::ExpectedRackGroupList::default()),

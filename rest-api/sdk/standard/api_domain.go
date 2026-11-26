@@ -53,7 +53,7 @@ Restores factory defaults on every switch in an NVLink Domain. Only Provider Adm
 - `nvos` clears the NVOS configuration and reboots the switches.
 - `sdn` restores the SDN configuration to factory defaults.
 
-Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. A rack's task fails without resetting any of its switches if a host in that rack does not become ready for a disruptive operation, for example because a Tenant is using it. If a host goes into use while the task is running, remaining switches whose resets have not been submitted are skipped and the task fails. Resets already accepted may still complete. This check cannot be overridden.
+Every switch in the Domain must be ingested. The request returns `409` if a conflicting task is Pending or Running on any of the Domain's racks. Flow first waits for rack readiness; if this check fails, that rack's task fails without resetting any of its switches. Flow rechecks rack readiness before submitting each switch reset. If this check fails, Flow skips that switch and the remaining switches in the rack task. Flow continues observing accepted resets, which can still complete, and reports the rack task as failed. After submission, Flow polls reset outcomes without rechecking rack readiness. The readiness checks cannot be overridden.
 
 The reset runs in the background. A `202` response returns one task ID for each rack the Domain's switches belong to, in no particular order. It means the tasks were created, not that the switches accepted or completed the resets. Use the Task APIs to see whether each task completed, failed, or was terminated. If a rack's task fails before any reset is submitted, read its task message for the reason. When available, its task report provides additional details. A completed task means the Site reported the resets as finished, not that the Domain is operational. NICo does not restore the switch configurations or re-ingest the switches afterwards.
 
@@ -63,7 +63,7 @@ Failed or uncertain reset submissions are not retried automatically. After a tim
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the organization whose provider owns the Site.
-	@param id Core NVLink Domain ID
+	@param id Domain ID returned by GET /domain/nvlink, identifying the Flow inventory Domain. This is distinct from a Core nvlink-domain CLI declaration UUID.
 	@return ApiFactoryResetNvlinkDomainRequest
 */
 func (a *DomainAPIService) FactoryResetNvlinkDomain(ctx context.Context, org string, id string) ApiFactoryResetNvlinkDomainRequest {

@@ -18,6 +18,11 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
+// Inherited output flags are accepted but have no effect on writes.
+#[command(defer = |cmd| cmd.mut_args(|arg| match arg.get_id().as_str() {
+    "extended" | "sort_by" => arg.hide(true),
+    _ => arg,
+}))]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -25,7 +30,7 @@ Replace all expected rack groups from a JSON file:
     $ nico-admin-cli expected-rack-group replace-all --filename ./rack-groups.json
 
 File shape (an empty expected_rack_groups array clears all groups):
-    {\"expected_rack_groups\":[{\"rack_group_id\":\"nvl5-gp1-jhb01\",\"topology\":\"gb200_nvl72r1_c2g4\",\"racks\":[]}]}
+    {\"expected_rack_groups\":[{\"rack_group_id\":\"nvl5-gp1-jhb01\",\"protocol\":\"\",\"topology\":\"gb200_nvl72r1_c2g4\",\"racks\":[]}]}
 
 The optional expected_rack_groups_count must equal the array length.
 metadata uses name, description, and labels as [{\"key\":\"location.datacenter\",\"value\":\"JHB01\"}].
@@ -35,15 +40,17 @@ pub(crate) struct Args {
     /// JSON inventory file. Missing racks/metadata default to empty.
     ///
     /// The root object contains expected_rack_groups, an array of objects with
-    /// rack_group_id, topology, racks, and metadata. The optional
+    /// rack_group_id, protocol, topology, racks, and metadata. The optional
     /// expected_rack_groups_count must match the array length. An empty array
     /// clears all groups.
     ///
     /// Each rack has rack_id and members; each member requires type, manufacturer, id, and cartridge_index.
     /// cartridge_index must be an integer from 0 to 4294967295.
-    /// Metadata contains name,
-    /// description, and labels as an array of {key, value} objects. Export a
-    /// compatible file with --format json expected-rack-group show.
+    /// Each group requires a protocol string. Use an empty string to leave it unspecified.
+    /// Metadata contains name, description, and labels as an array of {key, value} objects.
+    /// To export the full list, run --format json expected-rack-group show without a group ID.
+    /// For legacy members, fill missing or null cartridge_index values with valid indexes
+    /// from your inventory before replacement.
     #[arg(short, long)]
     pub(super) filename: String,
 }
