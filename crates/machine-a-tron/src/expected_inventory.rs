@@ -1251,6 +1251,12 @@ mod tests {
     async fn registration_uses_existing_group() {
         let rack = rack_registration();
         let own_group = rack.expected_rack_group().unwrap();
+        let indexes: Vec<_> = own_group.racks[0]
+            .members
+            .iter()
+            .map(|member| member.cartridge_index)
+            .collect();
+        assert_eq!(indexes, [Some(11), Some(19), Some(1)]);
         let mut site_group = own_group.clone();
         site_group.rack_group_id = Some(RackGroupId::new("site-group"));
         let rack_record = |group| ExpectedRecord::Rack {

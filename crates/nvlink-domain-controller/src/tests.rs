@@ -351,7 +351,7 @@ async fn discovery_records_resolution_errors_and_retries_after_repair(pool: sqlx
 
 #[carbide_macros::sqlx_test]
 async fn managed_domain_retries_all_positions_after_conflict(pool: sqlx::PgPool) {
-    let racks = r#"[{"rack_id":"rack-a","members":[{"type":"Compute","id":"c","manufacturer":"v","cartridge_index":13},{"type":"PowerShelf","id":"p","manufacturer":"v","cartridge_index":10}]},{"rack_id":"rack-b","members":[{"type":"Switch","id":"s","manufacturer":"v","cartridge_index":42}]}]"#;
+    let racks = r#"[{"rack_id":"rack-a","members":[{"type":"Compute","id":"c","manufacturer":"v","cartridge_index":13},{"type":"PowerShelf","id":"p","manufacturer":"v","cartridge_index":10}]},{"rack_id":"rack-b","members":[{"type":"Compute","id":"c2","manufacturer":"v","cartridge_index":40},{"type":"Switch","id":"s","manufacturer":"v","cartridge_index":42}]}]"#;
     sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, racks) VALUES ('group','topology',$1::jsonb)")
         .bind(racks).execute(&pool).await.unwrap();
     let group_id = "group".parse().unwrap();
@@ -361,7 +361,7 @@ async fn managed_domain_retries_all_positions_after_conflict(pool: sqlx::PgPool)
         .unwrap();
     let switch = NvLinkDomainMember {
         rack_index: 1,
-        slot_index: 1,
+        slot_index: 3,
         component_type: NvLinkDomainMemberType::Switch,
     };
     let other = NvLinkDomain {
@@ -382,7 +382,7 @@ async fn managed_domain_retries_all_positions_after_conflict(pool: sqlx::PgPool)
     assert_eq!(blocked.controller_state.value, NvLinkDomainState::Created);
     assert!(blocked.domain.members.is_empty());
     assert!(
-        matches!(blocked.controller_state_outcome, Some(PersistentStateHandlerOutcome::Error { err, .. }) if err.contains("rack 1 Switch slot 1"))
+        matches!(blocked.controller_state_outcome, Some(PersistentStateHandlerOutcome::Error { err, .. }) if err.contains("rack 1 Switch slot 3"))
     );
     let mut txn = pool.txn_begin().await.unwrap();
     nvlink_domain::delete(&mut txn, other.id).await.unwrap();
@@ -398,7 +398,12 @@ async fn managed_domain_retries_all_positions_after_conflict(pool: sqlx::PgPool)
         vec![
             NvLinkDomainMember {
                 rack_index: 0,
-                slot_index: 4,
+                slot_index: 1,
+                component_type: NvLinkDomainMemberType::Compute
+            },
+            NvLinkDomainMember {
+                rack_index: 1,
+                slot_index: 1,
                 component_type: NvLinkDomainMemberType::Compute
             },
             switch

@@ -122,3 +122,38 @@ fn managed_members_validate_positions_per_type() {
         }
     }
 }
+
+#[test]
+fn compute_anchors_slots_in_physical_order() {
+    let mut group: ExpectedRackGroup = serde_json::from_value(serde_json::json!({
+        "rack_group_id":"group","topology":"topology","racks":[{"rack_id":"rack","members":[
+            {"type":"PowerShelf","cartridge_index":4,"manufacturer":"v","id":"p"},
+            {"type":"Compute","cartridge_index":13,"manufacturer":"v","id":"c2"},
+            {"type":"Switch","cartridge_index":12,"manufacturer":"v","id":"s1"},
+            {"type":"Compute","cartridge_index":11,"manufacturer":"v","id":"c1"}
+        ]}]
+    }))
+    .unwrap();
+    let positions = derive_managed_members(&group).unwrap();
+    let slots: Vec<_> = positions
+        .into_iter()
+        .map(|p| (p.component_type, p.slot_index))
+        .collect();
+    use NvLinkDomainMemberType::{Compute, Switch};
+    assert_eq!(slots, [(Compute, 3), (Switch, 2), (Compute, 1)]);
+    let members = &mut group.racks[0].members;
+    members[2].cartridge_index = Some(9);
+    assert!(
+        derive_managed_members(&group)
+            .unwrap_err()
+            .contains("relative to base 11")
+    );
+    group.racks[0]
+        .members
+        .retain(|m| m.device_type != RackCapabilityType::Compute);
+    assert!(
+        derive_managed_members(&group)
+            .unwrap_err()
+            .contains("no compute cartridge")
+    );
+}

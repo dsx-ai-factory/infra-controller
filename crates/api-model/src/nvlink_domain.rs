@@ -47,7 +47,7 @@ pub struct NvLinkDomainMember {
     pub component_type: NvLinkDomainMemberType,
 }
 
-/// Derive default Domain positions from one rack group's cartridge declarations.
+/// Map each rack's lowest compute cartridge to slot 1, preserving physical offsets.
 pub fn derive_managed_members(
     group: &ExpectedRackGroup,
 ) -> Result<Vec<NvLinkDomainMember>, String> {
@@ -56,8 +56,19 @@ pub fn derive_managed_members(
         let Some(first) = rack
             .members
             .iter()
+            .filter(|member| member.device_type == RackCapabilityType::Compute)
             .min_by_key(|member| member.cartridge_index)
         else {
+            if rack
+                .members
+                .iter()
+                .any(|member| member.device_type == RackCapabilityType::Switch)
+            {
+                return Err(format!(
+                    "rack {} has a switch but no compute cartridge to anchor slot 1",
+                    rack.rack_id
+                ));
+            }
             continue;
         };
         let cartridge_index = |member: &crate::expected_rack_group::ExpectedRackGroupMember| {
