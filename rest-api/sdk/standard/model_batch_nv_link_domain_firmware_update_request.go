@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchNVLinkDomainFirmwareUpdateRequest{}
 
 // BatchNVLinkDomainFirmwareUpdateRequest Request body for firmware updates of explicitly selected NVLink Domains
 type BatchNVLinkDomainFirmwareUpdateRequest struct {
+	ExecutionMode *ExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
@@ -46,6 +47,8 @@ type _BatchNVLinkDomainFirmwareUpdateRequest BatchNVLinkDomainFirmwareUpdateRequ
 // will change when the set of required properties is changed
 func NewBatchNVLinkDomainFirmwareUpdateRequest(siteId string, domainIds []string) *BatchNVLinkDomainFirmwareUpdateRequest {
 	this := BatchNVLinkDomainFirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	this.SiteId = siteId
 	this.DomainIds = domainIds
 	var overrideVersionCheck bool = false
@@ -60,11 +63,45 @@ func NewBatchNVLinkDomainFirmwareUpdateRequest(siteId string, domainIds []string
 // but it doesn't guarantee that properties required by API are set
 func NewBatchNVLinkDomainFirmwareUpdateRequestWithDefaults() *BatchNVLinkDomainFirmwareUpdateRequest {
 	this := BatchNVLinkDomainFirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise.
+func (o *BatchNVLinkDomainFirmwareUpdateRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchNVLinkDomainFirmwareUpdateRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil || IsNil(o.ExecutionMode) {
+		return nil, false
+	}
+	return o.ExecutionMode, true
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BatchNVLinkDomainFirmwareUpdateRequest) HasExecutionMode() bool {
+	if o != nil && !IsNil(o.ExecutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given ExecutionMode and assigns it to the ExecutionMode field.
+func (o *BatchNVLinkDomainFirmwareUpdateRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -264,6 +301,9 @@ func (o BatchNVLinkDomainFirmwareUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o BatchNVLinkDomainFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.ExecutionMode) {
+		toSerialize["executionMode"] = o.ExecutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["domainIds"] = o.DomainIds
 	if o.Version.IsSet() {

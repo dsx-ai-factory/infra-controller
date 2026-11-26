@@ -147,6 +147,7 @@ func (t *Task) UpdateScheduledTask(
 // UpdateTaskStatus updates the status of the task. Non-nil report and
 // queueExpiresAt values replace their corresponding stored columns. Finished
 // statuses clear queueExpiresAt because the deadline applies only while waiting.
+// onlyIfPendingUnscheduled makes other task states a successful no-op.
 // The result reports whether a row changed. Terminal records retain their status,
 // reason and completion time despite delayed worker updates or reconciliation.
 func (t *Task) UpdateTaskStatus(
@@ -156,7 +157,12 @@ func (t *Task) UpdateTaskStatus(
 	message string,
 	report json.RawMessage,
 	queueExpiresAt *time.Time,
+	onlyIfPendingUnscheduled bool,
+	retryBatchDispatch bool,
 ) (bool, error) {
+	if retryBatchDispatch && (status != taskcommon.TaskStatusWaiting || onlyIfPendingUnscheduled) {
+		return false, fmt.Errorf("batch dispatch can only be released to waiting")
+	}
 	t.Status = status
 	t.Message = message
 	t.UpdatedAt = time.Now().UTC()
@@ -182,21 +188,64 @@ func (t *Task) UpdateTaskStatus(
 		}
 	}
 
-	result, err := idb.NewUpdate().
+	query := idb.NewUpdate().
 		Model(t).
 		Column(columns...).
 		Where("id = ?", t.ID).
-		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
-		Exec(ctx)
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses()))
+	if onlyIfPendingUnscheduled {
+		query = query.Where("status = ?", taskcommon.TaskStatusPending).Where("execution_id = ?", "").
+			Where("attributes->>'batch_dispatch' IS DISTINCT FROM ?", taskcommon.BatchDispatchStarted)
+	}
+	if retryBatchDispatch {
+		query = query.Column("attributes").Value("attributes", "jsonb_set(attributes, '{batch_dispatch}', ?::jsonb)", `"ready"`).
+			Where("status = ?", taskcommon.TaskStatusPending).Where("execution_id = ?", "").
+			Where("attributes @> ?::jsonb", `{"batch_dispatch":"started"}`)
+	}
+	result, err := query.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows > 1 {
+		return false, fmt.Errorf("update task status %s affected %d rows", t.ID, rows)
+	}
+	return rows == 1, nil
+}
 
+// ListPendingBatchDispatches returns only batch members never claimed by an executor.
+func ListPendingBatchDispatches(ctx context.Context, idb bun.IDB) ([]Task, error) {
+	var tasks []Task
+	err := idb.NewSelect().Model(&tasks).
+		Where("status = ?", taskcommon.TaskStatusPending).
+		Where("execution_id = ?", "").
+		Where("attributes @> ?::jsonb", `{"batch_dispatch":"ready"}`).
+		Order("created_at ASC", "id ASC").Scan(ctx)
+	return tasks, err
+}
+
+// ClaimBatchDispatch records the irreversible dispatch-attempt boundary before
+// external work. A missing handle after this boundary is not safe to replay.
+func ClaimBatchDispatch(ctx context.Context, idb bun.IDB, id uuid.UUID) (bool, error) {
+	result, err := idb.NewUpdate().Model((*Task)(nil)).
+		Set("attributes = jsonb_set(attributes, '{batch_dispatch}', ?::jsonb)", `"started"`).
+		Set("updated_at = ?", time.Now().UTC()).Where("id = ?", id).
+		Where("status = ?", taskcommon.TaskStatusPending).Where("execution_id = ?", "").
+		Where("attributes @> ?::jsonb", `{"batch_dispatch":"ready"}`).Exec(ctx)
 	if err != nil {
 		return false, err
 	}
-	count, err := result.RowsAffected()
+	rows, err := result.RowsAffected()
 	if err != nil {
 		return false, err
 	}
-	return count == 1, nil
+	if rows > 1 {
+		return false, fmt.Errorf("claim batch dispatch %s affected %d rows", id, rows)
+	}
+	return rows == 1, nil
 }
 
 // UpdateTaskReport updates the structured report without changing status or message.

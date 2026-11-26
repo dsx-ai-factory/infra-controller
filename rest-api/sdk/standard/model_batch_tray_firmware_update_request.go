@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchTrayFirmwareUpdateRequest{}
 
 // BatchTrayFirmwareUpdateRequest Request body for batch tray firmware update operations
 type BatchTrayFirmwareUpdateRequest struct {
+	ExecutionMode *ExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Filter that selects Trays targeted for firmware update
@@ -55,6 +56,8 @@ type _BatchTrayFirmwareUpdateRequest BatchTrayFirmwareUpdateRequest
 // will change when the set of required properties is changed
 func NewBatchTrayFirmwareUpdateRequest(siteId string) *BatchTrayFirmwareUpdateRequest {
 	this := BatchTrayFirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	this.SiteId = siteId
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
@@ -68,11 +71,45 @@ func NewBatchTrayFirmwareUpdateRequest(siteId string) *BatchTrayFirmwareUpdateRe
 // but it doesn't guarantee that properties required by API are set
 func NewBatchTrayFirmwareUpdateRequestWithDefaults() *BatchTrayFirmwareUpdateRequest {
 	this := BatchTrayFirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise.
+func (o *BatchTrayFirmwareUpdateRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchTrayFirmwareUpdateRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil || IsNil(o.ExecutionMode) {
+		return nil, false
+	}
+	return o.ExecutionMode, true
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BatchTrayFirmwareUpdateRequest) HasExecutionMode() bool {
+	if o != nil && !IsNil(o.ExecutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given ExecutionMode and assigns it to the ExecutionMode field.
+func (o *BatchTrayFirmwareUpdateRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -444,6 +481,9 @@ func (o BatchTrayFirmwareUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o BatchTrayFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.ExecutionMode) {
+		toSerialize["executionMode"] = o.ExecutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Filter) {
 		toSerialize["filter"] = o.Filter

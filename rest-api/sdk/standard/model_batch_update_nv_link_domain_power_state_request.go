@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchUpdateNVLinkDomainPowerStateRequest{}
 
 // BatchUpdateNVLinkDomainPowerStateRequest Request body for power control of explicitly selected NVLink Domains
 type BatchUpdateNVLinkDomainPowerStateRequest struct {
+	ExecutionMode *ExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
@@ -44,6 +45,8 @@ type _BatchUpdateNVLinkDomainPowerStateRequest BatchUpdateNVLinkDomainPowerState
 // will change when the set of required properties is changed
 func NewBatchUpdateNVLinkDomainPowerStateRequest(siteId string, domainIds []string, state string) *BatchUpdateNVLinkDomainPowerStateRequest {
 	this := BatchUpdateNVLinkDomainPowerStateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	this.SiteId = siteId
 	this.DomainIds = domainIds
 	this.State = state
@@ -57,9 +60,43 @@ func NewBatchUpdateNVLinkDomainPowerStateRequest(siteId string, domainIds []stri
 // but it doesn't guarantee that properties required by API are set
 func NewBatchUpdateNVLinkDomainPowerStateRequestWithDefaults() *BatchUpdateNVLinkDomainPowerStateRequest {
 	this := BatchUpdateNVLinkDomainPowerStateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = &executionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil || IsNil(o.ExecutionMode) {
+		return nil, false
+	}
+	return o.ExecutionMode, true
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) HasExecutionMode() bool {
+	if o != nil && !IsNil(o.ExecutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given ExecutionMode and assigns it to the ExecutionMode field.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -208,6 +245,9 @@ func (o BatchUpdateNVLinkDomainPowerStateRequest) MarshalJSON() ([]byte, error) 
 
 func (o BatchUpdateNVLinkDomainPowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.ExecutionMode) {
+		toSerialize["executionMode"] = o.ExecutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["domainIds"] = o.DomainIds
 	toSerialize["state"] = o.State

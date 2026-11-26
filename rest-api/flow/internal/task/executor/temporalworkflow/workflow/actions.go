@@ -364,14 +364,14 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 						failedComponents = append(failedComponents, componentID)
 					}
 				}
-				return fmt.Errorf(
+				return unknownOutcomeError(fmt.Errorf(
 					"%s firmware update timed out after %v; failed components: %v; unresolved components: %v",
 					componentStr, pollTimeout, failedComponents, unresolvedComponents,
-				)
+				))
 			}
-			return fmt.Errorf(
+			return unknownOutcomeError(fmt.Errorf(
 				"%s firmware update timed out after %v", componentStr, pollTimeout,
-			)
+			))
 		}
 
 		var result activity.GetFirmwareStatusResult
@@ -526,8 +526,13 @@ func verifyPowerStatus(
 	// Existing histories retain their original completion decision on replay.
 	checkRequested := workflow.GetVersion(ctx, "power-status-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	boundedPolling := workflow.GetVersion(ctx, "power-status-poll-deadline", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	observationKnown := false
 	timeoutError := func() error {
-		return fmt.Errorf("timeout after %v waiting for power status %s (attempts: %d)", timeout, expected, attempt)
+		err := fmt.Errorf("timeout after %v waiting for power status %s (attempts: %d)", timeout, expected, attempt)
+		if !observationKnown {
+			return unknownOutcomeError(err)
+		}
+		return err
 	}
 
 	for {
@@ -548,6 +553,11 @@ func verifyPowerStatus(
 			actErr = workflow.ExecuteActivity(ctx, activity.NameGetPowerStatus, target).Get(ctx, &statusMap)
 		}
 
+		observationKnown = actErr == nil && target.Len() > 0
+		for _, id := range target.Identifiers {
+			status, present := statusMap[id]
+			observationKnown = observationKnown && present && (status == operations.PowerStatusOn || status == operations.PowerStatusOff)
+		}
 		if actErr == nil {
 			identifiers := target.Identifiers
 			allMatch := target.Len() > 0
@@ -592,12 +602,7 @@ func verifyPowerStatus(
 
 		// Check timeout
 		if workflow.Now(ctx).After(deadline) {
-			return fmt.Errorf(
-				"timeout after %v waiting for power status %s (attempts: %d)",
-				timeout,
-				expected,
-				attempt,
-			)
+			return timeoutError()
 		}
 
 		// Sleep before next poll (durable sleep in workflow)
@@ -653,9 +658,9 @@ func executeWaitBringUpAction(actx actionExecutionContext) error {
 
 	for {
 		if workflow.Now(ctx).After(deadline) {
-			return fmt.Errorf(
+			return unknownOutcomeError(fmt.Errorf(
 				"timed out waiting for compute bring-up (timeout %v)", timeout,
-			)
+			))
 		}
 
 		if err := workflow.Sleep(ctx, pollInterval); err != nil {
@@ -832,11 +837,9 @@ func verifyReachability(
 					)
 				}
 			}
-			return fmt.Errorf(
-				"timeout after %v waiting for components to become reachable: %v",
-				timeout,
-				unreachable,
-			)
+			return unknownOutcomeError(fmt.Errorf(
+				"timeout after %v waiting for components to become reachable: %v", timeout, unreachable,
+			))
 		}
 
 		_ = workflow.Sleep(ctx, pollInterval)
@@ -955,9 +958,9 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 
 	for {
 		if workflow.Now(ctx).After(deadline) {
-			return fmt.Errorf(
+			return unknownOutcomeError(fmt.Errorf(
 				"timed out waiting for decommission to complete (timeout %v)", timeout,
-			)
+			))
 		}
 
 		if firstPoll {
@@ -976,9 +979,9 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 			// Recheck after sleep using >= so that a capped sleep that lands exactly
 			// on the deadline also terminates rather than firing one more activity.
 			if !workflow.Now(ctx).Before(deadline) {
-				return fmt.Errorf(
+				return unknownOutcomeError(fmt.Errorf(
 					"timed out waiting for decommission to complete (timeout %v)", timeout,
-				)
+				))
 			}
 		}
 
@@ -1001,10 +1004,9 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 				Dur("limit", maxConsecutiveFailureDuration).
 				Msg("Failed to get decommission status")
 			if elapsed >= maxConsecutiveFailureDuration {
-				return fmt.Errorf(
-					"aborting: GetDecommissionStatus has been failing for %v: %w",
-					elapsed, err,
-				)
+				return unknownOutcomeError(fmt.Errorf(
+					"aborting: GetDecommissionStatus has been failing for %v: %w", elapsed, err,
+				))
 			}
 			continue
 		}
@@ -1034,13 +1036,12 @@ func executeWaitDecommissionedAction(actx actionExecutionContext) error {
 // (Go map iteration is unordered).
 func evaluateDecommissionResult(result *activity.GetDecommissionStatusResult) (bool, error) {
 	if len(result.States) == 0 && len(result.NotFound) == 0 {
-		return false, errors.New("decommission status result is empty")
+		return false, unknownOutcomeError(errors.New("decommission status result is empty"))
 	}
 	if len(result.NotFound) > 0 {
-		return false, fmt.Errorf(
-			"decommission status unavailable for component IDs: %v",
-			result.NotFound,
-		)
+		return false, unknownOutcomeError(fmt.Errorf(
+			"decommission status unavailable for component IDs: %v", result.NotFound,
+		))
 	}
 
 	inProgress := false
@@ -1124,4 +1125,9 @@ func extractOverrideReadinessCheck(operationInfo any) bool {
 // extractComponentTargetVersion retains the shared version resolver for action callers.
 func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) (string, bool) {
 	return firmwareplan.TargetVersion(rawVersion, componentType)
+}
+
+// unknownOutcomeError identifies observation timeouts across child-workflow serialization.
+func unknownOutcomeError(err error) error {
+	return temporal.NewApplicationErrorWithCause(err.Error(), "UnknownOutcome", err)
 }

@@ -29144,6 +29144,8 @@ components:
         - domainIds
         - state
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -29201,6 +29203,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -29251,6 +29255,8 @@ components:
         - siteId
         - domainIds
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -29312,6 +29318,8 @@ components:
         - siteId
         - state
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -30221,6 +30229,8 @@ components:
         - siteId
         - state
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -30266,6 +30276,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -30421,6 +30433,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -30452,6 +30466,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -30545,7 +30561,7 @@ components:
           allOf:
             - $ref: '#/components/schemas/TaskReportV1'
           description: |
-            Structured v1 execution report for the task. Populated on single-task `GET` and `cancel` responses, and on list responses only when `includeReport=true` is set. Omitted when the task has not yet produced a report (e.g. still queued) or when the caller did not opt in on list endpoints.
+            Structured v1 execution report for the task. Populated on single-task `GET` and `cancel` responses, and on list responses only when `includeReport=true` is set. Admission details are available while newly admitted tasks are queued. Legacy tasks may omit the report until execution produces one. List responses omit it when the caller does not opt in.
 
             A future schema revision will be exposed as a new `TaskReportV2` schema referenced from a parallel response field; v1 consumers are not disturbed by that bump.
       examples:
@@ -30562,7 +30578,8 @@ components:
                 startedAt: '2026-06-08T18:00:00Z'
                 finishedAt: '2026-06-08T18:00:42Z'
                 steps:
-                  - componentType: Compute
+                  - targets: []
+                    componentType: Compute
                     status: completed
                     totalComponents: 4
                     succeededComponents: 4
@@ -30573,13 +30590,15 @@ components:
                 status: running
                 startedAt: '2026-06-08T18:00:42Z'
                 steps:
-                  - componentType: NVLSwitch
+                  - targets: []
+                    componentType: NVLSwitch
                     status: running
                     totalComponents: 2
                     succeededComponents: 0
                     failedComponents: 0
                     startedAt: '2026-06-08T18:00:42Z'
-                  - componentType: PowerShelf
+                  - targets: []
+                    componentType: PowerShelf
                     status: skipped
                     totalComponents: 0
                     succeededComponents: 0
@@ -31445,6 +31464,87 @@ components:
             everything in the bundle. Unknown names are rejected.
           items:
             type: string
+    ExecutionMode:
+      title: ExecutionMode
+      type: string
+      enum:
+        - Strict
+        - BestEffort
+      default: Strict
+      description: |-
+        Controls how an operation handles targets that cannot be submitted and targets that fail during execution. Omitted means Strict.
+
+        Strict rejects the request if a selected target has neither a device ID nor a management MAC supported by the operation. A stage failure prevents later stages from starting.
+
+        BestEffort skips those targets before execution, provided each selected Rack retains at least one executable target. If a target fails or has an unknown outcome, it leaves the remaining actions and stages; healthy targets of the same component type continue. If an earlier stage has a missing, failed or unknown target of a different component type, the later type is skipped. Group checks run once over all remaining targets. Any exclusion, failure or unknown outcome leaves the task Failed after eligible work finishes.
+
+        Inventory-only ingestion rules can still use expected inventory without a discovered device. Management MAC support depends on the operation. Conflict and Tenant readiness checks apply in both modes; overrideReadinessCheck remains independent.
+      example: BestEffort
+    TaskTargetResolution:
+      title: TaskTargetResolution
+      type: object
+      description: Target selection when the task was created. Selected equals submitted plus the number of skipped entries. Submitted counts targets accepted for execution, not successful outcomes.
+      required:
+        - executionMode
+        - selected
+        - submitted
+        - skipped
+      properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
+          description: Effective execution mode recorded for the task.
+        selected:
+          type: integer
+          minimum: 0
+          description: Number of components selected on the task's Rack.
+        submitted:
+          type: integer
+          minimum: 0
+          description: Number of selected components accepted for execution.
+        skipped:
+          type: array
+          description: Components excluded before execution, with location context. Empty when none were excluded. Ordering is stable within the task; location fields need not uniquely identify an entry.
+          items:
+            $ref: '#/components/schemas/TaskSkippedTarget'
+      example:
+        executionMode: BestEffort
+        selected: 1
+        submitted: 1
+        skipped: []
+    TaskSkippedTarget:
+      title: TaskSkippedTarget
+      type: object
+      description: Component excluded because it has no usable device ID or supported management MAC. The parent task identifies the Rack. Location values of -1 mean unknown.
+      required:
+        - componentType
+        - slotId
+        - trayIndex
+        - hostId
+        - reason
+      properties:
+        componentType:
+          type: string
+          description: Component class, such as Compute, NVLSwitch or PowerShelf.
+        slotId:
+          type: integer
+          description: Slot number within the Rack, or -1 if unknown.
+        trayIndex:
+          type: integer
+          description: Tray index within the slot, or -1 if unknown.
+        hostId:
+          type: integer
+          description: Host position within the Tray, or -1 if unknown.
+        reason:
+          type: string
+          enum:
+            - UnaddressableTarget
+          description: Reason the component was excluded before execution.
+      example:
+        componentType: Compute
+        slotId: 1
+        trayIndex: 0
+        hostId: 0
+        reason: UnaddressableTarget
     TaskReportV1:
       title: TaskReportV1
       type: object
@@ -31457,6 +31557,11 @@ components:
         - version
         - stages
       properties:
+        targetResolution:
+          oneOf:
+            - $ref: '#/components/schemas/TaskTargetResolution'
+            - type: 'null'
+          description: Summary of target selection and components excluded before execution. Null for tasks created before target resolution reporting was introduced. Available while tasks are queued.
         version:
           type: integer
           enum: [1]
@@ -31500,6 +31605,41 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    TaskTargetResult:
+      title: TaskTargetResult
+      type: object
+      description: Terminal outcome of a target in a BestEffort step. Outcomes appear incrementally as targets finish the step or are excluded; unfinished targets are not included yet.
+      required:
+        - identifier
+        - identifierType
+        - status
+        - error
+      properties:
+        identifier:
+          type: string
+          description: Device ID or management MAC used to send the operation.
+        identifierType:
+          type: string
+          enum:
+            - ComponentId
+            - MacAddress
+          description: Kind of identifier used for this operation.
+        status:
+          type: string
+          enum:
+            - Completed
+            - Failed
+            - Unknown
+            - Skipped
+          description: Completed means all actions in this step succeeded. Unknown means the final outcome could not be confirmed. Skipped means an earlier failure or unknown outcome excluded the target before this step ran.
+        error:
+          type: string
+          description: Failure or exclusion reason; empty when status is Completed.
+      example:
+        identifier: fm10000000000001
+        identifierType: ComponentId
+        status: Failed
+        error: Device rejected the power operation.
     TaskReportV1Step:
       title: TaskReportV1Step
       type: object
@@ -31512,7 +31652,18 @@ components:
         - totalComponents
         - succeededComponents
         - failedComponents
+        - targets
       properties:
+        targets:
+          type: array
+          description: >-
+            Terminal per-target outcomes for BestEffort tasks, in admitted target order.
+            Updated as action waves finish; unfinished targets are not included yet.
+            Empty for Strict tasks and tasks without per-target reporting.
+            Skipped means an earlier failure or unknown outcome excluded the target;
+            error explains the cause.
+          items:
+            $ref: '#/components/schemas/TaskTargetResult'
         componentType:
           type: string
           description: 'Component class this step targets, e.g. `Compute`, `NVLSwitch`, `PowerShelf`.'
@@ -31566,7 +31717,7 @@ components:
         - `running`   — execution is in progress.
         - `completed` — execution finished successfully.
         - `failed`    — execution finished with an error; see `error`.
-        - `skipped`   — the rule lists this component type but the task targets no components of that type, so the workflow will not invoke it.
+        - `skipped`   — no targets of this type were selected, or all were excluded by an earlier BestEffort failure or unknown outcome. No actions run and step timestamps are absent.
       enum:
         - pending
         - running
@@ -31580,6 +31731,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -31752,6 +31905,8 @@ components:
         - siteId
         - state
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid
@@ -31915,6 +32070,8 @@ components:
       required:
         - siteId
       properties:
+        executionMode:
+          $ref: '#/components/schemas/ExecutionMode'
         siteId:
           type: string
           format: uuid

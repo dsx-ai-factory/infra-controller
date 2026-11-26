@@ -5,13 +5,16 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 	temporalworkflow "go.temporal.io/sdk/workflow"
@@ -21,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/report"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -186,17 +190,20 @@ func TestPowerControlWorkflow(t *testing.T) {
 	}
 
 	testCases := map[string]struct {
+		resolution    *taskcommon.TargetResolution
 		components    []*component.Component
 		op            operations.PowerOperation
 		activityError error
 		expectError   bool
 		errorContains string
 	}{
-		"power on full components success": {
+		"power on retains admission exclusion in failed report": {
+			resolution:    &taskcommon.TargetResolution{ExecutionMode: taskcommon.ExecutionModeBestEffort, Selected: 5, Submitted: 4, Skipped: []taskcommon.SkippedTarget{{ComponentID: uuid.New(), ComponentType: devicetypes.ComponentTypeCompute, SlotID: 9, Reason: "unaddressable_target"}}},
 			components:    fullComponents,
 			op:            operations.PowerOperationPowerOn,
 			activityError: nil,
-			expectError:   false,
+			expectError:   true,
+			errorContains: "selected targets excluded at admission",
 		},
 		"power off full components success": {
 			components:    fullComponents,
@@ -271,6 +278,7 @@ func TestPowerControlWorkflow(t *testing.T) {
 			})
 			// Register the child workflow needed for rule-based execution
 			env.RegisterWorkflowWithOptions(genericComponentStepWorkflow, temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow})
+			env.RegisterWorkflowWithOptions(bestEffortComponentActionWorkflow, temporalworkflow.RegisterOptions{Name: nameBestEffortComponentActionWorkflow})
 
 			env.OnActivity(taskactivity.NamePowerControl, mock.Anything, mock.Anything, mock.Anything).Return(tc.activityError)
 
@@ -315,17 +323,41 @@ func TestPowerControlWorkflow(t *testing.T) {
 				},
 			)
 
-			expectTaskUpdateActivities(env)
+			var snapshots [][]byte
+			var snapshotMu sync.Mutex
+			capture := func(raw []byte) {
+				snapshotMu.Lock()
+				defer snapshotMu.Unlock()
+				snapshots = append(snapshots, append([]byte(nil), raw...))
+			}
+			env.OnActivity(taskactivity.NameUpdateTaskStatus, mock.Anything, mock.Anything).Return(func(_ context.Context, update *taskdef.TaskStatusUpdate) error {
+				if len(update.Report) > 0 {
+					capture(update.Report)
+				}
+				return nil
+			})
+			env.OnActivity(taskactivity.NameUpdateTaskReport, mock.Anything, mock.Anything).Return(func(_ context.Context, update *taskdef.TaskReportUpdate) error { capture(update.Report); return nil })
 
 			info := &operations.PowerControlTaskInfo{Operation: tc.op}
 			reqInfo := taskdef.ExecutionInfo{
-				TaskID:         uuid.New(),
-				Components:     toWorkflowComponents(tc.components),
-				RuleDefinition: createDefaultPowerRuleDef(tc.op),
+				TaskID:           uuid.New(),
+				TargetResolution: tc.resolution,
+				Components:       toWorkflowComponents(tc.components),
+				RuleDefinition:   createDefaultPowerRuleDef(tc.op),
 			}
 
 			env.ExecuteWorkflow(powerControl, reqInfo, info)
 
+			if tc.resolution != nil {
+				snapshotMu.Lock()
+				require.NotEmpty(t, snapshots)
+				for _, raw := range snapshots {
+					var rep report.Report
+					require.NoError(t, json.Unmarshal(raw, &rep))
+					require.Equal(t, tc.resolution, rep.TargetResolution)
+				}
+				snapshotMu.Unlock()
+			}
 			assert.True(t, env.IsWorkflowCompleted())
 
 			wfErr := env.GetWorkflowError()

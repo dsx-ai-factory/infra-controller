@@ -87,13 +87,16 @@ type APIUpdatePowerStateRequest struct {
 	// one or more target components (or hosts on the owning rack for
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
-	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode"`
 }
 
 // Validate validates the power control request
 func (r *APIUpdatePowerStateRequest) Validate() error {
 	r.State = normalizePowerControlState(r.State)
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In(ExecutionModeStrict, ExecutionModeBestEffort)),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
@@ -141,7 +144,9 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	RuleID *string `json:"ruleId"`
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
-	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode"`
 }
 
 // Validate checks required fields and power state validity.
@@ -151,6 +156,7 @@ func (r *APIBatchUpdateRackPowerStateRequest) Validate() error {
 		return fmt.Errorf("siteId is required")
 	}
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In(ExecutionModeStrict, ExecutionModeBestEffort)),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(
@@ -171,7 +177,9 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	RuleID *string `json:"ruleId"`
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
-	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.
@@ -184,6 +192,7 @@ func (r *APIBatchUpdateTrayPowerStateRequest) Validate() error {
 		return err
 	}
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In(ExecutionModeStrict, ExecutionModeBestEffort)),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(

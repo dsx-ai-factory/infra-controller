@@ -459,6 +459,7 @@ func executeRuleBasedOperation(
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
 	ruleDef *operationrules.RuleDefinition,
+	resolutions ...*taskcommon.TargetResolution,
 ) (*report.Report, error) {
 	if ruleDef == nil {
 		return nil, fmt.Errorf(
@@ -470,11 +471,19 @@ func executeRuleBasedOperation(
 		return nil, fmt.Errorf("rule definition has no steps")
 	}
 
+	if len(resolutions) > 0 && resolutions[0] != nil && resolutions[0].ExecutionMode == taskcommon.ExecutionModeBestEffort {
+		return executeBestEffortOperation(ctx, taskID, typeToTargets, allTargets, operationInfo, ruleDef, resolutions[0])
+	}
+
 	// The report mirrors the rule's stage layout up front: every stage
 	// and every SequenceStep has a slot from the moment NewInitial
 	// returns. Tracker advances those slots as the workflow progresses.
 	tracker := &report.Tracker{
 		Report: report.NewInitial(ruleDef, componentTotalsByType(typeToTargets)),
+	}
+
+	if len(resolutions) > 0 {
+		tracker.Report.TargetResolution = resolutions[0]
 	}
 
 	updateTaskReportBestEffort(ctx, taskID, tracker.Report)

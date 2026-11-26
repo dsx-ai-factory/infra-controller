@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
@@ -22,6 +24,37 @@ func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
 }
 
 func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
+	t.Run("execution policy", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, body string
+			want       *string
+			invalid    bool
+		}{
+			{name: "null", body: `{"siteId":"site","state":"On","executionMode":null}`},
+			{name: "omitted", body: `{"siteId":"site","state":"On"}`},
+			{name: "explicit strict", body: `{"siteId":"site","state":"On","executionMode":"Strict"}`, want: new("Strict")},
+			{name: "best effort", body: `{"siteId":"site","state":"On","executionMode":"BestEffort"}`, want: new("BestEffort")},
+			{name: "rejects empty enum", body: `{"siteId":"site","state":"On","executionMode":""}`, invalid: true},
+			{name: "rejects unknown enum", body: `{"siteId":"site","state":"On","executionMode":"ContinueAll"}`, invalid: true},
+			{name: "rejects bool", body: `{"siteId":"site","state":"On","executionMode":true}`, invalid: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var req APIUpdatePowerStateRequest
+				err := json.Unmarshal([]byte(tc.body), &req)
+				if err == nil {
+					err = req.Validate()
+				}
+				if tc.invalid {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+				require.NoError(t, req.Validate())
+				require.Equal(t, tc.want, req.ExecutionMode)
+			})
+		}
+	})
+
 	states := []struct {
 		canonical string
 		legacy    string

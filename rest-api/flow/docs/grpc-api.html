@@ -1240,6 +1240,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.ExecutionMode"><span class="badge">E</span>ExecutionMode</a>
+                </li>
+
+                <li>
                   <a href="#v1.FirmwareControlOperation"><span class="badge">E</span>FirmwareControlOperation</a>
                 </li>
 
@@ -1408,6 +1412,18 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
                 </tr>
 
             </tbody>
@@ -1692,6 +1708,18 @@ scope is reported as not ready for the operation by its persisted
 ComponentOperationStatus. Intended for operator-supervised maintenance where
 tenant impact has been acknowledged out-of-band; the bypass is
 recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
                 </tr>
 
             </tbody>
@@ -2686,6 +2714,18 @@ execution policy, and operation template. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
                 </tr>
 
             </tbody>
@@ -5595,6 +5635,18 @@ and returns OperationRun.stats. </p></td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
                 </tr>
 
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -8063,6 +8115,18 @@ maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
                 </tr>
 
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -8118,6 +8182,18 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
                 </tr>
 
             </tbody>
@@ -8213,6 +8289,18 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
                 </tr>
 
             </tbody>
@@ -10742,6 +10830,18 @@ override_readiness_check. Unsupported for DPU updates and
 legacy compute controllers. Omitted pairs retain configured lookup. </p></td>
                 </tr>
 
+                <tr>
+                  <td>execution_mode</td>
+                  <td><a href="#v1.ExecutionMode">ExecutionMode</a></td>
+                  <td></td>
+                  <td><p>Strict (default) stops on failure. BestEffort excludes missing targets and
+failed/unknown targets from later steps while continuing other targets.
+Cross-type stage ordering remains a dependency barrier; failed predecessor
+types skip later dependent types. Group checks retain the complete group.
+All exclusions and failures remain in the task report. Tenant readiness
+and task conflict checks remain enforced. Omitted means Strict. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -11218,6 +11318,35 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
                 <td>EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS</td>
                 <td>3</td>
                 <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.ExecutionMode">ExecutionMode</h3>
+        <p>ExecutionMode controls admission and per-target failure handling.</p><p>Omission preserves Strict behavior.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>EXECUTION_MODE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Omitted mode uses Strict admission and execution.</p></td>
+              </tr>
+
+              <tr>
+                <td>EXECUTION_MODE_STRICT</td>
+                <td>1</td>
+                <td><p>Reject unusable targets and stop advancing after a stage fails.</p></td>
+              </tr>
+
+              <tr>
+                <td>EXECUTION_MODE_BEST_EFFORT</td>
+                <td>2</td>
+                <td><p>Continue eligible targets while retaining exclusions and failures.</p></td>
               </tr>
 
           </tbody>
