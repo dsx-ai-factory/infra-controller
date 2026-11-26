@@ -86,6 +86,12 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
             }),
         };
         let controller_state = lifecycle.state.clone();
+        let rack_firmware_reprovisioning_skip = src.rack_firmware_reprovisioning_skip.map(|skip| {
+            rpc::PowerShelfRackReprovisioningSkip {
+                requested_at: Some(skip.requested_at.into()),
+                reason: skip.reason,
+            }
+        });
 
         let status = Some(match src.status {
             Some(s) => rpc::PowerShelfStatus {
@@ -101,6 +107,7 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
                 health: Some(health.into()),
                 health_sources,
                 lifecycle: Some(lifecycle),
+                rack_firmware_reprovisioning_skip,
             },
             None => rpc::PowerShelfStatus {
                 state_reason: None,
@@ -115,6 +122,7 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
                 health: Some(health.into()),
                 health_sources,
                 lifecycle: Some(lifecycle),
+                rack_firmware_reprovisioning_skip,
             },
         });
 
@@ -196,6 +204,7 @@ mod tests {
             power_shelf_maintenance_requested: None,
             power_shelf_reprovisioning_requested: None,
             firmware_upgrade_status: None,
+            rack_firmware_reprovisioning_skip: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             health_reports: Default::default(),

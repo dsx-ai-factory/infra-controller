@@ -149,6 +149,12 @@ failure_retry_time = "90m"
 [machine_state_controller.controller]
 max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
 
+{{- if not (kindIs "bool" .Values.powerShelfStateController.rackFirmwareReprovisioningEnabled) }}
+{{- fail "nico-api.powerShelfStateController.rackFirmwareReprovisioningEnabled must be true or false" }}
+{{- end }}
+[power_shelf_state_controller]
+rack_firmware_reprovisioning_enabled = {{ .Values.powerShelfStateController.rackFirmwareReprovisioningEnabled }}
+
 {{- if not (kindIs "bool" .Values.apiAdmissionControl.enabled) }}
 {{- fail "nico-api.apiAdmissionControl.enabled must be true or false" }}
 {{- end }}
