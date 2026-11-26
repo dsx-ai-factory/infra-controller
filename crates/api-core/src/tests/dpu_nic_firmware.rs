@@ -265,6 +265,24 @@ async fn test_get_updates_in_progress(
     assert_eq!(updating_count.len(), 1);
     assert!(updating_count.contains(&managed_host.id));
 
+    let mut config = (*env.config).clone();
+    config
+        .dpu_config
+        .dpu_nic_firmware_reprovision_update_enabled = false;
+    let disabled_updater = DpuNicFirmwareUpdate::new(
+        std::sync::Arc::new(config),
+        env.test_meter.meter(),
+        None,
+        env.api.instrumentation.clone(),
+    );
+    assert!(
+        disabled_updater
+            .get_updates_in_progress(&mut txn)
+            .await?
+            .is_empty(),
+        "disabling automatic DPU updates must preserve the existing shared-capacity policy",
+    );
+
     Ok(())
 }
 

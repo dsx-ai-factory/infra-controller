@@ -54,10 +54,23 @@ A DPU reporting either listed version is compliant. A DPU reporting
 `32.42.1000` is drifted. The list does not identify which version NICo will
 install; the deployed BFB determines the resulting firmware versions.
 
-Setting `dpu_nic_firmware_reprovision_update_enabled = false` removes the DPU
-NIC module from Machine Update Manager. NICo then stops detecting and
-scheduling classic DPU NIC drift automatically. It does not disable DPU
-reprovisioning requested through the API.
+Setting `dpu_nic_firmware_reprovision_update_enabled = false` stops automatic
+DPU NIC drift detection, scheduling, shared-capacity accounting for outstanding
+automatic DPU requests, and the module's gauges. It does not disable DPU
+reprovisioning requested through the API or cleanup of completed updates.
+
+Completion cleanup runs for hosts in `Ready` or `Assigned/Ready` after every
+attached DPU's reprovisioning request has cleared. It removes the controller's
+`host-update` report with target `DpuFirmware`, preserving other health-report
+sources. For classic hosts, any attached DPU whose reported NIC version matches
+`dpu_nic_firmware_update_versions` can clear the host marker. Cleanup does not
+record which DPUs were targeted by the update. DPF completion does not use that
+version list. These checks also run when automatic DPU updates are disabled.
+
+Cleanup follows controller completion. An assigned host reaches `Assigned/Ready`
+once the final host restart request is accepted; this does not confirm tenant OS
+startup. Cleanup can therefore remove alert suppression during the final host
+reboot.
 
 ### Eligibility and scheduling
 
@@ -248,7 +261,8 @@ The following metrics provide the site-wide view:
   `completed` phase.
 - `carbide_firmware_update_failures_total`: For `target="dpu_nic"` and
   `cause="wrong_version_after_update"`, classic reprovisioning returned to
-  `Ready`, but the reported NIC version is still outside the accepted list.
+  `Ready` or `Assigned/Ready`, but the reported NIC version is still outside
+  the accepted list. This check also runs when automatic DPU updates are disabled.
 
 ## Recover a stalled update
 
@@ -265,7 +279,7 @@ problem.
 | DPF drift persists with no request, or an operator request remains unstarted | Check the deferral reason in `nico-api` logs and the managed-host handler outcome. Verify the host BMC MAC, DPU hardware inventory, host platform, expected `CX9` NIC inventory, `DPUNode` labels, and DPF connectivity. Automatic requests are withdrawn or never created; operator requests remain queued. |
 | A DPF request has started, but the host remains `Ready` | Inspect the handler error for a failed DPU restart. Restore DPU BMC connectivity or credentials as indicated by that error. NICo retries automatically with the saved start timestamp. The request remains started and the host remains unavailable for allocation during retries. |
 | NICo reports a DPF provisioning failure after observing `Error` | Inspect the DPU status and conditions in the managed-host failure state and its state history. After recovery leaves the failed state, the saved history retains the observation. |
-| A classic host returned to `Ready`, but the update marker remains | Check the NIC version against `dpu_nic_firmware_update_versions`. NICo retains the update health marker when the resulting NIC version is not accepted. |
+| A classic host returned to `Ready` or `Assigned/Ready`, but the update marker remains | Check the attached DPUs' NIC versions against `dpu_nic_firmware_update_versions`. If no attached DPU reports an accepted version, NICo retains the update health marker. |
 
 When NICo observes a terminal DPU `Error`, it records the DPU identity,
 deployment owner label, flavor and BFB references, and status, including

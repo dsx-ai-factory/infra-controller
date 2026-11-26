@@ -104,13 +104,10 @@ impl MachineUpdateManager {
         dpf: Option<Arc<dyn DpfOperations>>,
         instrumentation: carbide_instrument::Instrumentation,
     ) -> Self {
-        let mut update_modules = vec![];
-
-        if let Some(dpu_nic_firmware) =
-            DpuNicFirmwareUpdate::new(config.clone(), meter.clone(), dpf, instrumentation.clone())
-        {
-            update_modules.push(Box::new(dpu_nic_firmware) as Box<dyn MachineUpdateModule>);
-        }
+        // Manually initiated DPU updates need cleanup even when automatic updates are disabled.
+        let mut update_modules: Vec<Box<dyn MachineUpdateModule>> = vec![Box::new(
+            DpuNicFirmwareUpdate::new(config.clone(), meter.clone(), dpf, instrumentation.clone()),
+        )];
 
         let mut machine_update_metrics = MachineUpdateManagerMetrics::new();
         machine_update_metrics.register_callbacks(&meter);

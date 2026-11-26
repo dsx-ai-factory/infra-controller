@@ -427,8 +427,8 @@ list is drifted and, when DPU NIC updates are enabled, makes the DPU eligible
 for reprovisioning. Allowing more than one version is useful during a staged
 rollout where both the old and new versions must temporarily remain valid.
 
-`dpu_nic_firmware_reprovision_update_enabled` enables this automatic drift
-module. It does not prevent an operator from requesting DPU reprovisioning.
+`dpu_nic_firmware_reprovision_update_enabled` enables automatic drift
+selection. It does not prevent an operator from requesting DPU reprovisioning.
 
 ### Post-reprovision baseline
 

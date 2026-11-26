@@ -4668,7 +4668,8 @@ pub struct DpuConfig {
     #[serde(default)]
     pub dpu_nic_firmware_initial_update_enabled: bool,
 
-    /// Enable dpu firmware updates on known machines
+    /// Enable automatic DPU update selection, scheduling, capacity accounting, and gauges.
+    /// Manual reprovisioning and completion cleanup remain available when disabled.
     #[serde(default)]
     pub dpu_nic_firmware_reprovision_update_enabled: bool,
 

@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use carbide_machine_controller::health_report::create_host_update_health_report;
+use carbide_machine_controller::health_report::{
+    create_host_update_health_report, create_host_update_health_report_dpufw,
+};
 use carbide_uuid::machine::HostMachineId;
 use common::api_fixtures::create_test_env;
 use db::TransactionVending as _;
@@ -41,7 +43,7 @@ use crate::machine_update_manager::MachineUpdateManager;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
 use crate::machine_update_manager::metrics::FirmwareUpdateProgress;
 use crate::tests::common;
-use crate::tests::common::api_fixtures::create_managed_host;
+use crate::tests::common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu};
 use crate::{CarbideError, CarbideResult};
 
 const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/cfg/test_data");
@@ -811,4 +813,133 @@ async fn completed_pass_counter_excludes_skips(pool: sqlx::PgPool) {
             "{scenario}"
         );
     }
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_update_cleanup_without_automatic_updates(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_instrument::testing::MetricsCapture;
+    use health_report::HealthReportApplyMode::Merge;
+    use model::machine::{InstanceState, ManagedHostState};
+
+    use crate::tests::common::api_fixtures::TestManagedHost;
+    use crate::tests::dpu_machine_update::update_nic_firmware_version;
+
+    let env = create_test_env(pool).await;
+    let mut config = (*env.config).clone();
+    config
+        .dpu_config
+        .dpu_nic_firmware_reprovision_update_enabled = false;
+    config.firmware_global.autoupdate = false;
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(1);
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_percent = None;
+    let manager = MachineUpdateManager::new(
+        env.pool.clone(),
+        Arc::new(config),
+        env.test_meter.meter(),
+        env.api.work_lock_manager_handle.clone(),
+        None,
+        env.api.instrumentation.clone(),
+    );
+
+    let dpf = create_managed_host_multi_dpu(&env, 2).await;
+    let classic = create_managed_host(&env).await;
+    let unassigned = create_managed_host(&env).await;
+    let candidate = create_managed_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = dpf
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    classic
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let config_before =
+        serde_json::to_value(instance.db_instance(&mut env.db_reader()).await.config)?;
+
+    let owned = create_host_update_health_report_dpufw();
+    let unrelated = health_report::HealthReport::empty("test-unrelated".to_string());
+    let accepted = &env.config.dpu_config.dpu_nic_firmware_update_versions[0];
+    let mut txn = env.pool.txn_begin().await?;
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &dpf.id).await?;
+    db::machine::insert_health_report(&mut txn, &dpf.id, Merge, &unrelated, false).await?;
+    candidate.update_nic_firmware_version(&mut txn).await?;
+    for (host, version) in [
+        (&dpf, "0.0.0-from-bfb"),
+        (&classic, "0.0.0-wrong"),
+        (&unassigned, accepted.as_str()),
+    ] {
+        for dpu_id in &host.dpu_ids {
+            update_nic_firmware_version(&mut txn, dpu_id, version).await?;
+        }
+        db::machine::insert_health_report(&mut txn, &host.id, Merge, &owned, false).await?;
+    }
+    txn.commit().await?;
+
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+    manager.run_single_iteration().await?;
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_firmware_update_failures_total",
+            &[
+                ("target", "dpu_nic"),
+                ("cause", "wrong_version_after_update"),
+            ],
+        ),
+        1.0,
+    );
+    let snapshot = dpf.snapshot(&mut env.db_reader()).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        }
+    );
+    let reports = &snapshot.host_snapshot.health_reports.merges;
+    assert!(!reports.contains_key(HOST_UPDATE_HEALTH_REPORT_SOURCE));
+    assert_eq!(reports.get(&unrelated.source), Some(&unrelated));
+    assert_eq!(
+        serde_json::to_value(instance.db_instance(&mut env.db_reader()).await.config)?,
+        config_before
+    );
+    let marker = async |host: &TestManagedHost| {
+        let snapshot = host.snapshot(&mut env.db_reader()).await;
+        snapshot
+            .host_snapshot
+            .health_reports
+            .merges
+            .get(HOST_UPDATE_HEALTH_REPORT_SOURCE)
+            .cloned()
+    };
+    assert_eq!(marker(&classic).await, Some(owned));
+    assert_eq!(marker(&unassigned).await, None);
+
+    // The classic DPU now reports an accepted version. An operator separately marks the free host.
+    let operator =
+        create_host_update_health_report(Some("admin-cli".into()), "operator update".into(), false);
+    let mut txn = env.pool.txn_begin().await?;
+    update_nic_firmware_version(&mut txn, &classic.dpu().id, accepted).await?;
+    db::machine::insert_health_report(&mut txn, &unassigned.id, Merge, &operator, false).await?;
+    txn.commit().await?;
+    manager.run_single_iteration().await?;
+    assert_eq!(marker(&classic).await, None);
+    assert_eq!(marker(&unassigned).await, Some(operator));
+    assert!(
+        candidate
+            .dpu()
+            .db_machine(&mut env.db_reader())
+            .await
+            .reprovision_requested
+            .is_none(),
+        "disabled automatic updates must not schedule the outdated candidate"
+    );
+    Ok(())
 }

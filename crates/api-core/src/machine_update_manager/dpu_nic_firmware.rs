@@ -74,6 +74,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         &self,
         txn: &mut PgConnection,
     ) -> CarbideResult<HashSet<HostMachineId>> {
+        if !self
+            .config
+            .dpu_config
+            .dpu_nic_firmware_reprovision_update_enabled
+        {
+            return Ok(HashSet::new());
+        }
         let current_updating_machines =
             dpu_machine_update::get_reprovisioning_machines(txn).await?;
 
@@ -91,7 +98,12 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         updating_host_machines: &HashSet<HostMachineId>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>> {
-        if available_updates <= 0 {
+        if available_updates <= 0
+            || !self
+                .config
+                .dpu_config
+                .dpu_nic_firmware_reprovision_update_enabled
+        {
             return Ok(HashSet::new());
         }
         // A host can have several outdated DPUs but uses one update slot.
@@ -273,6 +285,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         pool: &sqlx::Pool<sqlx::Postgres>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
+        if !self
+            .config
+            .dpu_config
+            .dpu_nic_firmware_reprovision_update_enabled
+        {
+            return Ok(());
+        }
         let dpf_outdated = self.fetch_dpf_outdated().await;
         match DpuMachineUpdate::find_available_outdated_dpus(
             None,
@@ -324,23 +343,22 @@ impl DpuNicFirmwareUpdate {
         meter: opentelemetry::metrics::Meter,
         dpf: Option<Arc<dyn DpfOperations>>,
         instrumentation: carbide_instrument::Instrumentation,
-    ) -> Option<Self> {
-        if !config
+    ) -> Self {
+        let metrics = config
             .dpu_config
             .dpu_nic_firmware_reprovision_update_enabled
-        {
-            return None;
-        }
-
-        let mut metrics = DpuNicFirmwareUpdateMetrics::new();
-        metrics.register_callbacks(&meter);
-        Some(DpuNicFirmwareUpdate {
+            .then(|| {
+                let mut metrics = DpuNicFirmwareUpdateMetrics::new();
+                metrics.register_callbacks(&meter);
+                metrics
+            });
+        DpuNicFirmwareUpdate {
             instrumentation,
             reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
-            metrics: Some(metrics),
+            metrics,
             config,
             dpf,
-        })
+        }
     }
 
     pub(crate) async fn check_for_updates(
