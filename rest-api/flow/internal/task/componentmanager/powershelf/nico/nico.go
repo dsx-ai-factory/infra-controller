@@ -457,6 +457,7 @@ func (m *Manager) GetFirmwareStatusWithCredentials(
 		result[compID] = operations.FirmwareUpdateStatus{
 			ComponentID: compID,
 			State:       nicoprovider.MapFirmwareState(s.GetState()),
+			Error:       s.GetResult().GetError(),
 		}
 		if credentials != nil {
 			entry := result[compID]

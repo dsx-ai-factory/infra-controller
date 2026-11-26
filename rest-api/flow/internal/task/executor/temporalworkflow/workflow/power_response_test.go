@@ -4,17 +4,23 @@
 package workflow
 
 import (
-	activitypkg "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"errors"
+	"testing"
+	"time"
+
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
-	"testing"
-	"time"
+
+	activitypkg "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/message"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 func TestVerifyReachability(t *testing.T) {
@@ -112,6 +118,74 @@ func TestVerifyPowerStatus(t *testing.T) {
 			} else {
 				require.NoError(t, env.GetWorkflowError())
 			}
+		})
+	}
+	for _, tc := range []struct {
+		name        string
+		recoverRead bool
+		legacy      bool
+	}{
+		{name: "query error retained at timeout"},
+		{name: "legacy timeout retains query error", legacy: true},
+		{name: "successful read clears stale query error", recoverRead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			if tc.legacy {
+				env.OnGetVersion("power-status-poll-deadline", workflow.DefaultVersion, workflow.Version(1)).Return(workflow.DefaultVersion)
+			}
+			env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{Name: activitypkg.NameGetPowerStatus})
+			first := env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(nil, errors.New("BMC authentication\ndenied"))
+			if tc.recoverRead {
+				first.Once()
+				env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(map[string]operations.PowerStatus{"a": operations.PowerStatusOff}, nil)
+			}
+			env.ExecuteWorkflow(func(ctx workflow.Context) error {
+				ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Second, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
+				return verifyPowerStatus(ctx, common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"a"}}, "on", 2*time.Second, time.Second)
+			})
+			err := env.GetWorkflowError()
+			require.ErrorContains(t, err, "timeout")
+			if tc.recoverRead {
+				require.NotContains(t, err.Error(), "BMC authentication")
+			} else {
+				require.ErrorContains(t, err, "last status query failed")
+				require.Contains(t, message.ForFailure(err), "BMC authentication denied")
+			}
+			env.AssertExpectations(t)
+		})
+	}
+
+}
+
+func TestExecuteWaitBringUpAction(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		recoverRead bool
+	}{
+		{name: "query error retained at timeout"},
+		{name: "successful read clears stale query error", recoverRead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			env.RegisterActivityWithOptions(mockGetBringUpStatus, activity.RegisterOptions{Name: activitypkg.NameGetBringUpStatus})
+			first := env.OnActivity(mockGetBringUpStatus, mock.Anything, mock.Anything).Return(nil, errors.New("Core status service\nunavailable"))
+			if tc.recoverRead {
+				first.Once()
+				env.OnActivity(mockGetBringUpStatus, mock.Anything, mock.Anything).Return(&activitypkg.GetBringUpStatusResult{States: map[string]operations.MachineBringUpState{"a": operations.MachineBringUpStateMachineNotCreated}}, nil)
+			}
+			env.ExecuteWorkflow(func(ctx workflow.Context) error {
+				ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Second, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
+				return executeWaitBringUpAction(actionExecutionContext{workflowContext: ctx, target: common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"a"}}, config: operationrules.ActionConfig{Timeout: 2 * time.Second, PollInterval: time.Second}})
+			})
+			err := env.GetWorkflowError()
+			require.ErrorContains(t, err, "timed out waiting for compute bring-up")
+			if tc.recoverRead {
+				require.NotContains(t, err.Error(), "Core status service")
+			} else {
+				require.Contains(t, message.ForFailure(err), "Core status service unavailable")
+			}
+			env.AssertExpectations(t)
 		})
 	}
 }
