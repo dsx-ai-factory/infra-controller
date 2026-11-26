@@ -1424,7 +1424,7 @@ mod tests {
         let req = mbrpc::AddMeasurementTrustedMachineRequest {
             machine_id: princess_network.machine_id.to_string(),
             approval_type: mbrpc::MeasurementApprovedTypePb::Oneshot.into(),
-            pcr_registers: String::from("0-1"),
+            pcr_registers: String::new(),
             comments: String::from(""),
         };
         let resp = site::handle_add_measurement_trusted_machine(api, req).await?;
@@ -1434,6 +1434,15 @@ mod tests {
             princess_network.machine_id.to_string(),
             machine_approval.machine_id
         );
+
+        // Omitted protobuf strings must persist as NULL, selecting every PCR.
+        let stored_approval = db::measured_boot::interface::site::get_approval_for_machine_id(
+            &api.database_connection,
+            TrustedMachineId::MachineId(princess_network.machine_id),
+        )
+        .await?
+        .expect("machine approval persisted");
+        assert_eq!(stored_approval.pcr_registers, None);
 
         // List trusted machine approvals.
         let req = mbrpc::ListMeasurementTrustedMachinesRequest {};
@@ -1508,9 +1517,11 @@ mod tests {
         let resp = bundle::handle_show_measurement_bundle(api, req).await?;
         assert!(resp.bundle.is_some());
         let auto_bundle = resp.bundle.unwrap();
-        assert_eq!(2, auto_bundle.values.len());
+        assert_eq!(4, auto_bundle.values.len());
         assert_eq!("ww".to_string(), auto_bundle.values[0].sha_any);
         assert_eq!("xx".to_string(), auto_bundle.values[1].sha_any);
+        assert_eq!("yy".to_string(), auto_bundle.values[2].sha_any);
+        assert_eq!("zz".to_string(), auto_bundle.values[3].sha_any);
 
         // And that the machine is measured.
         let req = mbrpc::ShowCandidateMachineRequest {
@@ -1641,6 +1652,33 @@ mod tests {
         let resp = site::handle_list_measurement_trusted_profiles(api, req).await?;
         assert_eq!(0, resp.approval_records.len());
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn trusted_machine_approval_rejects_invalid_pcr_selector_before_persistence(
+        db_conn: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let env = create_test_env(db_conn).await;
+        let api = &env.api;
+        let error = site::handle_add_measurement_trusted_machine(
+            api,
+            mbrpc::AddMeasurementTrustedMachineRequest {
+                machine_id: "*".to_string(),
+                approval_type: mbrpc::MeasurementApprovedTypePb::Oneshot.into(),
+                pcr_registers: "0,seven".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a nonempty malformed selector must fail at creation");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            db::measured_boot::interface::site::get_approved_machines(&api.database_connection,)
+                .await?
+                .is_empty(),
+            "invalid input must not leave an approval for later reports"
+        );
         Ok(())
     }
 
@@ -2010,6 +2048,16 @@ mod tests {
             },
         ];
 
+        // Simulate the empty selector stored by older trusted-machine writers.
+        // Earlier reports still prove explicit-subset behavior; this report
+        // must promote all PCRs through the same wildcard approval.
+        let updated = sqlx::query(
+            "UPDATE measurement_approved_machines SET pcr_registers = '' WHERE machine_id = '*'",
+        )
+        .execute(&api.database_connection)
+        .await?;
+        assert_eq!(updated.rows_affected(), 1);
+
         let req = mbrpc::CreateMeasurementReportRequest {
             machine_id: lime_coconut.machine_id.to_string(),
             pcr_values: convert_vec(lime_values),
@@ -2042,9 +2090,10 @@ mod tests {
 
         // bundles[2] is the lime bundle.
         let lime_bundle = &resp.bundles[2];
-        assert_eq!(8, lime_bundle.values.len());
+        assert_eq!(11, lime_bundle.values.len());
         assert_eq!("kk".to_string(), lime_bundle.values[0].sha_any);
-        assert_eq!("ss".to_string(), lime_bundle.values[7].sha_any);
+        assert_eq!("rr".to_string(), lime_bundle.values[7].sha_any);
+        assert_eq!("uu".to_string(), lime_bundle.values[10].sha_any);
 
         // And make sure the machines are measured.
         let req = mbrpc::ShowCandidateMachineRequest {

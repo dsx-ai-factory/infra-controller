@@ -350,46 +350,34 @@ async fn maybe_auto_approve_machine(
     txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
 ) -> DatabaseResult<bool> {
-    match get_approval_for_machine_id(&mut *txn, TrustedMachineId::MachineId(report.machine_id))
-        .await?
+    let approval = match get_approval_for_machine_id(
+        &mut *txn,
+        TrustedMachineId::MachineId(report.machine_id),
+    )
+    .await?
     {
-        Some(approval) => {
-            let pcr_set = match approval.pcr_registers {
-                Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),
-                None => None,
-            };
-            let _ = create_active_bundle(txn, report, &pcr_set).await?;
+        Some(approval) => Some(approval),
+        None => get_approval_for_machine_id(&mut *txn, TrustedMachineId::Any).await?,
+    };
+    let Some(approval) = approval else {
+        return Ok(false);
+    };
 
-            // If this is a oneshot approval, then remove the approval
-            // entry after this automatic journal promotion.
-            if approval.approval_type == MeasurementApprovedType::Oneshot {
-                remove_from_approved_machines_by_approval_id(txn, approval.approval_id).await?;
-            }
-            Ok(true)
-        }
-        // If there's no matching approval for the specific machine ID,
-        // then check to see if there's a "permissive" approval for all
-        // machines (which is just a "*"). The permissive approval still
-        // has the same rules as a machine-specific approval (oneshot vs.
-        // persist, PCR subset limits, etc).
-        None => match get_approval_for_machine_id(&mut *txn, TrustedMachineId::Any).await? {
-            Some(approval) => {
-                let pcr_set = match approval.pcr_registers {
-                    Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),
-                    None => None,
-                };
-                let _ = create_active_bundle(txn, report, &pcr_set).await?;
+    // Existing approvals can contain an empty selector for all PCRs.
+    let pcr_set = match approval
+        .pcr_registers
+        .filter(|selector| !selector.is_empty())
+    {
+        Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),
+        None => None,
+    };
+    let _ = create_active_bundle(txn, report, &pcr_set).await?;
 
-                // If this is a oneshot approval, then remove the approval
-                // entry after this automatic journal promotion.
-                if approval.approval_type == MeasurementApprovedType::Oneshot {
-                    remove_from_approved_machines_by_approval_id(txn, approval.approval_id).await?;
-                }
-                Ok(true)
-            }
-            None => Ok(false),
-        },
+    // Consume a oneshot approval only after its report was promoted.
+    if approval.approval_type == MeasurementApprovedType::Oneshot {
+        remove_from_approved_machines_by_approval_id(txn, approval.approval_id).await?;
     }
+    Ok(true)
 }
 
 /// maybe_auto_approve_profile will check to see if an auto-approve config
