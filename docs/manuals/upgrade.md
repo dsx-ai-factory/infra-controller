@@ -207,14 +207,12 @@ cd helm-prereqs/
 source ./preflight.sh
 ```
 
-Fix all errors before proceeding. On DPF sites, registration of a new DPUDevice
-remains blocked until the site-wide BMC root is available from the configured
-credential sources and the 60-second refresh publishes the derived
-current-version `bmc-shared-password` Secret. NICo retains an existing Secret,
-but does not infer startup readiness from that retained value. This does not
-prevent a `local_first` or `backend` Core rollout; Core starts and retries the
-source. Authoritative `local` mode requires version 0 before Core starts when
-v0 is current or the current target cannot be resolved.
+Fix all errors before proceeding. On DPF sites, DPUDevice registration that
+uses the shared password requires `bmc-shared-password`. In `local_first` or
+`backend` mode, Core can start before the site-wide BMC root is available.
+Core retries publication every 60 seconds until the shared Secret exists.
+Authoritative `local` mode requires version 0 before Core starts when v0 is
+current or the current target cannot be resolved.
 
 ### DPF BMC root ownership on upgrade
 
@@ -250,19 +248,14 @@ resolved. A target at version 1 or later does not require local v0 before
 startup. This prevents a rolling update from activating local ownership while
 an older replica can still register a DPU that uses the shared credential. A
 transient rotation-target read failure does not block startup when local v0 is
-present. After NICo accepts local v0, removing it retains the last accepted
-shared Secret and logs an error until the original value is restored.
-The default pinned DPF v26.4.0 does not support BMC credential rotation;
-adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). If the rotation
-target is already version 1 or later, the local
+present. If the local v0 entry is lost, restore the original value.
+If the rotation target is already version 1 or later, the local
 version 0 entry does not become current. If devices still use version 0, keep
 the copied local value unchanged after this ownership migration; later password
 changes must use coordinated BMC rotation so hardware and convergence records
-advance together. Do not stage that rotation while DPF manages any DPU: its
-single shared BMC Secret cannot authenticate a mixed-version fleet. DPF
-credential rotation is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). See
+advance together. On DPF sites, meet the
+[shared credential rotation prerequisites](dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+before staging a new target. See
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
@@ -706,7 +699,9 @@ You can narrow an upgrade to particular components with the `--skip-*` flags. `-
 
 The prerequisite phases therefore run on every invocation. That is by design and is cheap: each one is idempotent, and a phase whose inputs have not changed reconciles to the same state and exits quickly.
 
-To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Update both together when moving to a new revision. Run from the **repository root**, matching what `setup.sh` itself executes:
+### Core-only Helm upgrade
+
+To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision. Update both together when moving to a new revision. Substitute your complete site-specific Core values file for the example path and run from the **repository root**. See the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration).
 
 ```bash
 helm upgrade --install nico ./helm \
@@ -720,8 +715,10 @@ helm upgrade --install nico ./helm \
 <Warning>
 This skips the MetalLB CRD handling, DPF management, the `imagepullsecret` upsert the migration Job depends on, and the other prereq phases. Only do this when you are certain those components do not need updating.
 
-**Do not use this command unchanged on a DPF-enabled site**. It omits the
-rendered `[dpf]` block and `nico-api.dpf.rbacCreate=true` values that `setup.sh`
-adds to the single Core deployment. From the repository root, use
-`helm-prereqs/setup.sh -y --skip-rest` instead.
+For a separately managed DPF installation, preserve `[dpf].enabled = true`,
+the existing credential source settings and mounts, and
+`nico-api.dpf.rbacCreate=true` when the Core chart manages the DPF RBAC.
+This Helm upgrade leaves the installed DPF operator release in place.
+The `setup.sh -y --skip-rest` reference workflow still runs phase 5b and
+applies its pinned DPF chart and operator image.
 </Warning>

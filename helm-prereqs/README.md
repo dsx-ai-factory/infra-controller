@@ -870,10 +870,10 @@ under the default `nico-api.credentials.bmcSiteWideRootSource: local_first`.
 Set each password to the value in use, or leave `siteCredentials` disabled and
 keep the credentials where they are.
 
-The DPF bootstrap is unchanged: `NICO_DPF_BMC_ROOT_PASSWORD` still seeds the
-watched version-0 Secret, with the same rules as on a Vault site. Per-DPU
-credential delivery remains tracked in
-[#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147).
+On a Vault-free site, `NICO_DPF_BMC_ROOT_PASSWORD` seeds the watched version-0
+Secret using the same rules as on a Vault-backed site. See
+[DPF BMC credential rotation](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+for per-DPU Secrets and shared credential retention.
 
 ### Admin CLI credential without Vault
 
@@ -1548,9 +1548,8 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    initializes the BFB, DPUFlavor, and DPUDeployment during that deployment.
    The `nico-api-dpf` Role is created via `nico-api.dpf.rbacCreate=true`. The API
    and DPF initialization on a fresh site succeed without the site-wide BMC root
-   in `local_first` or `backend` mode; once it is available, the 60-second
-   refresh writes the derived current-version `bmc-shared-password` Secret
-   without a restart. Authoritative `local` mode requires version 0 before
+   in `local_first` or `backend` mode. Core retries every 60 seconds until
+   it publishes `bmc-shared-password`. Authoritative `local` mode requires version 0 before
    startup when v0 is current or the current target cannot be resolved.
 
 Requirements (unless `--skip-dpf`): `envsubst` on the machine running setup,
@@ -1653,9 +1652,9 @@ higher precedence, `bmc_site_wide_root` is authoritative over the same
 unversioned entry in Vault or Postgres. API add/delete operations for version 0
 are rejected in this mode, and a Vault import excludes that path. Use
 coordinated BMC rotation to advance to version 1 or later in the persistent
-backend. Do not stage that rotation while DPF manages any DPU: the shared DPF
-Secret cannot authenticate devices split between old and new passwords during
-convergence; see [#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+backend. On DPF sites, follow the
+[shared credential rotation procedure](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+before staging a new target.
 The file schema has no versioned BMC root key. Use a Secret, not a ConfigMap,
 for this credential. See
 [Credential Sources](../docs/configuration/credential-sources.md) for precedence
@@ -1663,19 +1662,13 @@ and mutation behavior.
 
 With DPF enabled, local mode requires the local v0 entry before Core starts on
 fresh and existing sites whenever v0 is current or the current target cannot be
-resolved. `local_first` and `backend` may start while the credential is absent;
-new DPU registration then retries until the credential is accepted and
-`dpf-operator-system/bmc-shared-password` is published. On a
-transient rotation-target read failure, a present local v0 permits startup and
-retry. After
-NICo accepts local v0, losing the entry retains the last accepted shared Secret
-and logs an error; restore the unchanged value. The default pinned DPF v26.4.0
-does not support BMC credential rotation, so NICo retains the shared Secret.
-Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other missing
-current BMC rotation targets follow the same retention rule. During background
-refresh, a transient source-read failure retains the last published Secret and
-is retried.
+resolved. `local_first` and `backend` may start while the credential is absent.
+Registration that uses the shared password waits for
+`dpf-operator-system/bmc-shared-password`. On a transient rotation-target read
+failure, a present local v0 permits startup and retry. NICo creates the shared
+Secret once and keeps its value. If the local v0 entry is lost, restore the
+original value. For rotation, follow the
+[DPF shared credential rotation](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret).
 
 Each `setup.sh` run removes the obsolete `dpf-set-bmc-root` Job and its
 `dpf-bmc-root-pw` and `dpf-admincli-cert` Secrets before installing DPF. This

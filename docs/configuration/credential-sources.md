@@ -103,11 +103,9 @@ read source does not update BMC hardware or credential-convergence records.
 Instead, use
 [`credential rotate --type=bmc`](../manuals/nico-admin-cli/commands/credential/credential-rotate.md)
 to stage version 1 or later in the persistent backend and converge devices. On
-DPF sites, do not stage that rotation: NICo's default pinned DPF v26.4.0 and
-current integration use one shared Secret and cannot authenticate a fleet split
-between old and new passwords during convergence. Adopting and validating DPF
-credential rotation is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
+DPF sites, meet the
+[shared credential rotation prerequisites](../manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+before staging a new target.
 
 ## Environment Source
 
@@ -190,21 +188,15 @@ restarting NICo. Do not change it after a managed device begins using version 0;
 use coordinated BMC rotation to advance to a backend-managed version instead.
 On a DPF site, `local` mode requires v0 before Core starts whenever v0 is
 current or the target cannot be resolved. `local_first` and `backend` mode may
-start while their credential is absent; new DPU registration then retries until
-the credential is accepted and the shared Secret is published.
-After NICo has accepted local v0, losing it retains the last accepted
-shared Secret and logs an error; restore the unchanged local value. The
-default pinned DPF v26.4.0 does not support BMC credential rotation, so NICo
-retains the shared Secret. Adopting and validating supporting DPF behavior is tracked by
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
-BMC rotation targets follow the same retention rule when absent from their
-authoritative source. During background refresh, a transient source-read
-failure retains the last published Secret and is retried.
-On DPF sites, do not rotate while DPF manages any DPU; see
-[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Use a Secret,
-not a ConfigMap, for credential material. Once rotation advances the target to
-version 1 or later, NICo reads that versioned credential from a persistent
-backend because the local-file schema has no versioned BMC root key.
+start while their credential is absent. Registration that uses the shared
+password waits until NICo publishes the shared Secret. Once created, the
+shared Secret retains its original value. If the local v0 entry is lost,
+restore the original value. Meet the
+[shared credential rotation prerequisites](../manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+before staging a new target. Use a Kubernetes Secret for credential material.
+Once rotation advances the target to version 1 or later, NICo reads that
+versioned credential from a persistent backend because the local-file schema
+has no versioned BMC root key.
 
 ### Legacy Variables
 

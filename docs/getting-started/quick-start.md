@@ -813,8 +813,8 @@ Site Explorer requires all three — the site-wide BMC root and both the `host`
 and `dpu` UEFI site defaults. It checks them before contacting any BMC and fails
 each iteration with `MissingCredentials` while any one is missing.
 
-When DPF is enabled, the site-wide BMC root credential is also mirrored into the
-DPF `bmc-shared-password` Secret; refer to
+When DPF is enabled, NICo uses the site-wide BMC root credential to create the
+DPF `bmc-shared-password` Secret once. See
 [Set the site-wide BMC root credential](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
 for the DPF-specific details and for how to provide version 0 through a watched
 Kubernetes Secret before installation.
