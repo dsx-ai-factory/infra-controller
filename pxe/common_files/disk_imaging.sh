@@ -1093,8 +1093,33 @@ function write_console_dropin() {
 	mkdir -p "$root/etc/default/grub.d" || return 1
 	cat > "$root/etc/default/grub.d/zz-nke-imager-console.cfg" <<EOF
 # Installed by qcow-imager; regenerate grub.cfg after changing this file.
-GRUB_CMDLINE_LINUX="\$(printf '%s\n' "\${GRUB_CMDLINE_LINUX:-}" | sed -E 's/(^|[[:space:]])console=[^[:space:]]+/\\1console=$os_console,115200/g; /(^|[[:space:]])console=/!s/$/ console=$os_console,115200/')"
-GRUB_CMDLINE_LINUX_DEFAULT="\$(printf '%s\n' "\${GRUB_CMDLINE_LINUX_DEFAULT:-}" | sed -E 's/(^|[[:space:]])console=[^[:space:]]+/\\1console=$os_console,115200/g')"
+nke_imager_console() {
+	printf '%s\n' "\$1" | awk -v console="$os_console,115200" -v append="\$2" '
+	{
+		rest = \$0
+		found = 0
+		# Keep quoted values within their argument, including embedded spaces.
+		while (match(rest, /^([[:space:]]+|([^[:space:]"]|"[^"]*")+)/)) {
+			arg = substr(rest, 1, RLENGTH)
+			rest = substr(rest, RLENGTH + 1)
+			value = arg
+			sub(/^"/, "", value)
+			sub(/"$/, "", value)
+			sub(/^console="/, "console=", value)
+			if (value ~ /^console=tty(S|AMA)[0-9]+(,[^"]*)?$/) {
+				arg = "console=" console
+				found = 1
+			}
+			printf "%s", arg
+		}
+		printf "%s", rest
+		if (append && !found) printf " console=%s", console
+		printf "\n"
+	}'
+}
+GRUB_CMDLINE_LINUX="\$(nke_imager_console "\${GRUB_CMDLINE_LINUX:-}" 1)"
+GRUB_CMDLINE_LINUX_DEFAULT="\$(nke_imager_console "\${GRUB_CMDLINE_LINUX_DEFAULT:-}" 0)"
+unset -f nke_imager_console
 EOF
 }
 
