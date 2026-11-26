@@ -1104,7 +1104,10 @@ function modify_grub_template() {
 				if [ -z "$cmdline_found" ]; then
 					# ensure console is set
 					echo -n "GRUB_CMDLINE_LINUX=\"" >> $new_grub_template
-					cmdline_args=$(echo $tmp | sed s/GRUB_CMDLINE_LINUX=//g | sed s/^\"//g | sed s/\"$//g)
+					# Strip the assignment prefix
+					cmdline_args=${tmp#*GRUB_CMDLINE_LINUX=}
+					cmdline_args=${cmdline_args#\"}
+					cmdline_args=${cmdline_args%\"}
 					for i in $(echo $cmdline_args); do
 						kernel_arg=$(echo $i|grep console)
 						if [ ! -z "$kernel_arg" ]; then

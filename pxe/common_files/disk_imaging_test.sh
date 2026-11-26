@@ -866,6 +866,26 @@ assert_eq "override source" "override" "$boot_part_source"
 assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
 bootfs_uuid=
 
+echo "modify_grub_template: preserves ordinary and exported kernel assignments"
+(
+	grub_root="$temp_dir/grub-root"
+	mkdir -p "$grub_root/etc/default"
+	grub_function=$(declare -f modify_grub_template)
+	eval "${grub_function//\/mnt/$grub_root}"
+	serial_port=ttyS0
+	serial_port_num=0
+	for assignment_prefix in '' 'export '; do
+		grub_file="$grub_root/etc/default/grub"
+		printf '%s\n' "${assignment_prefix}GRUB_CMDLINE_LINUX=\"loglevel=3\"" >"$grub_file"
+		bash -n "$grub_file" || fail "GRUB input is not valid shell"
+		modify_grub_template
+		bash -n "$grub_file" || fail "rewritten ${assignment_prefix}assignment is not valid shell"
+		assert_eq "${assignment_prefix}kernel assignment" \
+			'GRUB_CMDLINE_LINUX="loglevel=3 console=tty0 console=ttyS0,115200"' \
+			"$(grep '^GRUB_CMDLINE_LINUX=' "$grub_file")"
+	done
+) || fail "GRUB assignment rewrite failed"
+
 echo "verify_sha: accepts a matching digest for every supported length"
 probe_file="$temp_dir/probe.bin"
 printf 'probe data\n' >"$probe_file"
