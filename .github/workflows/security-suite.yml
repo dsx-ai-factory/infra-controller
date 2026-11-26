@@ -28,7 +28,7 @@ jobs:
       contents: read
       id-token: write  # OIDC -> Vault -> nvcr.io
       security-events: write
-    uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@c736f0454dc99764a66af6b906adfcdfbf621985  # v0.4.0
+    uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@d8189f3176942de7ffe2c48bcd7bb5fbdee2dd15  # v0.6.0
     with:
       enable-secret-scan: true
       enable-sast-scan: true
