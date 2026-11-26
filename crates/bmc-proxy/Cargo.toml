@@ -32,6 +32,7 @@ carbide-instrument = { path = "../instrument" }
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 carbide-authn = { path = "../authn" }
+carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-version = { path = "../version" }
 carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }

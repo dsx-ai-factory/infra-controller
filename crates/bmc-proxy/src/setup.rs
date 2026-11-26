@@ -211,8 +211,19 @@ fn should_accept_span_or_event(metadata: &tracing::Metadata<'_>) -> bool {
 }
 
 pub(crate) fn setup_metrics() -> SetupResult<MetricsSetup> {
-    metrics_endpoint::new_metrics_setup("carbide-bmc-proxy", "carbide-system", true)
-        .map_err(|e| SetupError::Metrics(e.to_string()))
+    new_metrics_setup(true)
+}
+
+fn new_metrics_setup(set_global_meter: bool) -> SetupResult<MetricsSetup> {
+    let views = crate::metrics::upstream_budget_histogram_views()
+        .map_err(|e| SetupError::Metrics(e.to_string()))?;
+    metrics_endpoint::new_metrics_setup_with_views(
+        "carbide-bmc-proxy",
+        "carbide-system",
+        set_global_meter,
+        views,
+    )
+    .map_err(|e| SetupError::Metrics(e.to_string()))
 }
 
 fn dep_log_filter(env_filter: EnvFilter) -> EnvFilter {
@@ -450,11 +461,68 @@ mod tests {
         // carbide_instrument::testing) owns instrument bindings for this
         // binary's event tests, and swapping the global provider mid-run
         // would steal first-emit bindings from them.
-        let setup =
-            metrics_endpoint::new_metrics_setup("carbide-bmc-proxy", "carbide-system", false)
-                .expect("metrics setup succeeds");
+        let setup = new_metrics_setup(false).expect("metrics setup succeeds");
 
         assert!(setup.health_controller.is_ready());
         assert!(setup.health_controller.is_healthy());
+    }
+
+    #[test]
+    fn upstream_budget_histograms_resolve_slow_requests_and_uploads() {
+        let setup = new_metrics_setup(false).expect("metrics setup succeeds");
+        for name in [
+            "carbide_bmc_proxy_upstream_request_duration",
+            "carbide_bmc_proxy_admission_wait",
+        ] {
+            let histogram = setup.meter.f64_histogram(name).with_unit("ms").build();
+            for milliseconds in [45_000.0, 10_800_000.0] {
+                histogram.record(milliseconds, &[]);
+            }
+        }
+        let families = setup.registry.gather();
+
+        let default_buckets: Vec<_> = [
+            0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
+            7500.0, 10000.0,
+        ]
+        .into_iter()
+        .map(|boundary| (boundary, 0))
+        .collect();
+        let mut slot_wait_buckets = default_buckets;
+        slot_wait_buckets.extend([
+            (15000.0, 0),
+            (30000.0, 0),
+            (60000.0, 1),
+            (120000.0, 1),
+            (300000.0, 1),
+            (600000.0, 1),
+            (1200000.0, 1),
+            (1800000.0, 1),
+        ]);
+        let mut upstream_request_buckets = slot_wait_buckets.clone();
+        upstream_request_buckets.extend([(3600000.0, 1), (7200000.0, 1), (14400000.0, 2)]);
+
+        value_scenarios!(
+            run = |exported_name: &str| {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == exported_name)
+                    .unwrap_or_else(|| panic!("missing {exported_name} histogram"));
+                family.get_metric()[0]
+                    .get_histogram()
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                    .collect::<Vec<_>>()
+            };
+            "a forwarded request resolves through the four-hour upload cap" {
+                "carbide_bmc_proxy_upstream_request_duration_milliseconds" =>
+                    upstream_request_buckets.clone(),
+            }
+
+            "a slot wait resolves through the 30-minute class budget" {
+                "carbide_bmc_proxy_admission_wait_milliseconds" => slot_wait_buckets.clone(),
+            }
+        );
     }
 }

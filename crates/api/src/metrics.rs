@@ -51,6 +51,7 @@ pub fn setup_metrics() -> eyre::Result<MetricsSetup> {
         .with_view(admission_duration_histogram_view()?)
         .with_view(time_in_state_histogram_view()?)
         .with_view(handler_latency_histogram_view()?)
+        .with_view(grpc_server_duration_histogram_view()?)
         .with_view(retry_histogram_view("*_attempts_*")?)
         .with_view(retry_histogram_view("*_retries_*")?)
         .with_view(ApiMetricsEmitter::machine_reboot_duration_view()?)
@@ -113,7 +114,7 @@ fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView
 /// Configures a View for the state controllers' `*_time_in_state` histograms, which
 /// record seconds. Objects can wait hours or days in one state, beyond the last default
 /// boundary of 10000. The default boundaries are kept so existing `le` series remain,
-/// with larger ones appended up to 7 days.
+/// with larger ones appended up to 90 days.
 fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
     carbide_metrics_utils::new_view(
         "carbide_*_time_in_state",
@@ -121,12 +122,20 @@ fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
         opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
             boundaries: vec![
                 0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
-                5000.0, 7500.0, 10000.0, 14400.0, 28800.0, 86400.0, 259200.0, 604800.0,
+                5000.0, 7500.0, 10000.0, 14400.0, 28800.0, 86400.0, 259200.0, 604800.0, 1209600.0,
+                2592000.0, 7776000.0,
             ],
             record_min_max: true,
         },
     )
 }
+
+/// OpenTelemetry's default millisecond boundaries, kept so existing `le` series remain,
+/// extended to five minutes.
+const FIVE_MINUTE_LATENCY_BOUNDARIES_MS: [f64; 21] = [
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
+    10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
+];
 
 /// Keeps existing millisecond buckets and resolves handlers through the default
 /// three-minute handling budget, with headroom up to five minutes.
@@ -135,10 +144,19 @@ fn handler_latency_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
         "carbide_*_handler_latency_in_state",
         Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
         opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
-            boundaries: vec![
-                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
-                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
-            ],
+            boundaries: FIVE_MINUTE_LATENCY_BOUNDARIES_MS.to_vec(),
+            record_min_max: true,
+        },
+    )
+}
+
+/// Resolves gRPC requests through admission's default five-minute execution limit.
+fn grpc_server_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
+    carbide_metrics_utils::new_view(
+        "carbide-api.grpc.server.duration",
+        Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
+        opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+            boundaries: FIVE_MINUTE_LATENCY_BOUNDARIES_MS.to_vec(),
             record_min_max: true,
         },
     )
@@ -564,16 +582,30 @@ mod tests {
             [
                 Check {
                     scenario: "handler latency covers slow calls and the handling budget",
-                    input: "carbide_power_shelves_handler_latency_in_state",
+                    input: (
+                        "carbide_power_shelves_handler_latency_in_state",
+                        "carbide_power_shelves_handler_latency_in_state_milliseconds",
+                    ),
+                    expect: handler_buckets.clone(),
+                },
+                Check {
+                    scenario: "gRPC server duration covers the admission execution limit",
+                    input: (
+                        "carbide-api.grpc.server.duration",
+                        "carbide_api_grpc_server_duration_milliseconds",
+                    ),
                     expect: handler_buckets,
                 },
                 Check {
                     scenario: "unrelated controller latency keeps default buckets",
-                    input: "carbide_power_shelves_iteration_latency",
+                    input: (
+                        "carbide_power_shelves_iteration_latency",
+                        "carbide_power_shelves_iteration_latency_milliseconds",
+                    ),
                     expect: default_buckets,
                 },
             ],
-            |name| {
+            |(name, exported_name)| {
                 let registry = prometheus::Registry::new();
                 let exporter = opentelemetry_prometheus::exporter()
                     .with_registry(registry.clone())
@@ -584,6 +616,7 @@ mod tests {
                 let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
                     .with_reader(exporter)
                     .with_view(handler_latency_histogram_view().unwrap())
+                    .with_view(grpc_server_duration_histogram_view().unwrap())
                     .build();
                 let histogram = provider
                     .meter("test")
@@ -595,11 +628,10 @@ mod tests {
                 }
 
                 let families = registry.gather();
-                let exported_name = format!("{name}_milliseconds");
                 let family = families
                     .iter()
                     .find(|family| family.name() == exported_name)
-                    .unwrap();
+                    .unwrap_or_else(|| panic!("{name}: missing {exported_name} histogram"));
                 let histogram = family.get_metric()[0].get_histogram();
                 assert_eq!(histogram.get_sample_count(), 4, "{name}: count");
                 assert_eq!(histogram.get_sample_sum(), 440050.0, "{name}: sum");
@@ -626,13 +658,15 @@ mod tests {
             .with_view(time_in_state_histogram_view().unwrap())
             .with_view(handler_latency_histogram_view().unwrap())
             .build();
-        // Two days, past the last default boundary of 10000.
-        provider
+        let histogram = provider
             .meter("test")
             .f64_histogram("carbide_machines_time_in_state")
             .with_unit("s")
-            .build()
-            .record(172800.0, &[]);
+            .build();
+        // Two days and twelve days, past the default 10000 and past one week.
+        for seconds in [172800.0, 1036800.0] {
+            histogram.record(seconds, &[]);
+        }
 
         let mut buffer = vec![];
         TextEncoder::new()
@@ -640,8 +674,17 @@ mod tests {
             .unwrap();
         let encoded = String::from_utf8(buffer).unwrap();
 
-        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"10000\"} 0"));
-        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"86400\"} 0"));
-        assert!(encoded.contains("carbide_machines_time_in_state_seconds_bucket{le=\"259200\"} 1"));
+        for (le, count) in [
+            ("10000", 0),
+            ("86400", 0),
+            ("259200", 1),
+            ("604800", 1),
+            ("1209600", 2),
+            ("7776000", 2),
+        ] {
+            let sample =
+                format!("carbide_machines_time_in_state_seconds_bucket{{le=\"{le}\"}} {count}");
+            assert!(encoded.contains(&sample), "missing {sample}");
+        }
     }
 }

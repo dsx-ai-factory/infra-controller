@@ -24,9 +24,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue, MetricFamily};
+use carbide_metrics_utils::OtelView;
 use http::Method;
 use metrics_endpoint::{MetricsEndpointConfig, MetricsSetup};
 use opentelemetry::StringValue;
+use opentelemetry_sdk::metrics::{Aggregation, InstrumentKind};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -497,6 +499,40 @@ pub(crate) struct UpstreamRequestCompleted {
     pub(crate) status: UpstreamStatus,
     #[observation]
     pub(crate) took: Duration,
+}
+
+/// OpenTelemetry's default millisecond boundaries, kept so existing `le` series remain,
+/// extended to the 30-minute maximum class budget, which bounds a slot wait.
+const SLOT_WAIT_BOUNDARIES_MS: [f64; 23] = [
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
+    10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0, 600000.0, 1200000.0, 1800000.0,
+];
+
+/// Extended to four hours, the cap on a streamed upload's timeout.
+const UPSTREAM_REQUEST_BOUNDARIES_MS: [f64; 26] = [
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
+    10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0, 600000.0, 1200000.0, 1800000.0,
+    3600000.0, 7200000.0, 14400000.0,
+];
+
+pub(crate) fn upstream_budget_histogram_views() -> carbide_metrics_utils::Result<[OtelView; 2]> {
+    let view = |name, boundaries: &[f64]| {
+        carbide_metrics_utils::new_view(
+            name,
+            Some(InstrumentKind::Histogram),
+            Aggregation::ExplicitBucketHistogram {
+                boundaries: boundaries.to_vec(),
+                record_min_max: true,
+            },
+        )
+    };
+    Ok([
+        view(
+            "carbide_bmc_proxy_upstream_request_duration",
+            &UPSTREAM_REQUEST_BOUNDARIES_MS,
+        )?,
+        view("carbide_bmc_proxy_admission_wait", &SLOT_WAIT_BOUNDARIES_MS)?,
+    ])
 }
 
 #[cfg(test)]
