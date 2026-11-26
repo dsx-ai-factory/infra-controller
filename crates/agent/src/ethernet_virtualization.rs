@@ -2259,7 +2259,8 @@ impl From<nvue_client::types::MacTableEntry> for Fdb {
         Self {
             mac,
             ifname: interface,
-            state: entry_type,
+            // A missing `entry-type` is a dynamic (locally learned) entry.
+            state: entry_type.unwrap_or_default(),
             vlan,
         }
     }
@@ -7831,6 +7832,24 @@ esac
             .wrap_err_with(|| format!("failed reading {dhcp_path:?}"))?;
         assert_eq!(dhcp_contents, crate::dhcp::TMPL_EMPTY);
         Ok(())
+    }
+
+    #[test]
+    fn nvue_mac_table_without_entry_type_is_kept_as_dynamic() {
+        let entry = |mac: &str, entry_type: Option<&str>| nvue_client::types::MacTableEntry {
+            mac: mac.to_string(),
+            interface: "pf0hpf_if".to_string(),
+            entry_type: entry_type.map(str::to_string),
+            vlan: Some(111),
+        };
+        let out = super::vlan_fdb_map_from_nvue_mac_table(vec![
+            entry("66:d0:c4:dc:8f:b9", None),
+            entry("aa:bb:cc:dd:ee:ff", Some("permanent")),
+        ]);
+        let vlan = out.get(&111).expect("VLAN 111 should have entries");
+        assert_eq!(vlan.len(), 1);
+        assert_eq!(vlan[0].mac, "66:d0:c4:dc:8f:b9");
+        assert!(!vlan[0].is_permanent());
     }
 
     #[test]

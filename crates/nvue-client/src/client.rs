@@ -511,10 +511,35 @@ impl NvueClient {
         let builder = self.request(Method::GET, &path)?;
         let request = builder.build()?;
         let response = self.execute("bridge_mac_table", request).await?;
-        let resonse_body: BTreeMap<String, _> = response.json().await?;
-        let response = resonse_body.into_values().collect();
-        Ok(response)
+        let response_body: BTreeMap<String, JsonValue> = response.json().await?;
+        Ok(decode_mac_table_entries(response_body))
     }
+}
+
+/// Decodes NVUE MAC-table entries one at a time, so that a single entry with an
+/// unexpected shape does not make the whole table (and the caller's status
+/// report) fail.
+fn decode_mac_table_entries(
+    response_body: BTreeMap<String, JsonValue>,
+) -> Vec<crate::types::MacTableEntry> {
+    let mut skipped = 0usize;
+    let entries: Vec<_> = response_body
+        .into_iter()
+        .filter_map(|(entry_id, value)| {
+            match serde_json::from_value::<crate::types::MacTableEntry>(value) {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    skipped += 1;
+                    tracing::warn!(%entry_id, %error, "skipping undecodable NVUE MAC-table entry");
+                    None
+                }
+            }
+        })
+        .collect();
+    if skipped > 0 {
+        tracing::warn!(skipped, "skipped undecodable NVUE MAC-table entries");
+    }
+    entries
 }
 
 fn append_filter_query_pairs(request: &mut reqwest::Request, filter: &FieldFilter) {
@@ -1047,6 +1072,70 @@ mod tests {
                 "GET /nvue_v1/?diff=applied&rev=2&filled=false",
             ]
         );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn bridge_mac_table_accepts_entries_without_entry_type() {
+        let handler = handler_fn(|request| {
+            request
+                .matches(Method::GET, "/nvue_v1/bridge/domain/br_default/mac-table")
+                .then(|| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "1": {
+                                "age": 28,
+                                "bridge-domain": "br_default",
+                                "interface": "pf0hpf_if",
+                                "last-update": 58,
+                                "mac": "66:d0:c4:dc:8f:b9",
+                                "vlan": 111
+                            },
+                            "2": {
+                                "age": 261046,
+                                "bridge-domain": "br_default",
+                                "entry-type": "extern_learn",
+                                "interface": "vxlan48",
+                                "last-update": 261046,
+                                "mac": "be:f0:af:75:af:d7",
+                                "vlan": 4043
+                            },
+                            "3": {
+                                "interface": "pf0hpf_if"
+                            }
+                        }),
+                    )
+                })
+        });
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
+
+        let entries = client
+            .bridge_mac_table("br_default")
+            .await
+            .expect("MAC table request should succeed");
+
+        // Entry "3" has no `mac` and is skipped; the other two decode.
+        assert_eq!(entries.len(), 2);
+        let learned = entries
+            .iter()
+            .find(|entry| entry.mac == "66:d0:c4:dc:8f:b9")
+            .expect("locally learned entry should decode");
+        assert_eq!(learned.entry_type, None);
+        assert_eq!(learned.vlan, Some(111));
+        let remote = entries
+            .iter()
+            .find(|entry| entry.mac == "be:f0:af:75:af:d7")
+            .expect("EVPN entry should decode");
+        assert_eq!(remote.entry_type.as_deref(), Some("extern_learn"));
         server
             .finish()
             .await
