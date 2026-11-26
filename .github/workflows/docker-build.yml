@@ -156,7 +156,7 @@ jobs:
 
       - name: Download build artifacts
         if: inputs.download_artifacts == true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ${{ inputs.artifact_pattern != '' && inputs.artifact_pattern || format('*-{0}', github.run_id) }}
           merge-multiple: true

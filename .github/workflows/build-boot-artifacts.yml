@@ -148,7 +148,7 @@ jobs:
       # For ephemeral builds, download the prerequisite artifacts first
       - name: Download prerequisite boot artifacts
         if: inputs.build_type == 'ephemeral'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.prereq_artifact != '' && inputs.prereq_artifact || format('boot-artifacts-{0}-{1}', inputs.arch, github.run_id) }}
           path: .
