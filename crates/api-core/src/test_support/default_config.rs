@@ -385,7 +385,10 @@ pub fn get() -> CarbideConfig {
             ..Default::default()
         },
         dsx_exchange_event_bus: None,
-        dpf: crate::cfg::file::DpfConfig::default(),
+        dpf: crate::cfg::file::DpfConfig {
+            enabled: false,
+            ..Default::default()
+        },
         x86_pxe_boot_url_override: None,
         arm_pxe_boot_url_override: None,
         pxe_public_base_url: default_pxe_public_base_url(),

@@ -1669,7 +1669,9 @@ before its exit handler ran.
 Teardown is part of `clean.sh` (step 1b); `health-check.sh` gains a DPF
 section automatically when the stack is present.
 
-With `--skip-dpf`, setup preserves an explicit `[dpf]` table in the Core site or custom base configuration. Otherwise it renders `enabled = false` for Core, which defaults DPF on. This rendering requires Python 3.11 or later, or the `tomli` package, in the Python environment that provides PyYAML. If the site file is disabled, supply a custom base configuration with `[dpf].enabled = false`.
+With `--skip-dpf`, setup preserves an explicit `dpf.enabled` value in the Core site or custom base configuration. Otherwise it renders `enabled = false`, retaining other DPF settings. Preflight validates this rendering before setup changes the cluster. It requires Python 3.11 or later, or the `tomli` package, in the Python environment that provides PyYAML.
+
+With `siteConfig.enabled: false`, the mounted site ConfigMap is externally managed. Setup preserves that mode and cannot inspect the mounted TOML; sites without DPF must set `[dpf].enabled = false` there. When a nonempty custom base configuration is supplied and neither supplied configuration sets `dpf.enabled`, setup inserts the opt-out into that base without enabling the Helm-managed site file.
 
 ### DPF images and registries
 

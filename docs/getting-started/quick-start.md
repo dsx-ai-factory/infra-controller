@@ -62,6 +62,8 @@ The following tools must be installed on the machine that you will use to run `s
 | `jq` | 1.6 | `brew install jq` | `apt install jq` / `yum install jq` |
 | `ssh-keygen` | any | built-in | built-in |
 
+Core setup requires Python 3 with PyYAML. With `--skip-dpf`, Python 3.11 or later, or the `tomli` package, is also required to inspect Core TOML during preflight, before setup changes the cluster.
+
 Core virtual IP address (VIP) preflight also requires Python 3 with PyYAML installed in the `python3` environment. It parses the selected Core values file as YAML and validates supplied VIP annotations for enabled external `LoadBalancer` Services. Existing `externalService` configurations can omit VIP annotations for automatic allocation. Explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs. The DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
 
 The `helmfile` tool requires the `helm-diff` plugin. Install it as follows:
@@ -823,7 +825,9 @@ Prepare an `expected_machines.json` with the BMC MAC address, factory default cr
 ```
 
 <Note>
-**DPF is the per-host default.** With no `dpf_enabled` field, each host is DPF-provisioned (the field defaults to `true`). Add `"dpf_enabled": false` to keep a host on the deprecated iPXE path. The site-wide `[dpf].enabled` setting also defaults to `true`. With `--skip-dpf`, setup renders it as `false` unless the supplied Core configuration already defines a `[dpf]` table; this rendering needs Python 3.11 or later, or `tomli`. Refer to [DPF Setup](../manuals/dpf.md).
+**DPF is the per-host default.** The `dpf_enabled` field defaults to `true`. DPF provisioning requires a DPU and site-wide DPF enablement. Add `"dpf_enabled": false` to keep a host with DPUs on the deprecated iPXE path.
+
+The site-wide `[dpf].enabled` setting also defaults to `true`. With `--skip-dpf`, setup supplies `enabled = false` unless the supplied Core site or base configuration explicitly sets `dpf.enabled`. Other DPF settings are preserved. An externally managed site ConfigMap must supply its own DPF setting. Refer to [DPF Setup](../manuals/dpf.md).
 </Note>
 
 Upload the manifest:

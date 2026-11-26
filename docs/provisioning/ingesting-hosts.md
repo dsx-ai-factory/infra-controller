@@ -351,7 +351,7 @@ per-host fields and compatibility controls. It reads a snake_case
 `expected_machines.json` file and applies the whole table at once:
 
 - **`dpu_policy`** (`"manage"` | `"nic"` | `"ignore"`): Per-host policy for managing DPU hardware. `nic` and `ignore` override the site policy; `manage` or an omitted field inherits the site-wide policy, which defaults to `manage`. The previous `"use_as_nic"` value is still accepted, as are manifests using the `dpu_mode` key with `"dpu_mode"`, `"nic_mode"`, or `"no_dpu"` values.
-- **`dpf_enabled`** (bool, default `true`): Enable or disable DPF provisioning for this host. When omitted or `true`, DPF is the provisioning path (requires `[dpf].enabled = true` in the site config — see [DPF setup](../manuals/dpf.md)). Set to `false` to keep a host on the deprecated iPXE path.
+- **`dpf_enabled`** (bool, default `true`): Enable or disable DPF provisioning for this host. DPF provisioning requires a DPU and effective site-wide `[dpf].enabled = true` (also the default — see [DPF setup](../manuals/dpf.md)). Set to `false` to keep a host with DPUs on the deprecated iPXE path.
 - **`bmc_retain_credentials`** (bool): Skip BMC password rotation.
 - **`default_pause_ingestion_and_poweron`** (bool): Pause ingestion and power-on for this host.
 - **`sku_id`** (string, optional): SKU ID that NICo assigns to the host when it creates the machine. Refer to

@@ -2195,7 +2195,7 @@ else
         _CORE_VALUES_ARG="${_DPF_VALUES}"
     else
         # Core defaults DPF on; skipping its operator must explicitly opt out unless the site
-        # already owns its DPF configuration. Reuse the rendered-values cleanup on exit.
+        # already sets dpf.enabled. Reuse the rendered-values cleanup on exit.
         _DPF_VALUES="$(mktemp -t nico-core-skip-dpf.XXXXXX)"
         python3 "${SCRIPT_DIR}/render-skip-dpf-values.py" "${_CORE_VALUES_FILE}" "${_DPF_VALUES}"
         _CORE_VALUES_ARG="${_DPF_VALUES}"

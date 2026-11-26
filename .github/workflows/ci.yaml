@@ -2548,7 +2548,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-yaml
+          sudo apt-get install -y --no-install-recommends python3-yaml python3-tomli
           # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
           prometheus_version=2.52.0
           prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
@@ -2575,6 +2575,9 @@ jobs:
 
       - name: Check Vault-free Core values preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_vault_free.py'
+
+      - name: Test skip-DPF Core values
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_skip_dpf_values.py'
 
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests

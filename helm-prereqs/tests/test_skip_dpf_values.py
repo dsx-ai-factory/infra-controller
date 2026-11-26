@@ -5,6 +5,7 @@
 
 import importlib.util
 import pathlib
+import os
 import subprocess
 import tempfile
 import unittest
@@ -18,20 +19,71 @@ SPEC.loader.exec_module(RENDERER)
 
 
 class SkipDpfValuesTests(unittest.TestCase):
-    def test_disabled_site_without_base_requires_explicit_configuration(self):
-        with self.assertRaisesRegex(ValueError, "custom base config"):
-            RENDERER.render('nico-api:\n  siteConfig:\n    enabled: false\n')
+    def test_external_site_without_custom_base_is_preserved(self):
+        source = 'nico-api:\n  siteConfig:\n    enabled: false\n'
+        self.assertEqual(RENDERER.render(source), source)
 
     def test_explicit_site_or_base_dpf_configuration_is_preserved_verbatim(self):
         for site, base in [('[dpf]\nenabled = true', ''), ('["dpf"]\nenabled = false', ''),
-                           ('[dpf]', ''), ('[dpf.deployments.bf3]\nflavor_name = "custom"', ''),
-                           ('', '[dpf]\nenabled = true')]:
+                           ('[dpf.services.dhcp_server]\nhelm_version = "test"', '[dpf]\nenabled = true'),
+                           ('', '[dpf]\nenabled = true'),
+                           ('[dpf]\nenabled = false', '[dpf]\nenabled = true')]:
             with self.subTest(site=site, base=base):
                 source = yaml.safe_dump({"nico-api": {
                     "siteConfig": {"nicoApiSiteConfig": site},
                     "configFiles": {"nicoApiConfig": base},
                 }})
                 self.assertEqual(RENDERER.render(source), source)
+
+    def test_partial_dpf_tables_render_disabled_without_losing_siblings(self):
+        for text in ['[dpf]', '[dpf.services.dhcp_server]\nhelm_version = "test"',
+                     'dpf = {services = {dhcp_server = {helm_version = "test"}}}',
+                     'description = """\n[dpf]\n"""\n[dpf.services.dhcp_server]\nhelm_version = "test"']:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                source = yaml.safe_dump({'nico-api': {'siteConfig': {'nicoApiSiteConfig': text}}})
+                api = yaml.safe_load(RENDERER.render(source))['nico-api']
+                path = pathlib.Path(directory) / 'values.yaml'
+                path.write_text(yaml.safe_dump(api))
+                output = subprocess.check_output([
+                    'helm', 'template', 'nico-api', str(ROOT.parent / 'helm/charts/nico-api'),
+                    '-f', str(path),
+                ], text=True, stderr=subprocess.PIPE)
+                site = next(doc for doc in yaml.safe_load_all(output)
+                            if doc and 'nico-api-site-config.toml' in doc.get('data', {}))
+                actual = RENDERER.tomllib.loads(site['data']['nico-api-site-config.toml'])
+                expected = RENDERER.tomllib.loads(text)
+                expected.setdefault('dpf', {})['enabled'] = False
+                self.assertEqual(actual, expected)
+
+    def test_skip_rendering_preflight_blocks_invalid_inputs(self):
+        preflight = (ROOT / 'preflight.sh').read_text()
+        check = preflight[preflight.index('_check_skip_dpf_core_values()'):].split('# 3d. --skip-vault', 1)[0]
+        for name, text, missing_parser in [
+            ('valid', '[dpf.services.dhcp_server]\nhelm_version = "test"', False),
+            ('invalid TOML', '[dpf', False),
+            ('missing parser', '', True),
+        ]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / 'values.yaml'
+                path.write_text(yaml.safe_dump({'nico-api': {'siteConfig': {'nicoApiSiteConfig': text}}}))
+                env = os.environ.copy()
+                if missing_parser:
+                    for module in ['tomllib', 'tomli']:
+                        (path.parent / f'{module}.py').write_text('raise ImportError("unavailable")\n')
+                    env['PYTHONPATH'] = directory
+                result = subprocess.check_output(['bash', '-euc', '''
+SCRIPT_DIR="$1"
+_CORE_VALUES_CFG="$2"
+_CORE_VALUES_LABEL=core-values
+INSTALL_DPF=false
+SKIP_CORE=false
+BLOCKING_ERRORS=()
+''' + check + '\nprintf "%s" "${BLOCKING_ERRORS[*]}"', '--', str(ROOT), str(path)],
+                                                 text=True, env=env)
+                if name == 'valid':
+                    self.assertEqual(result, '')
+                else:
+                    self.assertIn('core-values:', result)
 
     def test_disabled_site_file_uses_custom_base_without_enabling_site(self):
         source = yaml.safe_dump({"nico-api": {

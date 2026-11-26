@@ -1063,7 +1063,21 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3c. --skip-vault: nothing in the Core values may make nico-api build a Vault
+# 3c. Validate skipped-DPF rendering before any setup phase changes the cluster.
+# The renderer checks the same YAML, TOML, and parser dependencies used in phase 6.
+# ---------------------------------------------------------------------------
+_check_skip_dpf_core_values() {
+    local _skip_dpf_checks
+    if ! _skip_dpf_checks="$(python3 "${SCRIPT_DIR}/render-skip-dpf-values.py" "${_CORE_VALUES_CFG}" /dev/null 2>&1)"; then
+        BLOCKING_ERRORS+=("${_CORE_VALUES_LABEL}: ${_skip_dpf_checks}")
+    fi
+}
+if [[ "${INSTALL_DPF:-true}" == "false" && "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
+    _check_skip_dpf_core_values
+fi
+
+# ---------------------------------------------------------------------------
+# 3d. --skip-vault: nothing in the Core values may make nico-api build a Vault
 #     client. setup.sh sets global.certificate.issuerRef (site-issuer, kind
 #     ClusterIssuer, group cert-manager.io), both cert-manager flags, and
 #     nico-api.vault.enabled=false; the checker

@@ -168,6 +168,15 @@ Review the release changelog for breaking changes:
 
 Check whether the new release added required values fields or changed any default values. If so, update your site values files to include any new required fields before running `setup.sh`.
 
+DPF initialization now defaults to enabled. Before upgrading a site without the DPF operator and Core's DPF permissions, explicitly disable it in the effective Core site TOML, including externally managed site ConfigMaps:
+
+```toml
+[dpf]
+enabled = false
+```
+
+This is required even on sites without DPUs: Core initializes DPF at startup independently of host inventory. `setup.sh --skip-dpf` supplies the opt-out when neither the supplied site nor custom base sets `dpf.enabled`; direct Helm upgrades must supply it too.
+
 ```bash
 git diff upstream/release/v2.0..upstream/release/v2.1 -- helm-prereqs/values.yaml \
     helm-prereqs/values/nico-core.yaml \
@@ -306,7 +315,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-core` | Skip Phase 6 only. Prerequisites and the REST stack still upgrade; NICo Core is left on its current image. Useful when the Core image did not change. |
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
-| `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
+| `--skip-dpf` | Skips operator installation in phase 5b. For Core, preserves an explicit site/base `dpf.enabled` value; otherwise supplies `false` while retaining sibling settings. External site ConfigMaps remain operator-managed and must explicitly disable DPF on non-DPF sites. This flag alone does not disable an explicitly enabled site. |
 | `--skip-vault` | Use **only** on a site that was installed without Vault, or that has completed the migration off it. This is not a pure skip: it drops the Vault install and unseal phases, removes the Vault resources from the `nico-prereqs` release at the end of the run, after nothing references Vault, and redeploys Core, RMS, Flow, and the site-agent with `site-issuer` certificates and the Core Vault settings disabled — on a Vault site that is a config change that requires the credential migration first, and it never uninstalls Vault. Pass it on every upgrade of such a site, or keep `NICO_SKIP_VAULT=true` set; the choice is not stored. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
 | `--install-vault` | Roll a `--skip-vault` site back to Vault, or override `NICO_SKIP_VAULT=true` left in the environment. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
@@ -705,12 +714,14 @@ You can narrow an upgrade to particular components with the `--skip-*` flags. `-
 
 The prerequisite phases therefore run on every invocation. That is by design and is cheap: each one is idempotent, and a phase whose inputs have not changed reconciles to the same state and exits quickly.
 
-To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Update both together when moving to a new revision. Run from the **repository root**, matching what `setup.sh` itself executes:
+To upgrade only the NICo Core release on a non-DPF site without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Update both together when moving to a new revision. The following example renders an explicit DPF opt-out from the stock Core values. Run from the **repository root**:
 
 ```bash
+python3 helm-prereqs/render-skip-dpf-values.py \
+    helm-prereqs/values/nico-core.yaml /tmp/nico-core-without-dpf.yaml
 helm upgrade --install nico ./helm \
     -n nico-system \
-    -f helm-prereqs/values/nico-core.yaml \
+    -f /tmp/nico-core-without-dpf.yaml \
     --set-string global.image.repository="${NICO_IMAGE_REGISTRY}/nvmetal-carbide" \
     --set-string global.image.tag="${NICO_CORE_IMAGE_TAG}" \
     --timeout 600s --wait

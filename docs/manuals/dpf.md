@@ -1181,7 +1181,7 @@ Field reference (all under `[dpf]`):
 
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | Master switch. Set `false` to disable DPF-based provisioning explicitly. |
+| `enabled` | bool | `true` | Controls site-wide DPF initialization. Set `false` to disable DPF for the site. |
 | `enable_pci_switch_emulation` | bool | `false` | Set `PCI_SWITCH_EMULATION_ENABLE=1` in provisioning nvconfig for all deployments, including BF3 GB200 and the Astra flavor template, to enable PCI switch emulation for DPU-emulated storage such as DOCA SNAP. Omitted or `false` leaves the parameter unset; it does not explicitly disable firmware emulation. |
 | `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
@@ -1521,9 +1521,10 @@ The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lock
 Whether a given host is provisioned via DPF or via iPXE is decided per host,
 in the *expected machines* list that NICo loads on startup. The relevant
 field is **`dpf_enabled`** on each expected-machine entry. A host is
-provisioned via DPF only when **both** of the following are true:
+provisioned via DPF only when all of the following are true:
 
-1. `[dpf].enabled = true` in the site config (section 3.5), and
+1. The host has a DPU.
+1. Effective `[dpf].enabled` is `true` (the site-wide default; section 3.5).
 1. `dpf_enabled = true` on that host's expected-machine entry.
 
 **The per-host default is `true`.** When `dpf_enabled` is omitted, it is stored as `true` — DPF is the default provisioning path (iPXE is deprecated). To keep a host on iPXE, set `dpf_enabled = false`.
