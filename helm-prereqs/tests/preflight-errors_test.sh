@@ -174,6 +174,36 @@ for row in \
     [[ -e "${TEST_INSTALL_MARKER}" ]] && rm -f "${TEST_INSTALL_MARKER}"
 done
 
+# NICO_CORE_IMAGE_NAME: the default and a legacy override name the Core image
+# preflight checks, and a full image path is an error. Runs the real default,
+# validation, and image-check code with the registry probe stubbed.
+core_name_default="$(grep -F 'NICO_CORE_IMAGE_NAME="${NICO_CORE_IMAGE_NAME:-' "${PREFLIGHT_SH}" || true)"
+core_name_validation="$(sed -n '/^# NICO_CORE_IMAGE_NAME is one repository path component/,/^fi$/p' "${PREFLIGHT_SH}")"
+core_image_check="$(awk '
+    /^_validate_nico_core_image_access\(\) \{$/ { printing = 1 }
+    printing { print }
+    printing && /^}$/ { exit }
+' "${PREFLIGHT_SH}")"
+for row in \
+    "default||registry.example.com/nico/nico:core-tag|0" \
+    "legacy-override|nvmetal-carbide|registry.example.com/nico/nvmetal-carbide:core-tag|0" \
+    "full-image-path|registry.example.com/nico:v1|registry.example.com/nico/registry.example.com/nico:v1:core-tag|1"; do
+    IFS='|' read -r name image_name expected_ref expected_errors <<< "${row}"
+    core_image_result="$(env -u NICO_CORE_IMAGE_NAME ${image_name:+NICO_CORE_IMAGE_NAME="${image_name}"} "${TEST_BASH}" -c '
+        set -eu
+        ERRORS=() SKIP_CORE=false _CORE_VALUES_CFG=/nonexistent
+        NICO_IMAGE_REGISTRY=registry.example.com/nico NICO_CORE_IMAGE_TAG=core-tag
+        _validate_image_manifest_access() { printf "%s" "$1"; }
+        eval "$1"; eval "$2"; eval "$3"
+        _validate_nico_core_image_access
+        printf "|%s" "${#ERRORS[@]}"
+    ' _ "${core_name_default}" "${core_name_validation}" "${core_image_check}" 2>&1)" || true
+    if [[ "${core_image_result}" != "${expected_ref}|${expected_errors}" ]]; then
+        echo "FAIL Core image name ${name}: got '${core_image_result}', expected '${expected_ref}|${expected_errors}'" >&2
+        failures=$((failures + 1))
+    fi
+done
+
 if (( failures > 0 )); then
     exit 1
 fi

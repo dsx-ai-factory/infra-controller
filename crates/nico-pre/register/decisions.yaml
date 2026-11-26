@@ -64,7 +64,8 @@ decisions:
   title: Source of the NICo images
   section: Utility hosts (per provider, decided before anything else)
   stated: false
-  source: 'NICo setup environment: `NICO_IMAGE_REGISTRY` (no scheme; the Core image is `<registry>/nvmetal-carbide`,
+  source: 'NICo setup environment: `NICO_IMAGE_REGISTRY` (no scheme; the Core image is `<registry>/<NICO_CORE_IMAGE_NAME>`,
+    default `nico`,
     REST, Flow, and the site agent use the registry root), `NICO_CORE_IMAGE_TAG`, `NICO_REST_IMAGE_TAG`
     (Flow reuses it), `NICO_RMS_IMAGE_REPO`; NICo Helm values: `bootArtifactContainers` in `values/nico-core.yaml`,
     one init container per architecture naming `<registry>/boot-artifacts-x86_64:<tag>` and `boot-artifacts-aarch64:<tag>`,
@@ -85,7 +86,7 @@ decisions:
   check: 'Pulled from NGC, `nico-pre-build`: log in to nvcr.io and test pull access to every repository
     of the image set at the chosen tags, boot artifacts included, reporting entitlement per artifact.
     Pulled from a local registry: the build-side checks belong to the Build host entry; `nico-pre-install`
-    verifies every item of the image set is present in the registry at the chosen tags: Core `nvmetal-carbide`,
+    verifies every item of the image set is present in the registry at the chosen tags: Core `nico` (or the `NICO_CORE_IMAGE_NAME` override),
     the REST image set (REST, Flow, site agent), `boot-artifacts-x86_64` and `boot-artifacts-aarch64`,
     the machine-validation image, `rms-api` when RMS is in-cluster, and with DPF the four DPUService images
     `forge-dpu-agent`, `forge-dhcp-server`, `carbide-fmds`, `otelcol-contrib` plus the four charts `nico-dpu-agent`,
