@@ -656,7 +656,10 @@ fn transport_snapshot_preserves_resolved_client_settings() {
     assert_eq!(client.require_client_cert, wire.require_client_cert);
     assert_eq!(client.use_mgmt_vrf, wire.use_mgmt_vrf);
     assert_eq!(client.request_timeout, Some(Duration::new(17, 123)));
-    assert_eq!(client.socks_proxy, wire.socks_proxy);
+    assert_eq!(
+        client.socks_proxy.map(|proxy| proxy.address),
+        wire.socks_proxy
+    );
     assert_eq!(client.connect_retries_max, wire.connect_retries_max);
     assert_eq!(client.connect_retries_interval, Some(Duration::new(3, 456)));
     assert_eq!(WireConfig::try_from(snapshot).unwrap(), wire);

@@ -18,7 +18,7 @@ Common connection options:
 | `-a <url>` | NICo API gRPC endpoint. |
 | `-f json` | JSON output for scripting. |
 | `API_URL` | Environment variable for the API URL. |
-| `https_proxy=socks5://...` | SOCKS5 proxy when reaching the site from off-site. |
+| `https_proxy=socks5://...` | SOCKS5 proxy when reaching the site from off-site. Use `socks5h://...` when the API host name only resolves on the proxy's side. |
 
 ## Common Commands
 
