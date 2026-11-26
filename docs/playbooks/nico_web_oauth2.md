@@ -36,7 +36,7 @@ trap 'rm -f -- "$cookie_file" "$response_file"; rmdir -- "$cookie_dir"' EXIT
 curl --disable --fail-with-body --silent --show-error \
   --header "@$client_secret_header_file" \
   --cookie-jar "$cookie_file" \
-  "$admin_url/admin/auth-callback" || exit 1
+  "$admin_url/admin/auth-callback" >&2 || exit 1
 
 http_status=$(curl --disable --silent --show-error \
   --cookie "$cookie_file" \
@@ -48,6 +48,7 @@ printf 'HTTP %s\n' "$http_status" >&2
 cat "$response_file"
 ```
 
-The script prints the HTTP status to stderr and writes the response body to
-stdout only on HTTP 200. If the session expires, obtain a new cookie before
-retrying. The script removes the temporary files and directory on exit.
+The script sends callback diagnostics and the GET status to stderr. It writes
+the GET response body to stdout only on HTTP 200. If the session expires, obtain
+a new cookie before retrying. The script removes the temporary files and
+directory on exit.
