@@ -74,8 +74,51 @@ fn persisted_domain_config_remains_readable() {
                         activities: vec![MaintenanceActivity::ConfigureNmxCluster],
                         ..Default::default()
                     }),
-                    maintenance_termination_requested: false,
+                    ..Default::default()
                 }),
         }
     );
+}
+
+#[test]
+fn managed_members_validate_positions_per_type() {
+    use crate::expected_rack_group::{ExpectedRackGroupMember, ExpectedRackGroupRack};
+    for (second_type, second_index, error) in [
+        (
+            RackCapabilityType::Compute,
+            0,
+            Some("multiple Compute members"),
+        ),
+        (
+            RackCapabilityType::Switch,
+            i32::MAX as u32,
+            Some("exceeds slot range"),
+        ),
+        (RackCapabilityType::Switch, 0, None),
+    ] {
+        let first = ExpectedRackGroupMember {
+            cartridge_index: Some(0),
+            device_type: RackCapabilityType::Compute,
+            manufacturer: "NVIDIA".into(),
+            id: "c1".into(),
+        };
+        let second = ExpectedRackGroupMember {
+            cartridge_index: Some(second_index),
+            device_type: second_type,
+            id: "tray2".into(),
+            ..first.clone()
+        };
+        let group = ExpectedRackGroup {
+            racks: vec![ExpectedRackGroupRack {
+                rack_id: "rack-a".parse().unwrap(),
+                members: vec![first, second],
+            }],
+            ..Default::default()
+        };
+        let result = derive_managed_members(&group);
+        match error {
+            Some(reason) => assert!(result.unwrap_err().contains(reason)),
+            None => assert_eq!(result.unwrap().len(), 2),
+        }
+    }
 }

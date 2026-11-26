@@ -657,6 +657,10 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub rack_state_controller: RackStateControllerConfig,
 
+    /// Create a default NVLink Domain when a new expected rack group is declared.
+    #[serde(default)]
+    pub managed_domain: bool,
+
     /// NVLink Domain controller scheduling, independent of the Rack controller.
     #[serde(default)]
     pub nvlink_domain_state_controller: NvLinkDomainStateControllerConfig,

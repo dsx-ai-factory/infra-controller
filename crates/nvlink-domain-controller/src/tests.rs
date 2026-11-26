@@ -348,3 +348,62 @@ async fn discovery_records_resolution_errors_and_retries_after_repair(pool: sqlx
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
 }
+
+#[carbide_macros::sqlx_test]
+async fn managed_domain_retries_all_positions_after_conflict(pool: sqlx::PgPool) {
+    let racks = r#"[{"rack_id":"rack-a","members":[{"type":"Compute","id":"c","manufacturer":"v","cartridge_index":13},{"type":"PowerShelf","id":"p","manufacturer":"v","cartridge_index":10}]},{"rack_id":"rack-b","members":[{"type":"Switch","id":"s","manufacturer":"v","cartridge_index":42}]}]"#;
+    sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, racks) VALUES ('group','topology',$1::jsonb)")
+        .bind(racks).execute(&pool).await.unwrap();
+    let group_id = "group".parse().unwrap();
+    let group = db::expected_rack_group::find_by_rack_group_id(&pool, &group_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let switch = NvLinkDomainMember {
+        rack_index: 1,
+        slot_index: 1,
+        component_type: NvLinkDomainMemberType::Switch,
+    };
+    let other = NvLinkDomain {
+        id: Uuid::new_v4(),
+        rack_group_id: group_id.clone(),
+        name: None,
+        members: vec![switch.clone()],
+    };
+    let mut txn = pool.txn_begin().await.unwrap();
+    lifecycle::create_managed(&mut txn, &group).await.unwrap();
+    let id = lifecycle::find_ids(txn.as_pgconn()).await.unwrap()[0];
+    nvlink_domain::create(&mut txn, &other).await.unwrap();
+    txn.commit().await.unwrap();
+    let mut tasks = JoinSet::new();
+    let mut controller = controller(&pool, &mut tasks).await;
+    controller.run_single_iteration().await;
+    let blocked = lifecycle::find_snapshot(&pool, id).await.unwrap().unwrap();
+    assert_eq!(blocked.controller_state.value, NvLinkDomainState::Created);
+    assert!(blocked.domain.members.is_empty());
+    assert!(
+        matches!(blocked.controller_state_outcome, Some(PersistentStateHandlerOutcome::Error { err, .. }) if err.contains("rack 1 Switch slot 1"))
+    );
+    let mut txn = pool.txn_begin().await.unwrap();
+    nvlink_domain::delete(&mut txn, other.id).await.unwrap();
+    txn.commit().await.unwrap();
+    controller.run_single_iteration().await;
+    let initialized = lifecycle::find_snapshot(&pool, id).await.unwrap().unwrap();
+    assert_eq!(
+        initialized.controller_state.value,
+        NvLinkDomainState::Discovering
+    );
+    assert_eq!(
+        initialized.domain.members,
+        vec![
+            NvLinkDomainMember {
+                rack_index: 0,
+                slot_index: 4,
+                component_type: NvLinkDomainMemberType::Compute
+            },
+            switch
+        ]
+    );
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}

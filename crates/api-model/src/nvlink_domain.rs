@@ -5,6 +5,7 @@
 
 //! Administrator-owned declarations, independent of NMX-C observed domain identities.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -16,8 +17,10 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::controller_outcome::PersistentStateHandlerOutcome;
+use crate::expected_rack_group::ExpectedRackGroup;
 // These Rack subtypes also define persisted Domain JSON; preserve its decoding compatibility.
 use crate::rack::{MaintenanceScope, RackMaintenanceState, RackValidationState};
+use crate::rack_type::RackCapabilityType;
 
 /// An immutable declaration of compute and NVSwitch tray membership.
 #[derive(Clone, Debug, PartialEq, Eq, FromRow)]
@@ -44,9 +47,70 @@ pub struct NvLinkDomainMember {
     pub component_type: NvLinkDomainMemberType,
 }
 
+/// Derive default Domain positions from one rack group's cartridge declarations.
+pub fn derive_managed_members(
+    group: &ExpectedRackGroup,
+) -> Result<Vec<NvLinkDomainMember>, String> {
+    let mut positions = Vec::new();
+    for (index, rack) in group.racks.iter().enumerate() {
+        let Some(first) = rack
+            .members
+            .iter()
+            .min_by_key(|member| member.cartridge_index)
+        else {
+            continue;
+        };
+        let cartridge_index = |member: &crate::expected_rack_group::ExpectedRackGroupMember| {
+            member.cartridge_index.ok_or_else(|| {
+                format!(
+                    "rack {} member {} has no cartridge index",
+                    rack.rack_id, member.id
+                )
+            })
+        };
+        let base = cartridge_index(first)?;
+        let rack_index =
+            u32::try_from(index).map_err(|_| format!("rack index {index} exceeds u32"))?;
+        let mut occupied = HashSet::new();
+        for member in &rack.members {
+            let component_type = match member.device_type {
+                RackCapabilityType::Compute => NvLinkDomainMemberType::Compute,
+                RackCapabilityType::Switch => NvLinkDomainMemberType::Switch,
+                RackCapabilityType::PowerShelf => continue,
+            };
+            let cartridge = cartridge_index(member)?;
+            let slot_index = slot_index_from_cartridge_index(cartridge, base).ok_or_else(|| {
+                format!(
+                    "rack {} cartridge {cartridge} relative to base {base} exceeds slot range",
+                    rack.rack_id
+                )
+            })?;
+            if !occupied.insert((slot_index, component_type.clone())) {
+                return Err(format!(
+                    "rack {} declares multiple {component_type} members at slot {slot_index}",
+                    rack.rack_id
+                ));
+            }
+            positions.push(NvLinkDomainMember {
+                rack_index,
+                slot_index,
+                component_type,
+            });
+        }
+    }
+    Ok(positions)
+}
+
+fn slot_index_from_cartridge_index(cartridge: u32, base: u32) -> Option<u32> {
+    cartridge
+        .checked_sub(base)?
+        .checked_add(1)
+        .filter(|slot| i32::try_from(*slot).is_ok())
+}
+
 /// Component types that can participate in an NVLink Domain.
 /// Parsing and serialization use the case-sensitive names Compute and Switch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NvLinkDomainMemberType {
     /// A compute tray.
     Compute,
@@ -104,6 +168,9 @@ pub enum NvLinkDomainState {
 /// Persisted requests consumed by the Domain lifecycle controller.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NvLinkDomainConfig {
+    /// Derive default Domain membership from its rack group during initialization.
+    #[serde(default)]
+    pub managed: bool,
     /// Requested member-scoped maintenance; omission means no pending request.
     #[serde(default)]
     pub maintenance_requested: Option<MaintenanceScope>,

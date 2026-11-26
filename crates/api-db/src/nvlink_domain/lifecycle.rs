@@ -36,14 +36,45 @@ struct ControllerRow {
 /// Create a controller-owned Domain and initial history in the caller's transaction.
 /// The caller must roll back the entire transaction on failure.
 pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseResult<()> {
+    create_with_config(txn, domain, &NvLinkDomainConfig::default()).await
+}
+
+/// Create the default Domain for a newly inserted rack group.
+pub async fn create_managed(
+    txn: &mut PgConnection,
+    group: &model::expected_rack_group::ExpectedRackGroup,
+) -> DatabaseResult<()> {
+    let domain = NvLinkDomain {
+        id: Uuid::new_v4(),
+        rack_group_id: group.rack_group_id.clone(),
+        name: Some(group.metadata.name.clone()).filter(|name| !name.is_empty()),
+        members: Vec::new(),
+    };
+    create_with_config(
+        txn,
+        &domain,
+        &NvLinkDomainConfig {
+            managed: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn create_with_config(
+    txn: &mut PgConnection,
+    domain: &NvLinkDomain,
+    config: &NvLinkDomainConfig,
+) -> DatabaseResult<()> {
     super::create(txn, domain).await?;
     let version = ConfigVersion::initial();
     let query = "UPDATE nvlink_domains SET controller_state=$2,
-        controller_state_version=$3, version=$3 WHERE id=$1";
+        controller_state_version=$3, version=$3, config=$4 WHERE id=$1";
     let result = sqlx::query(query)
         .bind(domain.id)
         .bind(Json(NvLinkDomainState::Created))
         .bind(version)
+        .bind(Json(config))
         .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;

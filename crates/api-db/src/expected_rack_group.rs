@@ -223,6 +223,16 @@ pub async fn delete(txn: &mut PgConnection, rack_group_id: &RackGroupId) -> Data
 }
 
 pub async fn clear(txn: &mut PgConnection) -> DatabaseResult<()> {
+    lock_for_replacement(txn).await?;
+    let query = "DELETE FROM expected_rack_groups";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map(|_| ())
+        .map_err(|err| group_dependency_error(query, err))
+}
+
+pub async fn lock_for_replacement(txn: &mut PgConnection) -> DatabaseResult<()> {
     // Like expected-machine replacement, exclude all writers until the replacement
     // commits. Ordinary reads remain available. Call before any replacement writes.
     let lock = "LOCK TABLE expected_rack_groups IN SHARE ROW EXCLUSIVE MODE";
@@ -230,12 +240,7 @@ pub async fn clear(txn: &mut PgConnection) -> DatabaseResult<()> {
         .execute(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(lock, err))?;
-    let query = "DELETE FROM expected_rack_groups";
-    sqlx::query(query)
-        .execute(txn)
-        .await
-        .map(|_| ())
-        .map_err(|err| group_dependency_error(query, err))
+    Ok(())
 }
 
 fn group_dependency_error(query: &str, error: sqlx::Error) -> DatabaseError {
