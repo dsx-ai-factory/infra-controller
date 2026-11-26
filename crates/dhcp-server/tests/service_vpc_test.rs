@@ -67,7 +67,10 @@ fn service_config(
     groups: Vec<ServiceDhcpInterfaceReservations>,
 ) -> Config {
     Config::new(
-        base_dhcp_config(None),
+        carbide_rpc_utils::dhcp::DhcpConfig {
+            nico_pxe_service_url: Some("http://pxe.example:8080".to_string()),
+            ..base_dhcp_config(None)
+        },
         None,
         67,
         CarbideClientConfig::new(String::new(), None),

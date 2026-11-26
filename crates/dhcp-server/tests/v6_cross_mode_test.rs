@@ -24,8 +24,8 @@ use rpc::forge::{AddressFamily, MessageKind};
 mod common;
 
 use common::{
-    DUID_LL, MockDiscoverDhcpApi, client_message, controller_config, dpu_config, encode,
-    machine_cache, relay_forward, relay_option,
+    DUID_LL, MockDiscoverDhcpApi, base_dhcp_config, client_message, controller_config, dpu_config,
+    dpu_config_with_options, encode, machine_cache, relay_forward, relay_option,
 };
 
 const INTERFACE: &str = "eth0";
@@ -36,7 +36,7 @@ const OPTION79: &[u8] = &[0, 1, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
 /// The modes have different identity and data sources, but once both resolve
 /// the same binding their client-visible DHCPv6 contract must not drift.
 #[tokio::test]
-async fn stateful_solicit_is_equivalent_across_dpu_and_controller_modes() {
+async fn stateful_solicit_is_equivalent_across_modes_with_nico_pxe_service_url_changes() {
     let request = encode(&client_message(MessageType::Solicit, DUID_LL, None, None));
 
     // Resolve the direct request from the DPU-delivered interface binding.
@@ -59,6 +59,27 @@ async fn stateful_solicit_is_equivalent_across_dpu_and_controller_modes() {
     .await
     .expect("direct DPU SOLICIT is valid")
     .expect("direct DPU SOLICIT is served");
+
+    let mut dhcp_config = base_dhcp_config(None);
+    for url in [Some("http://pxe.example:8080"), None] {
+        dhcp_config.nico_pxe_service_url = url.map(str::to_string);
+        let config = dpu_config_with_options(
+            dpu_config.host_config().unwrap().host_ip_addresses.clone(),
+            dhcp_config.clone(),
+        );
+        let response = process_packet(
+            &request,
+            "fe80::100".parse().unwrap(),
+            &config,
+            INTERFACE,
+            &Dpu {},
+            &mut dpu_cache,
+        )
+        .await
+        .expect("PXE service URL must not affect DHCPv6")
+        .expect("direct DPU SOLICIT is served");
+        assert_eq!(response.encoded_packet(), dpu_response.encoded_packet());
+    }
 
     // Resolve the equivalent relayed request from the authoritative API.
     let api = MockDiscoverDhcpApi::start().await;

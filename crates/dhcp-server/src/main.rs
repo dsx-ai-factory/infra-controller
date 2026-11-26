@@ -2722,6 +2722,96 @@ mod test {
         assert!(dhcp_handle.is_none(), "no server should have been started");
     }
 
+    #[tokio::test]
+    async fn nico_pxe_service_url_after_config_update() {
+        let directory = TempDir::new().unwrap();
+        let mut args = make_reload_args(&directory, vec!["lo".to_string()]);
+        let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig {
+            carbide_dhcp_server: Some("192.0.2.1".parse().unwrap()),
+            carbide_provisioning_server_ipv4: Some("192.0.2.10".parse().unwrap()),
+            ..Default::default()
+        };
+        let instrumentation = Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        );
+        let request = get_byte_stream(
+            Ipv4Addr::UNSPECIFIED,
+            None,
+            MessageType::Request,
+            Some(b"HTTPClient::7::"),
+        );
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+        let (mut cancel_token, mut dhcp_handle) = (None, None);
+        let mut unchanged_reply = None;
+
+        for url in [
+            Some("http://old-pxe.example:8080"),
+            Some("http://PXE.example:8081/path%2F/"),
+            None,
+        ] {
+            dhcp_config.nico_pxe_service_url = url.map(str::to_string);
+            let previous_token = cancel_token.clone();
+            super::apply_update(
+                &mut args,
+                serde_yaml::to_string(&dhcp_config).unwrap(),
+                None,
+                vec!["lo".to_string()],
+                &mut cancel_token,
+                &mut dhcp_handle,
+                0,
+            )
+            .await
+            .unwrap();
+            if let Some(previous_token) = previous_token {
+                assert!(previous_token.is_cancelled());
+            }
+            assert!(!cancel_token.as_ref().unwrap().is_cancelled());
+            assert!(dhcp_handle.is_some());
+            assert!(
+                !tokio::fs::try_exists(format!("{}_new", args.dhcp_config))
+                    .await
+                    .unwrap()
+            );
+
+            let config = init(args.clone(), &instrumentation).await.unwrap();
+            let packet = packet_handler::process_packet(
+                &request,
+                TEST_SOURCE_ADDRESS,
+                &config,
+                "vlan200",
+                &Test {},
+                &mut machine_cache,
+            )
+            .await
+            .unwrap();
+            let mut reply = Message::decode(&mut Decoder::new(packet.encoded_packet())).unwrap();
+            let mut retained_vendor = vec![6, 4, 0, 0, 0, 8, 70, 36];
+            retained_vendor.extend_from_slice(b"0fd6e9a3-06fc-4a22-ad29-aca299677b00");
+            let mut expected_vendor = retained_vendor.clone();
+            if let Some(url) = url {
+                expected_vendor.extend_from_slice(&[72, url.len() as u8]);
+                expected_vendor.extend_from_slice(url.as_bytes());
+            }
+            assert_eq!(
+                reply.opts().get(OptionCode::VendorExtensions),
+                Some(&DhcpOption::VendorExtensions(expected_vendor)),
+            );
+            reply
+                .opts_mut()
+                .insert(DhcpOption::VendorExtensions(retained_vendor));
+            let encoded = reply.to_vec().unwrap();
+            if let Some(expected) = &unchanged_reply {
+                assert_eq!(&encoded, expected);
+            } else {
+                unchanged_reply = Some(encoded);
+            }
+        }
+        cancel_token.unwrap().cancel();
+        dhcp_handle.unwrap().await.unwrap();
+    }
+
     /// Older Cores can defer listener selection; keep their staged update and live generation.
     #[tokio::test]
     async fn update_with_empty_interfaces_defers_reload() {

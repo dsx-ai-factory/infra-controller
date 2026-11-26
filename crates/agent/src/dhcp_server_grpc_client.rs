@@ -58,6 +58,7 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
                 .map(|ip| ip.to_string())
                 .collect(),
             carbide_api_url: c.carbide_api_url,
+            nico_pxe_service_url: c.nico_pxe_service_url,
             carbide_ntpservers: c
                 .carbide_ntpservers
                 .iter()
@@ -488,6 +489,23 @@ mod tests {
                     carbide_provisioning_server_ipv4: Some("192.0.2.2".parse().unwrap()),
                     ..Default::default()
                 } => ("192.0.2.1".to_string(), "192.0.2.2".to_string(), None),
+            }
+        );
+    }
+
+    #[test]
+    fn nico_pxe_service_url_in_control_request() {
+        value_scenarios!(run = |url: Option<&str>| {
+                proto::DhcpConfig::from(ModelDhcpConfig {
+                    nico_pxe_service_url: url.map(str::to_string),
+                    ..Default::default()
+                }).nico_pxe_service_url
+            };
+            "optional PXE service URL" {
+                None => None,
+                Some("") => Some(String::new()),
+                Some("http://PXE.example:8080/path%2F/")
+                    => Some("http://PXE.example:8080/path%2F/".to_string()),
             }
         );
     }
