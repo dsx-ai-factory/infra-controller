@@ -57,6 +57,11 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("NVOS restart snapshot", testNVOSRestartSubmission)
+	t.Run("NVOS restart preflight", func(t *testing.T) {
+		testNVOSRestartPreflight(t, (*ManagerImpl).SubmitTask)
+	})
+	t.Run("pending NVOS retry keeps its accepted scope", testPendingNVOSRetryScope)
 	t.Run("preemption", testPreemptingAdmission)
 	t.Run("ordinary forced shutdown does not preempt", testSubmitTaskDoesNotPreemptForcedShutdown)
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
@@ -349,13 +354,14 @@ func TestValidateSubmissionRackTargets_InjectExpectationNeedsNoRule(t *testing.T
 	unlinked.ComponentID = ""
 	resolvedRack.AddComponent(unlinked)
 
-	err := (&ManagerImpl{}).validateSubmissionRackTargets(
+	_, err := (&ManagerImpl{}).validateSubmissionRackTargets(
 		context.Background(),
-		operation.Wrapper{
+		&operation.Request{Operation: operation.Wrapper{
 			Type: taskcommon.TaskTypeInjectExpectation,
 			Code: taskcommon.OpCodeInjectExpectation,
-		},
+		}},
 		map[uuid.UUID]*rack.Rack{rackID: resolvedRack},
+		nil,
 	)
 
 	require.NoError(t, err)
@@ -917,7 +923,7 @@ func TestManagerImpl_CreateAndExecuteTask(t *testing.T) {
 		taskID, err := manager.createAndExecuteTask(context.Background(), &operation.Request{
 			Operation:        testPowerControlOperation(t),
 			ConflictStrategy: operation.ConflictStrategyReject,
-		}, resolvedRack)
+		}, resolvedRack, nil)
 
 		require.NoError(t, err)
 		require.NotEqual(t, uuid.Nil, taskID)
@@ -1132,7 +1138,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			ConflictStrategy: operation.ConflictStrategyReject,
 			RequiredRackID:   rackID,
 			IdempotencyKey:   idempotencyKey,
-		}, targetRack)
+		}, targetRack, nil)
 
 		require.NoError(t, err)
 		require.Equal(t, taskID, gotTaskID)
@@ -1186,7 +1192,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			ConflictStrategy: operation.ConflictStrategyReject,
 			RequiredRackID:   rackID,
 			IdempotencyKey:   idempotencyKey,
-		}, targetRack)
+		}, targetRack, nil)
 
 		require.NoError(t, err)
 		require.Equal(t, taskID, gotTaskID)
@@ -1219,7 +1225,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			Operation:      testPowerControlOperation(t),
 			RequiredRackID: requestedRackID,
 			IdempotencyKey: idempotencyKey,
-		}, targetRack)
+		}, targetRack, nil)
 
 		require.Equal(t, uuid.Nil, taskID)
 		require.ErrorContains(t, err, "idempotency key")
@@ -1298,7 +1304,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 					ConflictStrategy: operation.ConflictStrategyReject,
 					RequiredRackID:   rackID,
 					IdempotencyKey:   idempotencyKey,
-				}, targetRack)
+				}, targetRack, nil)
 
 				require.Equal(t, uuid.Nil, taskID)
 				if test.wantTerminateCalls > 0 {
@@ -1374,7 +1380,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 		submissions.Add(2)
 		submit := func() {
 			defer submissions.Done()
-			gotTaskID, err := manager.createAndExecuteTask(t.Context(), req, targetRack)
+			gotTaskID, err := manager.createAndExecuteTask(t.Context(), req, targetRack, nil)
 			results <- gotTaskID
 			errs <- err
 		}
@@ -1749,6 +1755,7 @@ type managerExecutor struct {
 	executionID                    string
 	validateCalls                  int
 	validateErr                    error
+	onValidate                     func(*taskdef.ExecutionRequest) error
 	lastValidatedRequest           *taskdef.ExecutionRequest
 	executeCalls                   int
 	executeErr                     error
@@ -1797,6 +1804,9 @@ func (e *managerExecutor) Type() taskcommon.ExecutorType {
 func (e *managerExecutor) Validate(req *taskdef.ExecutionRequest) error {
 	e.validateCalls++
 	e.lastValidatedRequest = req
+	if e.onValidate != nil {
+		return e.onValidate(req)
+	}
 	return e.validateErr
 }
 

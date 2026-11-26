@@ -48,21 +48,33 @@ func TestLeakStatusTo(t *testing.T) {
 
 func TestTaskTo(t *testing.T) {
 	appliedRuleID := uuid.New()
+	computeID := uuid.New()
 	tests := []struct {
-		name          string
-		appliedRuleID *uuid.UUID
-		wantRuleID    string
+		name           string
+		appliedRuleID  *uuid.UUID
+		wantRuleID     string
+		attributes     taskcommon.TaskAttributes
+		wantComponents []uuid.UUID
 	}{
 		{name: "includes the applied rule", appliedRuleID: &appliedRuleID, wantRuleID: appliedRuleID.String()},
 		{name: "omits an unapplied rule"},
+		{name: "includes restart-only compute once", attributes: taskcommon.TaskAttributes{
+			ComponentsByType:          map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {computeID}},
+			FirmwareRestartComputeIDs: []uuid.UUID{computeID, computeID},
+		}, wantComponents: []uuid.UUID{computeID}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			converted := TaskTo(&taskdef.Task{AppliedRuleID: test.appliedRuleID})
+			converted := TaskTo(&taskdef.Task{AppliedRuleID: test.appliedRuleID, Attributes: test.attributes})
 
 			require.NotNil(t, converted)
 			require.Equal(t, test.wantRuleID, converted.GetAppliedRuleId().GetId())
+			var gotComponents []uuid.UUID
+			for _, id := range converted.GetComponentUuids() {
+				gotComponents = append(gotComponents, uuid.MustParse(id.GetId()))
+			}
+			require.ElementsMatch(t, test.wantComponents, gotComponents)
 		})
 	}
 }

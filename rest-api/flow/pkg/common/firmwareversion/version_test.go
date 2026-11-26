@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package workflow
+package firmwareversion
 
 import (
 	"testing"
@@ -11,7 +11,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
-func TestExtractComponentTargetVersion(t *testing.T) {
+func TestExtract(t *testing.T) {
 	tests := map[string]struct {
 		rawVersion    string
 		componentType devicetypes.ComponentType
@@ -82,7 +82,7 @@ func TestExtractComponentTargetVersion(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			result, selected := extractComponentTargetVersion(tc.rawVersion, tc.componentType)
+			result, selected := Extract(tc.rawVersion, tc.componentType)
 			assert.Equal(t, tc.expected, result)
 			assert.Equal(t, tc.selected, selected)
 		})

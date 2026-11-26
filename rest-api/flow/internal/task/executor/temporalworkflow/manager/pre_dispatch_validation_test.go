@@ -24,27 +24,50 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
-func TestValidateRequiredCapabilitiesRejectsUnsupportedCapability(t *testing.T) {
-	registry := newPreflightCapabilityRegistry(
-		t,
-		capability.CapabilityPowerStatus,
-	)
-
-	err := validateRequiredCapabilities(
-		powerControlExecutionInfo(t),
-		registry,
-	)
-
-	require.Error(t, err)
-	require.True(t, errors.Is(err, componentmanager.ErrUnsupportedCapability))
-
-	var capabilityErr componentmanager.UnsupportedCapabilityError
-	require.True(t, errors.As(err, &capabilityErr))
-	require.Equal(t, devicetypes.ComponentTypeCompute, capabilityErr.ComponentType)
-	require.Equal(t, capability.CapabilityPowerControl, capabilityErr.Capability)
+func TestValidateRequiredCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		firmwareRestart  bool
+		noFirmwareAction bool
+	}{
+		{name: "power task"},
+		{name: "NVOS restart requires compute power capability before flashing", firmwareRestart: true},
+		{name: "custom rule without update ignores saved restart capabilities", firmwareRestart: true, noFirmwareAction: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := newPreflightCapabilityRegistry(t, capability.CapabilityPowerStatus)
+			info := powerControlExecutionInfo(t)
+			if tc.firmwareRestart {
+				registry = newPreflightFirmwareRegistry(t, nil)
+				info = firmwareControlExecutionInfo(t)
+				restartComponents := info.Components
+				info.Components = []task.WorkflowComponent{{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "switch-1"}}
+				info.RuleDefinition.Steps[0].ComponentType = devicetypes.ComponentTypeNVSwitch
+				if tc.noFirmwareAction {
+					info.RuleDefinition.Steps[0].MainOperation = operationrules.ActionConfig{Name: operationrules.ActionSleep,
+						Parameters: map[string]any{operationrules.ParamDuration: "1s"}}
+				} else {
+					for i, step := range operationrules.ComputeRestartSteps() {
+						step.Stage = info.RuleDefinition.GetMaxStage() + i + 1
+						info.AdditionalSteps = append(info.AdditionalSteps, task.ExecutionStep{Definition: step, Components: restartComponents})
+					}
+				}
+			}
+			err := validateRequiredCapabilities(info, registry)
+			if tc.noFirmwareAction {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, componentmanager.ErrUnsupportedCapability)
+			var capabilityErr componentmanager.UnsupportedCapabilityError
+			require.ErrorAs(t, err, &capabilityErr)
+			require.Equal(t, devicetypes.ComponentTypeCompute, capabilityErr.ComponentType)
+			require.Equal(t, capability.CapabilityPowerControl, capabilityErr.Capability)
+		})
+	}
 }
 
-func TestExecuteValidatesCapabilitiesBeforeDispatch(t *testing.T) {
+func TestManager_Execute(t *testing.T) {
 	registry := newPreflightCapabilityRegistry(
 		t,
 		capability.CapabilityPowerStatus,
@@ -68,7 +91,7 @@ func TestExecuteValidatesCapabilitiesBeforeDispatch(t *testing.T) {
 	require.True(t, errors.Is(err, componentmanager.ErrUnsupportedCapability))
 }
 
-func TestValidateRejectsUnsupportedFirmwareOptionsBeforeDispatch(t *testing.T) {
+func testValidateRejectsUnsupportedFirmwareOptionsBeforeDispatch(t *testing.T) {
 	validationErr := errors.New("firmware version-check override is not supported")
 	registry := newPreflightFirmwareRegistry(t, validationErr)
 	manager := &Manager{conf: Config{ComponentManagerRegistry: registry}}
@@ -177,31 +200,23 @@ func newPreflightFirmwareRegistry(
 ) *componentmanager.Registry {
 	t.Helper()
 
-	descriptor := cmcatalog.Descriptor{
-		DescriptorIdentity: cmcatalog.DescriptorIdentity{
-			Type:           devicetypes.ComponentTypeCompute,
-			Implementation: "limited-firmware",
-		},
-		Capabilities: capability.CapabilitySet{
-			capability.CapabilityFirmwareControl,
-			capability.CapabilityFirmwareStatus,
-		},
-	}
-	registry, err := componentmanager.NewRegistry(
-		[]componentmanager.FactorySpec{{
+	var factories []componentmanager.FactorySpec
+	configured := make(map[devicetypes.ComponentType]string)
+	for _, ct := range []devicetypes.ComponentType{devicetypes.ComponentTypeCompute, devicetypes.ComponentTypeNVSwitch} {
+		descriptor := cmcatalog.Descriptor{
+			DescriptorIdentity: cmcatalog.DescriptorIdentity{Type: ct, Implementation: "limited-firmware"},
+			Capabilities:       capability.CapabilitySet{capability.CapabilityFirmwareControl, capability.CapabilityFirmwareStatus},
+		}
+		factories = append(factories, componentmanager.FactorySpec{
 			Descriptor: descriptor,
 			Factory: func(*providerapi.ProviderRegistry) (componentmanager.ComponentManager, error) {
-				return preflightCapabilityManager{
-					descriptor:            descriptor,
-					firmwareValidationErr: validationErr,
-				}, nil
+				return preflightCapabilityManager{descriptor: descriptor, firmwareValidationErr: validationErr}, nil
 			},
-		}},
-		cmconfig.Config{ComponentManagers: map[devicetypes.ComponentType]string{
-			devicetypes.ComponentTypeCompute: "limited-firmware",
-		}},
-		providerapi.NewProviderRegistry(),
-	)
+		})
+		configured[ct] = "limited-firmware"
+	}
+	registry, err := componentmanager.NewRegistry(factories,
+		cmconfig.Config{ComponentManagers: configured}, providerapi.NewProviderRegistry())
 	require.NoError(t, err)
 	return registry
 }
@@ -241,7 +256,7 @@ func newPreflightCapabilityRegistry(
 	return registry
 }
 
-func TestValidateFirmwareSelection(t *testing.T) {
+func testValidateFirmwareSelection(t *testing.T) {
 	compute, sw, ps := devicetypes.ComponentTypeCompute, devicetypes.ComponentTypeNVSwitch, devicetypes.ComponentTypePowerShelf
 	cases := []struct {
 		name          string
@@ -315,4 +330,52 @@ type selectionValidationManager struct {
 func (m selectionValidationManager) Descriptor() cmcatalog.Descriptor { return m.descriptor }
 func (m selectionValidationManager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
 	return m.validate(info)
+}
+
+func TestManager_Validate(t *testing.T) {
+	t.Run("backend rejects firmware options before dispatch", testValidateRejectsUnsupportedFirmwareOptionsBeforeDispatch)
+	t.Run("firmware selection", testValidateFirmwareSelection)
+	t.Run("additional step option scope", testValidateAdditionalStepOptions)
+}
+
+func testValidateAdditionalStepOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stepInfo  string
+		mixedIDs  bool
+		wantError string
+	}{
+		{name: "incompatible inherited options reject before submission", wantError: `firmware target "nvos" has no matching firmware action`},
+		{name: "explicit step subset validates", stepInfo: `{"operation":1,"sub_targets":["bmc"]}`},
+		{name: "excluded firmware version rejects before submission", stepInfo: `{"operation":1,"target_version":"{\"nvswitch\":\"switch-fw\"}"}`, wantError: "firmware version excludes"},
+		{name: "mixed addressing rejects before submission", stepInfo: `{"operation":1,"sub_targets":["bmc"]}`, mixedIDs: true, wantError: "requires a MAC address for every target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := firmwareControlExecutionInfo(t)
+			info.OperationInfo = []byte(`{"operation":1,"sub_targets":["bmc","nvos"]}`)
+			info.RuleDefinition.Steps[0].Stage = 1
+			switchStep := info.RuleDefinition.Steps[0]
+			switchStep.ComponentType = devicetypes.ComponentTypeNVSwitch
+			switchStep.Stage = 2
+			info.RuleDefinition.Steps = append(info.RuleDefinition.Steps, switchStep)
+			info.Components = append(info.Components, task.WorkflowComponent{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "switch-1"})
+			step := task.ExecutionStep{Definition: info.RuleDefinition.Steps[0], Components: info.Components[:1], OperationInfo: []byte(tc.stepInfo)}
+			step.Definition.Stage = 3
+			if tc.mixedIDs {
+				step.Components = append([]task.WorkflowComponent(nil), step.Components...)
+				step.Components = append(step.Components, task.WorkflowComponent{Type: devicetypes.ComponentTypeCompute, MACAddress: "aa:bb:cc:dd:ee:01"})
+			}
+			info.AdditionalSteps = []task.ExecutionStep{step}
+			manager := &Manager{conf: Config{ComponentManagerRegistry: newPreflightFirmwareRegistry(t, nil)}}
+			req := &task.ExecutionRequest{Info: info, Async: true}
+			if tc.wantError == "" {
+				require.NoError(t, manager.Validate(req))
+			} else {
+				// No publisher is configured: invalid options must stop before submission.
+				resp, err := manager.Execute(t.Context(), req)
+				require.ErrorContains(t, err, tc.wantError)
+				require.Nil(t, resp)
+			}
+		})
+	}
 }
