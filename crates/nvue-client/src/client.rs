@@ -511,9 +511,25 @@ impl NvueClient {
         let builder = self.request(Method::GET, &path)?;
         let request = builder.build()?;
         let response = self.execute("bridge_mac_table", request).await?;
-        let resonse_body: BTreeMap<String, _> = response.json().await?;
-        let response = resonse_body.into_values().collect();
-        Ok(response)
+        let response_body: BTreeMap<String, serde_json::Value> = response.json().await?;
+
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        for (key, value) in response_body {
+            match serde_json::from_value::<crate::types::MacTableEntry>(value) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    tracing::warn!("failed to decode MAC table entry for key {}: {}", key, e);
+                    skipped += 1;
+                }
+            }
+        }
+
+        if skipped > 0 {
+            tracing::warn!("skipped {} MAC table entries due to decode errors", skipped);
+        }
+
+        Ok(entries)
     }
 }
 
@@ -1128,5 +1144,142 @@ mod tests {
                 ("omit", "/address-family"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_mac_table_handles_missing_entry_type() {
+        // Test the two example entries from bug #9673
+        let handler = handler_fn(|request| {
+            request
+                .matches(Method::GET, "/nvue_v1/bridge/domain/br_default/mac-table")
+                .then(|| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "0": {
+                                "age": 28,
+                                "bridge-domain": "br_default",
+                                "interface": "pf0hpf_if",
+                                "last-update": 58,
+                                "mac": "66:d0:c4:dc:8f:b9",
+                                "vlan": 111
+                            },
+                            "1": {
+                                "age": 261046,
+                                "bridge-domain": "br_default",
+                                "entry-type": "extern_learn",
+                                "interface": "vxlan48",
+                                "last-update": 261046,
+                                "mac": "be:f0:af:75:af:d7",
+                                "vlan": 4043
+                            }
+                        }),
+                    )
+                })
+        });
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
+
+        let mac_table = client
+            .bridge_mac_table("br_default")
+            .await
+            .expect("MAC table request should succeed");
+
+        // Both entries should be decoded successfully
+        assert_eq!(mac_table.len(), 2);
+
+        // First entry: locally learned MAC without entry-type
+        let entry1 = mac_table
+            .iter()
+            .find(|e| e.mac == "66:d0:c4:dc:8f:b9")
+            .expect("entry 1 should exist");
+        assert_eq!(entry1.interface, "pf0hpf_if");
+        assert_eq!(entry1.vlan, Some(111));
+        assert_eq!(entry1.entry_type, None); // entry-type is missing
+
+        // Second entry: externally learned MAC with entry-type
+        let entry2 = mac_table
+            .iter()
+            .find(|e| e.mac == "be:f0:af:75:af:d7")
+            .expect("entry 2 should exist");
+        assert_eq!(entry2.interface, "vxlan48");
+        assert_eq!(entry2.vlan, Some(4043));
+        assert_eq!(entry2.entry_type, Some("extern_learn".to_string()));
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn bridge_mac_table_skips_invalid_entries() {
+        // Test that invalid entries are skipped with a warning
+        let handler = handler_fn(|request| {
+            request
+                .matches(Method::GET, "/nvue_v1/bridge/domain/br_default/mac-table")
+                .then(|| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "0": {
+                                "age": 28,
+                                "bridge-domain": "br_default",
+                                "interface": "pf0hpf_if",
+                                "last-update": 58,
+                                "mac": "66:d0:c4:dc:8f:b9",
+                                "vlan": 111
+                            },
+                            "1": {
+                                "invalid": "entry"
+                            },
+                            "2": {
+                                "age": 261046,
+                                "bridge-domain": "br_default",
+                                "entry-type": "extern_learn",
+                                "interface": "vxlan48",
+                                "last-update": 261046,
+                                "mac": "be:f0:af:75:af:d7",
+                                "vlan": 4043
+                            }
+                        }),
+                    )
+                })
+        });
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(
+            server.server_address(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("client should be created");
+
+        let mac_table = client
+            .bridge_mac_table("br_default")
+            .await
+            .expect("MAC table request should succeed");
+
+        // Only the two valid entries should be returned, invalid one skipped
+        assert_eq!(mac_table.len(), 2);
+
+        let entry1 = mac_table
+            .iter()
+            .find(|e| e.mac == "66:d0:c4:dc:8f:b9")
+            .expect("entry 1 should exist");
+        assert_eq!(entry1.entry_type, None);
+
+        let entry2 = mac_table
+            .iter()
+            .find(|e| e.mac == "be:f0:af:75:af:d7")
+            .expect("entry 2 should exist");
+        assert_eq!(entry2.entry_type, Some("extern_learn".to_string()));
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
     }
 }

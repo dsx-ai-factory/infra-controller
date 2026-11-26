@@ -2237,13 +2237,13 @@ fn write(
 struct Fdb {
     mac: String,
     ifname: String,
-    state: String,
+    state: Option<String>,
     vlan: Option<u32>,
 }
 
 impl Fdb {
     fn is_permanent(&self) -> bool {
-        self.state == "permanent"
+        self.state.as_deref() == Some("permanent")
     }
 }
 
@@ -9005,5 +9005,99 @@ esac
             assert_eq!(observations[0].prefixes, expected_prefixes, "{scenario}");
             assert!(observations[0].gateways.is_empty(), "{scenario}");
         }
+    }
+
+    #[test]
+    fn vlan_fdb_map_from_nvue_mac_table_handles_missing_entry_type() {
+        // Test the two example entries from bug #9673
+        let mac_table = vec![
+            nvue_client::types::MacTableEntry {
+                mac: "66:d0:c4:dc:8f:b9".to_string(),
+                interface: "pf0hpf_if".to_string(),
+                entry_type: None, // locally learned MAC without entry-type
+                vlan: Some(111),
+            },
+            nvue_client::types::MacTableEntry {
+                mac: "be:f0:af:75:af:d7".to_string(),
+                interface: "vxlan48".to_string(),
+                entry_type: Some("extern_learn".to_string()), // externally learned MAC with entry-type
+                vlan: Some(4043),
+            },
+        ];
+
+        let fdb_map = vlan_fdb_map_from_nvue_mac_table(mac_table);
+
+        // Both entries should be in the map under their respective VLANs
+        assert_eq!(fdb_map.len(), 2);
+
+        // VLAN 111 should have the locally learned MAC
+        let vlan_111 = fdb_map.get(&111).expect("VLAN 111 should exist");
+        assert_eq!(vlan_111.len(), 1);
+        assert_eq!(vlan_111[0].mac, "66:d0:c4:dc:8f:b9");
+        assert_eq!(vlan_111[0].ifname, "pf0hpf_if");
+        assert_eq!(vlan_111[0].state, None); // entry-type is missing
+        assert_eq!(vlan_111[0].vlan, Some(111));
+
+        // VLAN 4043 should have the externally learned MAC
+        let vlan_4043 = fdb_map.get(&4043).expect("VLAN 4043 should exist");
+        assert_eq!(vlan_4043.len(), 1);
+        assert_eq!(vlan_4043[0].mac, "be:f0:af:75:af:d7");
+        assert_eq!(vlan_4043[0].ifname, "vxlan48");
+        assert_eq!(vlan_4043[0].state, Some("extern_learn".to_string()));
+        assert_eq!(vlan_4043[0].vlan, Some(4043));
+    }
+
+    #[test]
+    fn vlan_fdb_map_from_nvue_mac_table_skips_permanent_entries() {
+        // Permanent entries should be filtered out
+        let mac_table = vec![
+            nvue_client::types::MacTableEntry {
+                mac: "66:d0:c4:dc:8f:b9".to_string(),
+                interface: "pf0hpf_if".to_string(),
+                entry_type: Some("permanent".to_string()),
+                vlan: Some(111),
+            },
+            nvue_client::types::MacTableEntry {
+                mac: "be:f0:af:75:af:d7".to_string(),
+                interface: "vxlan48".to_string(),
+                entry_type: Some("extern_learn".to_string()),
+                vlan: Some(4043),
+            },
+        ];
+
+        let fdb_map = vlan_fdb_map_from_nvue_mac_table(mac_table);
+
+        // Only the non-permanent entry should be in the map
+        assert_eq!(fdb_map.len(), 1);
+        let vlan_4043 = fdb_map.get(&4043).expect("VLAN 4043 should exist");
+        assert_eq!(vlan_4043.len(), 1);
+        assert_eq!(vlan_4043[0].mac, "be:f0:af:75:af:d7");
+    }
+
+    #[test]
+    fn vlan_fdb_map_from_nvue_mac_table_skips_entries_without_vlan() {
+        // Entries without VLAN should be filtered out
+        let mac_table = vec![
+            nvue_client::types::MacTableEntry {
+                mac: "66:d0:c4:dc:8f:b9".to_string(),
+                interface: "pf0hpf_if".to_string(),
+                entry_type: Some("extern_learn".to_string()),
+                vlan: None,
+            },
+            nvue_client::types::MacTableEntry {
+                mac: "be:f0:af:75:af:d7".to_string(),
+                interface: "vxlan48".to_string(),
+                entry_type: Some("extern_learn".to_string()),
+                vlan: Some(4043),
+            },
+        ];
+
+        let fdb_map = vlan_fdb_map_from_nvue_mac_table(mac_table);
+
+        // Only the entry with VLAN should be in the map
+        assert_eq!(fdb_map.len(), 1);
+        let vlan_4043 = fdb_map.get(&4043).expect("VLAN 4043 should exist");
+        assert_eq!(vlan_4043.len(), 1);
+        assert_eq!(vlan_4043[0].mac, "be:f0:af:75:af:d7");
     }
 }
