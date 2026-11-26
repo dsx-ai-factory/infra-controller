@@ -17,6 +17,7 @@
 
 use carbide_kms_provider::{EncryptedDek, KmsBackend};
 use carbide_uuid::secret::SecretId;
+use db::TransactionVending as _;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use sqlx::PgPool;
 
@@ -127,10 +128,7 @@ pub(crate) async fn re_wrap_stale(
         }
 
         // Then one short, write-only transaction per batch.
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        let mut txn = pool.txn_begin().await?;
         for rewrap in &pending {
             db::secrets::update_dek_wrap(
                 &mut txn,
@@ -141,9 +139,7 @@ pub(crate) async fn re_wrap_stale(
             )
             .await?;
         }
-        txn.commit().await.map_err(|e| {
-            PgSecretsError::Database(db::DatabaseError::new("commit re-wrap batch", e))
-        })?;
+        txn.commit().await?;
         result.re_wrapped += pending.len() as u64;
     }
 

@@ -314,28 +314,28 @@ pub async fn write_certs(
 ) -> Result<(), eyre::Report> {
     if let Some(mut machine_certificate) = machine_certificate {
         let mut combined_cert = Vec::with_capacity(
-            machine_certificate.public_key.len() + machine_certificate.issuing_ca.len() + 1,
+            machine_certificate.public_key.len() + machine_certificate.issuing_ca.len() + 2,
         );
         combined_cert.append(&mut machine_certificate.public_key);
-        combined_cert.append(&mut "\n".to_string().into_bytes());
+        combined_cert.push(b'\n');
         combined_cert.append(&mut machine_certificate.issuing_ca);
-        combined_cert.append(&mut "\n".to_string().into_bytes());
+        combined_cert.push(b'\n');
         let (client_cert, client_key) = match override_client_cert {
             Some(c) => (c.cert_path.as_str(), c.key_path.as_str()),
             None => (tls_default::CLIENT_CERT, tls_default::CLIENT_KEY),
         };
         tokio::fs::write(client_cert, combined_cert)
             .await
-            .wrap_err(format!(
-                "failed to write new machine certificate PEM to {client_cert}"
-            ))?;
+            .wrap_err_with(|| {
+                format!("failed to write new machine certificate PEM to {client_cert}")
+            })?;
         tracing::info!(%client_cert, "Wrote new machine certificate PEM");
 
         write_private_key(client_key, machine_certificate.private_key.as_slice())
             .await
-            .wrap_err(format!(
-                "failed to write new machine certificate key to: {client_key}"
-            ))?;
+            .wrap_err_with(|| {
+                format!("failed to write new machine certificate key to: {client_key}")
+            })?;
     } else {
         return Err(eyre::eyre!("write_certs: machine_certificate is empty"));
     }

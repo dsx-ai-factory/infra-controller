@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,7 +168,7 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 		// Acquire an advisory lock on Allocation creation for Site - this is needed because of checks:
 		// - For IM, a Tenant pool is created only if this is the first Allocation
 		// - a TenantSite record is created if this is the first Allocation
-		lockID := fmt.Sprintf("%s-%s-%s", ip.ID.String(), site.ID.String(), tenant.ID.String())
+		lockID := fmt.Sprintf("%s-%s-%s", ip.ID, site.ID, tenant.ID)
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock to create Allocation")
@@ -223,10 +224,10 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, "Error retrieving Instance Type in Allocation Constraint in request", nil)
 				}
 				if it.SiteID != nil && *it.SiteID != site.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to Site specified in request", it.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to Site specified in request", it.ID), nil)
 				}
 				if it.InfrastructureProviderID != ip.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to current Provider", it.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Instance Type: %v in Allocation Constraint does not belong to current Provider", it.ID), nil)
 				}
 
 				// Check if there are Machines which are available for Allocation
@@ -262,7 +263,7 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, "Error retrieving IPBlock in Allocation Constraint in request", nil)
 				}
 				if ipb.SiteID != site.ID {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID.String()), nil)
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID), nil)
 				}
 				serr = ipb.ValidateChildPrefixLength(ac.ConstraintValue)
 				if serr != nil {
@@ -581,7 +582,7 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 		for _, status := range statusQuery {
 			_, ok := cdbm.AllocationStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				statusError := validation.Errors{
 					"status": errors.New(status),
 				}
@@ -1034,7 +1035,7 @@ func (uah UpdateAllocationHandler) Handle(c echo.Context) error {
 			// check and the subsequent Update are atomic — without it, two
 			// concurrent renames to the same name could both observe
 			// tot == 0 and one would fall through to a DB unique-violation 500.
-			lockID := fmt.Sprintf("alloc-rename-%s-%s", existingA.TenantID.String(), existingA.SiteID.String())
+			lockID := fmt.Sprintf("alloc-rename-%s-%s", existingA.TenantID, existingA.SiteID)
 			serr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("unable to acquire advisory lock to update Allocation name")
@@ -1229,7 +1230,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 
 		// take an advisory lock on allocation api - this is needed because, we are checking the allocation constraint counts
 		// to delete the tenant pool below.
-		lockID := fmt.Sprintf("%s-%s-%s", ip.ID.String(), a.SiteID.String(), a.TenantID.String())
+		lockID := fmt.Sprintf("%s-%s-%s", ip.ID, a.SiteID, a.TenantID)
 		derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock to delete Allocation")
@@ -1263,13 +1264,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		// for a single allocation, so this should be cleaned up once allocations and
 		// constraints have merged into a single object.
 		slices.SortFunc(acs, func(a, b cdbm.AllocationConstraint) int {
-			if a.ResourceTypeID.String() < b.ResourceTypeID.String() {
-				return -1
-			}
-			if a.ResourceTypeID.String() > b.ResourceTypeID.String() {
-				return 1
-			}
-			return 0
+			return bytes.Compare(a.ResourceTypeID[:], b.ResourceTypeID[:])
 		})
 		for _, ac := range acs {
 			switch ac.ResourceType {
@@ -1333,7 +1328,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 						fmt.Sprintf(
 							"Deleting this Allocation as specified would result in %d total Machines for Instance Type ID: %s allocated to Tenant, less than Tenant's active Instance count: %d for the Instance Type",
 							totalConstraintValue-deletedConstraintValue,
-							ac.ResourceTypeID.String(),
+							ac.ResourceTypeID,
 							iCount,
 						),
 						nil,

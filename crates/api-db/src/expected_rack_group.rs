@@ -13,6 +13,7 @@ use model::expected_rack_group::{
 use model::metadata::Metadata;
 use sqlx::{FromRow, PgConnection};
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[derive(FromRow, carbide_macros::DbTable)]
@@ -44,7 +45,7 @@ impl GroupRow {
 }
 
 pub async fn find_by_rack_group_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_group_id: &RackGroupId,
 ) -> DatabaseResult<Option<ExpectedRackGroup>> {
     let query = format!(
@@ -53,7 +54,7 @@ pub async fn find_by_rack_group_id(
     );
     let Some(row): Option<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(rack_group_id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(&query, err))?
     else {
@@ -82,29 +83,29 @@ pub async fn find_by_rack_id(
 }
 
 /// Returns all expected rack groups ordered by their external ID.
-pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
+pub async fn find_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedRackGroup>> {
     let query = format!(
         "SELECT {} FROM expected_rack_groups ORDER BY rack_group_id",
         GroupRow::db_table_columns()
     );
     let rows: Vec<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(&query, err))?;
 
     Ok(rows.into_iter().map(GroupRow::into_group).collect())
 }
 
-pub async fn find_ids(txn: &mut PgConnection) -> DatabaseResult<Vec<RackGroupId>> {
+pub async fn find_ids(conn: impl DbReader<'_>) -> DatabaseResult<Vec<RackGroupId>> {
     let query = "SELECT rack_group_id FROM expected_rack_groups ORDER BY rack_group_id";
     sqlx::query_scalar(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(query, err))
 }
 
 pub async fn find_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ids: &[RackGroupId],
 ) -> DatabaseResult<Vec<ExpectedRackGroup>> {
     let query = format!(
@@ -114,7 +115,7 @@ pub async fn find_by_ids(
     let values: Vec<&str> = ids.iter().map(RackGroupId::as_str).collect();
     let rows: Vec<GroupRow> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(values)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(&query, err))?;
     Ok(rows.into_iter().map(GroupRow::into_group).collect())

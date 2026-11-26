@@ -436,7 +436,7 @@ func (gepsh GetExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)
@@ -556,7 +556,7 @@ func (uepsh UpdateExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)
@@ -719,7 +719,7 @@ func (depsh DeleteExpectedPowerShelfHandler) Handle(c echo.Context) error {
 	expectedPowerShelf, err := epsDAO.Get(ctx, nil, expectedPowerShelfID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Power Shelf with ID: %s", expectedPowerShelfID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Power Shelf from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Power Shelf due to DB error", nil)

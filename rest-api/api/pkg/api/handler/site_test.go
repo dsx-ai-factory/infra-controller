@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -363,7 +364,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 		name                          string
 		fields                        fields
 		wantErr                       bool
-		body                          string
+		body                          []byte
 		expectedName                  string
 		expectedDescription           *string
 		expectedSerialConsoleHostname *string
@@ -383,7 +384,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:                       false,
-			body:                          string(stcrJSON1),
+			body:                          stcrJSON1,
 			expectedName:                  stcr1.Name,
 			expectedDescription:           stcr1.Description,
 			expectedSerialConsoleHostname: stcr1.SerialConsoleHostname,
@@ -398,7 +399,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 			},
 			wantErr:  true,
 			respCode: http.StatusConflict,
-			body:     string(stcrJSON1),
+			body:     stcrJSON1,
 		},
 		{
 			name: "Error in Site create API when site manager return error",
@@ -409,7 +410,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             true,
-			body:                string(stcrJSON4),
+			body:                stcrJSON4,
 			expectedName:        stcr4.Name,
 			expectedDescription: stcr4.Description,
 			siteManagerErr:      true,
@@ -424,7 +425,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             false,
-			body:                string(stcrJSON3),
+			body:                stcrJSON3,
 			expectedName:        stcr3.Name,
 			expectedDescription: stcr3.Description,
 			siteManagerDisabled: true,
@@ -439,7 +440,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             false,
-			body:                string(stcrJSON5),
+			body:                stcrJSON5,
 			expectedLocation:    stcr5.Location,
 			siteManagerDisabled: true,
 			expectedName:        stcr5.Name,
@@ -453,7 +454,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			wantErr:             false,
-			body:                string(stcrJSON6),
+			body:                stcrJSON6,
 			expectedContact:     stcr6.Contact,
 			siteManagerDisabled: true,
 			expectedName:        stcr6.Name,
@@ -464,7 +465,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 			tcsm.forceErr = tt.siteManagerErr
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tt.body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1009,7 +1010,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 			// Setup echo server/context
 			e := echo.New()
 			reqJSON, _ := json.Marshal(tt.args.reqData)
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(reqJSON)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(reqJSON))
 			if tt.query != nil {
 				req.URL.RawQuery = tt.query.Encode()
 			}
@@ -1025,6 +1026,12 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if !tt.wantErr {
+				predecessor, getErr := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := ush.Handle(ec)
 			assert.Nil(t, err)
 
@@ -1136,7 +1143,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				}
 
 				if updated {
-					assert.NotEqual(t, tt.args.site.Updated.String(), rst.Updated.String())
+					assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 				}
 
 				if tt.wantStatus != nil {

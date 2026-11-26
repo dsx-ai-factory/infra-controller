@@ -20,9 +20,8 @@ nico-admin-cli expected-rack-group replace-all
 Replace all expected rack groups from a JSON file
 
 This operation clears all existing groups before inserting replacements.
-Any expected NVLink domain declaration blocks it, even if the
-replacement preserves the referenced group. Delete all declarations with
-expected-nvlink-domain delete first.
+Any NVLink domain declaration blocks it, even if the replacement
+preserves the referenced group or the declaration is pending deletion.
 
 ## OPTIONS
 
@@ -35,10 +34,11 @@ rack_group_id, topology, racks, and metadata. The optional
 expected_rack_groups_count must match the array length. An empty array
 clears all groups.
 
-Each rack has rack_id and members; each member has type, manufacturer,
-and id. Metadata contains name, description, and labels as an array of
-{key, value} objects. Export a compatible file with --format json
-expected-rack-group show.
+Each rack has rack_id and members; each member requires type,
+manufacturer, id, and cartridge_index. cartridge_index must be an
+integer from 0 to 4294967295. Metadata contains name, description, and
+labels as an array of {key, value} objects. Export a compatible file
+with --format json expected-rack-group show.
 
 `--extended`
 
@@ -54,9 +54,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 

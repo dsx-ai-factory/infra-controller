@@ -105,17 +105,15 @@ impl RequestTransport {
                 // gRPC retry pushback is the transport-native equivalent of
                 // Retry-After. Use the same normalized delay (expressed in
                 // milliseconds) so HTTP and gRPC clients receive one policy.
-                let pushback_milliseconds = retry.delay_seconds().saturating_mul(1_000).to_string();
+                let pushback_milliseconds = retry.delay_seconds().saturating_mul(1_000);
                 status.metadata_mut().insert(
                     GRPC_RETRY_PUSHBACK_HEADER,
-                    tonic::metadata::MetadataValue::try_from(pushback_milliseconds.as_str())
-                        .expect("retry pushback is an ASCII integer"),
+                    tonic::metadata::MetadataValue::from(pushback_milliseconds),
                 );
                 status.into_http::<Body>()
             }
             Self::Http => {
-                let retry_after = HeaderValue::from_str(&retry.delay_seconds().to_string())
-                    .expect("retry delay is an ASCII integer");
+                let retry_after = HeaderValue::from(retry.delay_seconds());
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     [(header::RETRY_AFTER, retry_after)],

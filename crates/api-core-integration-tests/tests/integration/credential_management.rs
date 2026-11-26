@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use carbide_api_core::AuthContext;
-use carbide_api_core::cfg::file::{BmcSiteWideRootSource, CarbideConfig, UfmCredentialSource};
+use carbide_api_core::cfg::file::{
+    BmcSiteWideRootSource, CarbideConfig, UfmAuthMode, UfmCredentialSource,
+};
 use carbide_api_core::test_support::{
     MAX_BGP_PASSWORD_LENGTH, default_config, default_credential_key,
 };
@@ -94,6 +96,17 @@ async fn init_with_runtime_config(
 fn config_with_ufm_source(ufm_source: UfmCredentialSource) -> CarbideConfig {
     let mut config = default_config::get();
     config.credentials.ufm_source = ufm_source;
+    config
+}
+
+/// Configures the default fabric's explicit UFM authentication policy for handler tests.
+fn config_with_default_ufm_auth(auth: Option<UfmAuthMode>) -> CarbideConfig {
+    let mut config = default_config::get();
+    config
+        .ib_fabrics
+        .get_mut("default")
+        .expect("default fabric")
+        .auth = auth;
     config
 }
 
@@ -290,14 +303,18 @@ async fn test_ufm_credential_mutations_reject_local_ownership(pool: PgPool) {
     );
 }
 
+/// Verifies backend-owned UFM deletion removes the key rather than storing an empty-password
+/// certificate-selection tombstone.
 #[sqlx_test]
 async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
+    // Build the public API over a backend-owned writer and its underlying test store.
     let (env, credential_manager) =
         init_with_runtime_config(pool, config_with_ufm_source(UfmCredentialSource::Backend)).await;
     let key = CredentialKey::UfmAuth {
         fabric: "default".to_string(),
     };
 
+    // Add the initial token and prove the configured writer received it.
     env.api()
         .create_credential(tonic::Request::new(ufm_create_request()))
         .await
@@ -313,6 +330,7 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
         })
     );
 
+    // Delete through the public handler and prove no tombstone remains in the writer.
     env.api()
         .delete_credential(tonic::Request::new(ufm_delete_request()))
         .await
@@ -322,10 +340,129 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
             .get_credentials_from_writer(&key)
             .await
             .expect("read backend after delete"),
-        Some(Credentials::UsernamePassword {
-            username: "https://ufm.example.com".to_string(),
-            password: String::new(),
-        })
+        None
+    );
+}
+
+/// Explicit token mode rejects whitespace-only input before the writer can persist it.
+#[sqlx_test]
+async fn ufm_token_auth_rejects_blank_token_without_storing_it(pool: PgPool) {
+    // Configure the handler with the explicit mode that requires a token.
+    let (env, credential_manager) =
+        init_with_runtime_config(pool, config_with_default_ufm_auth(Some(UfmAuthMode::Token)))
+            .await;
+    let key = CredentialKey::UfmAuth {
+        fabric: "default".to_string(),
+    };
+    let mut request = ufm_create_request();
+    request.password = " \t".to_string();
+
+    // Submit whitespace-only input and verify the public validation error.
+    let error = env
+        .api()
+        .create_credential(tonic::Request::new(request))
+        .await
+        .expect_err("explicit token authentication must reject a blank token");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "the default fabric sets auth; a blank UFM token is only valid when auth is not set"
+    );
+
+    // Prove validation happened before the credential writer.
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after rejected create"),
+        None
+    );
+}
+
+/// Explicit client-certificate mode rejects a blank token because no credential should be added.
+#[sqlx_test]
+async fn ufm_client_certificate_auth_rejects_blank_token(pool: PgPool) {
+    // Configure certificate authentication and send the CLI's default empty token.
+    let (env, credential_manager) = init_with_runtime_config(
+        pool,
+        config_with_default_ufm_auth(Some(UfmAuthMode::ClientCertificate)),
+    )
+    .await;
+    let key = CredentialKey::UfmAuth {
+        fabric: "default".to_string(),
+    };
+    let mut request = ufm_create_request();
+    request.password.clear();
+
+    // The explicit mode makes the otherwise legacy-compatible blank value invalid.
+    let error = env
+        .api()
+        .create_credential(tonic::Request::new(request))
+        .await
+        .expect_err("explicit client-certificate authentication must reject a blank token");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after rejected create"),
+        None
+    );
+}
+
+/// Explicit token mode stores a nonblank token, separating valid input from the blank boundary.
+#[sqlx_test]
+async fn ufm_token_auth_stores_nonblank_token(pool: PgPool) {
+    // Configure token authentication and submit an ordinary token.
+    let (env, credential_manager) =
+        init_with_runtime_config(pool, config_with_default_ufm_auth(Some(UfmAuthMode::Token)))
+            .await;
+    let key = CredentialKey::UfmAuth {
+        fabric: "default".to_string(),
+    };
+
+    env.api()
+        .create_credential(tonic::Request::new(ufm_create_request()))
+        .await
+        .expect("explicit token authentication must accept a nonblank token");
+
+    // Verify the accepted token reached the configured writer exactly as submitted.
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after create"),
+        Some(Credentials::new(
+            "https://ufm.example.com",
+            "test-ufm-token"
+        ))
+    );
+}
+
+/// Omitted auth still stores a blank value so legacy certificate selection remains available.
+#[sqlx_test]
+async fn ufm_omitted_auth_stores_blank_token(pool: PgPool) {
+    // Preserve the legacy omitted policy and submit the CLI's default empty token.
+    let (env, credential_manager) =
+        init_with_runtime_config(pool, config_with_default_ufm_auth(None)).await;
+    let key = CredentialKey::UfmAuth {
+        fabric: "default".to_string(),
+    };
+    let mut request = ufm_create_request();
+    request.password.clear();
+
+    env.api()
+        .create_credential(tonic::Request::new(request))
+        .await
+        .expect("omitted auth must retain blank-token compatibility");
+
+    // Verify the handler still writes the empty value for backends that preserve it.
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after create"),
+        Some(Credentials::new("https://ufm.example.com", ""))
     );
 }
 

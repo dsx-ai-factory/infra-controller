@@ -33,20 +33,38 @@ struct NetworkState {
     state: String,
 }
 
-fn format_free_ip_count(legacy_count: u32, count_v2: Option<u64>, saturated: bool) -> String {
-    match (count_v2, saturated) {
-        (Some(_), true) => "Effectively unlimited".to_string(),
-        (Some(count), false) => count.to_string(),
-        // Mutation replies skip accounting; a legacy zero cannot distinguish it
-        // from exhaustion. A measured zero is represented by Some(0).
-        (None, _) if legacy_count == 0 => "Unknown".to_string(),
-        (None, _) => u64::from(legacy_count).to_string(),
+/// Detailed show requests counts with `include_num_free_ips` and fetches
+/// history separately. Mutation replies include neither.
+enum SegmentDetails {
+    CountedRead(Vec<forgerpc::StateHistoryRecord>),
+    Mutation,
+}
+
+impl SegmentDetails {
+    fn free_ip_count(&self, index: usize, prefix: &forgerpc::NetworkPrefix) -> String {
+        match prefix.free_ip_count_v2 {
+            Some(_) if prefix.free_ip_count_saturated => "Effectively unlimited".to_string(),
+            Some(count) => count.to_string(),
+            None if prefix.free_ip_count != 0 => prefix.free_ip_count.to_string(),
+            // With accounting requested, legacy Core stored its count on the
+            // first returned prefix. Other default zeros do not report a count.
+            None if index == 0 && matches!(self, Self::CountedRead(_)) => "0".to_string(),
+            None => "Unknown".to_string(),
+        }
     }
 }
 
-pub(in crate::network_segment) async fn convert_network_to_nice_format(
+/// Renders the result of create or append without treating it as a counted read.
+pub(in crate::network_segment) async fn format_segment_after_mutation(
     segment: forgerpc::NetworkSegment,
-    history: Option<Vec<forgerpc::StateHistoryRecord>>,
+    api_client: &ApiClient,
+) -> CarbideCliResult<String> {
+    format_segment_details(segment, SegmentDetails::Mutation, api_client).await
+}
+
+async fn format_segment_details(
+    segment: forgerpc::NetworkSegment,
+    details: SegmentDetails,
     api_client: &ApiClient,
 ) -> CarbideCliResult<String> {
     let name = segment
@@ -83,7 +101,7 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
             segment
                 .deleted
                 .map(|x| x.to_string())
-                .unwrap_or("Not Deleted".to_string()),
+                .unwrap_or_else(|| "Not Deleted".to_string()),
         ),
         ("STATE", state),
         ("VPC", config.vpc_id.unwrap_or_default().to_string()),
@@ -117,6 +135,7 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
         writeln!(&mut lines, "\tEMPTY")?;
     } else {
         for (i, prefix) in config.prefixes.into_iter().enumerate() {
+            let free_ip_count = details.free_ip_count(i, &prefix);
             let range = ipnet::IpNet::from_str(&prefix.prefix)
                 .map(|net| format!("{} - {}", net.network(), net.broadcast()))
                 .unwrap_or_else(|_| "invalid prefix".to_string());
@@ -135,14 +154,7 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
                     prefix.dhcpv6_link_address.unwrap_or_default(),
                 ),
                 ("Reserve First", prefix.reserve_first.to_string()),
-                (
-                    "Free IP Count",
-                    format_free_ip_count(
-                        prefix.free_ip_count,
-                        prefix.free_ip_count_v2,
-                        prefix.free_ip_count_saturated,
-                    ),
-                ),
+                ("Free IP Count", free_ip_count),
             ];
 
             for (key, value) in data {
@@ -155,7 +167,7 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
         }
     }
 
-    if let Some(history) = history {
+    if let SegmentDetails::CountedRead(history) = details {
         writeln!(&mut lines, "STATE HISTORY: (Latest 5 only)")?;
         if history.is_empty() {
             writeln!(&mut lines, "\tEMPTY")?;
@@ -169,12 +181,15 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
                 "\t---------------------------------------------------"
             )?;
             for x in history.iter().rev().take(5).rev() {
+                let state = serde_json::from_str::<NetworkState>(&x.state);
+                let state = state
+                    .as_ref()
+                    .map(|state| state.state.as_str())
+                    .unwrap_or(&x.state);
                 writeln!(
                     &mut lines,
                     "\t{:<15} {:25} {}",
-                    serde_json::from_str::<NetworkState>(&x.state)
-                        .map(|ns| ns.state)
-                        .unwrap_or_else(|_| x.state.clone()),
+                    state,
                     x.version,
                     x.time.unwrap_or_default()
                 )?;
@@ -237,6 +252,13 @@ fn convert_network_to_nice_table(
             continue;
         };
         let end_ip = net.broadcast().to_string();
+        let mut prefixes = String::new();
+        for (index, prefix) in config.prefixes.iter().enumerate() {
+            if index > 0 {
+                prefixes.push_str(", ");
+            }
+            prefixes.push_str(&prefix.prefix);
+        }
 
         table.add_row(row![
             segment.id.unwrap_or_default(),
@@ -245,12 +267,7 @@ fn convert_network_to_nice_table(
             state,
             config.vpc_id.unwrap_or_default(),
             config.mtu.unwrap_or(-1),
-            config
-                .prefixes
-                .iter()
-                .map(|x| x.prefix.to_string())
-                .collect::<Vec<String>>()
-                .join(", "),
+            prefixes,
             end_ip,
             version,
             format!(
@@ -305,7 +322,8 @@ async fn show_network_information(
         let history = api_client.get_segment_state_history(segment_id).await?;
         println!(
             "{}",
-            convert_network_to_nice_format(segment, Some(history), api_client).await?
+            format_segment_details(segment, SegmentDetails::CountedRead(history), api_client)
+                .await?
         );
     }
     Ok(())
@@ -336,9 +354,9 @@ pub(crate) async fn handle_show(
 #[cfg(test)]
 mod tests {
     use ::rpc::forge as forgerpc;
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::value_scenarios;
 
-    use super::{convert_network_to_nice_table, format_free_ip_count};
+    use super::{SegmentDetails, convert_network_to_nice_table};
 
     fn prefix(cidr: &str) -> forgerpc::NetworkPrefix {
         forgerpc::NetworkPrefix {
@@ -354,64 +372,43 @@ mod tests {
         }
     }
 
+    /// Free-address counts follow the fields Core supplied for this prefix,
+    /// including whether an omitted legacy zero represents a measured value.
     #[test]
-    fn free_ip_count_display_marks_saturated_values() {
-        struct FreeIpCountRow {
-            legacy: u32,
-            v2: Option<u64>,
-            saturated: bool,
-        }
-
-        check_values(
-            [
-                // A measured empty pool is distinct from absent accounting.
-                Check {
-                    scenario: "measured exhaustion",
-                    input: FreeIpCountRow {
-                        legacy: 0,
-                        v2: Some(0),
-                        saturated: false,
-                    },
-                    expect: "0".to_string(),
-                },
-                Check {
-                    scenario: "wide count",
-                    input: FreeIpCountRow {
-                        legacy: 42,
-                        v2: Some(1u64 << 32),
-                        saturated: false,
-                    },
-                    expect: (1u64 << 32).to_string(),
-                },
-                Check {
-                    scenario: "saturated",
-                    input: FreeIpCountRow {
-                        legacy: u32::MAX,
-                        v2: Some(u64::MAX),
-                        saturated: true,
-                    },
-                    expect: "Effectively unlimited".to_string(),
-                },
-                Check {
-                    scenario: "legacy server fallback",
-                    input: FreeIpCountRow {
-                        legacy: 42,
-                        v2: None,
-                        saturated: false,
-                    },
-                    expect: "42".to_string(),
-                },
-                Check {
-                    scenario: "legacy fallback ignores an unknown saturation flag",
-                    input: FreeIpCountRow {
-                        legacy: 42,
-                        v2: None,
-                        saturated: true,
-                    },
-                    expect: "42".to_string(),
-                },
-            ],
-            |row| format_free_ip_count(row.legacy, row.v2, row.saturated),
+    fn free_ip_count_from_counted_read() {
+        // Reverse the family order used by the command test: either family
+        // can be the first prefix in a counted response.
+        let cidrs = ["192.0.2.0/24", "2001:db8::/64"];
+        let details = SegmentDetails::CountedRead(Vec::new());
+        value_scenarios!(
+            run = |(index, legacy, v2, saturated)| {
+                let prefix = forgerpc::NetworkPrefix {
+                    free_ip_count: legacy,
+                    free_ip_count_v2: v2,
+                    free_ip_count_saturated: saturated,
+                    ..prefix(cidrs[index])
+                };
+                details.free_ip_count(index, &prefix)
+            };
+            "only the first legacy zero was counted" {
+                (0, 0, None, false) => "0".to_string(),
+                (1, 0, None, false) => "Unknown".to_string(),
+            }
+            "keep a positive legacy count wherever it was supplied" {
+                (0, 42, None, false) => "42".to_string(),
+                (1, 7, None, false) => "7".to_string(),
+            }
+            "a saturation flag without a wide count does not hide the legacy value" {
+                (1, 42, None, true) => "42".to_string(),
+            }
+            "an explicit sibling count takes precedence over the legacy scalar" {
+                (1, 0, Some(0), false) => "0".to_string(),
+                (1, u32::MAX, Some(1_u64 << 32), false) => (1_u64 << 32).to_string(),
+            }
+            "the saturation flag distinguishes an exact maximum from a capped count" {
+                (1, u32::MAX, Some(u64::MAX), false) => u64::MAX.to_string(),
+                (1, u32::MAX, Some(u64::MAX), true) => "Effectively unlimited".to_string(),
+            }
         );
     }
 

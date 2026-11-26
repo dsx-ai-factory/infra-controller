@@ -10,10 +10,7 @@ family to an existing Underlay segment
 ## SYNOPSIS
 
 ```text
-nico-admin-cli network-segment add-prefix <--id>
-<--prefix> [--gateway] [--reserve-first]
-[--dhcpv6-link-address] [--extended] [--sort-by]
-[-h|--help]
+nico-admin-cli network-segment add-prefix [OPTIONS] --id <NetworkSegmentId> --prefix <CIDR-prefix>
 ```
 
 ## DESCRIPTION

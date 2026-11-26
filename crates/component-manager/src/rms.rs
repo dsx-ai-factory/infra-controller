@@ -19,6 +19,7 @@ mod firmware_expectations;
 mod firmware_jobs;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write;
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -390,6 +391,7 @@ enum StagedFirmwareObject {
     /// job completes.
     Staged {
         system_image_job: String,
+        trace_id: Option<trace_propagation::correlation::TraceId>,
         config_json: String,
         component_filters: Vec<String>,
         options: FirmwareUpdateOptions,
@@ -1131,6 +1133,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
         let all_failed = total > 0 && failed == total;
 
         Ok(NvosUpdateJob {
+            request: None,
             job_id: parent_job_id,
             firmware_id: response.object_id,
             image_filename: response.image_filename,
@@ -1416,6 +1419,58 @@ impl std::fmt::Debug for RmsBackend {
 }
 
 impl RmsBackend {
+    async fn firmware_trace_id(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+    ) -> Option<trace_propagation::correlation::TraceId> {
+        match db::direct_dispatch_rms_job::trace_id(&self.db, bmc_mac, job.kind(), job.job_id())
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%bmc_mac, error = %error, "Failed to read firmware log correlation");
+                None
+            }
+        }
+    }
+
+    async fn poll_firmware_job(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+    ) -> (FirmwareState, Option<String>) {
+        let trace_id = self.firmware_trace_id(bmc_mac, job).await;
+        trace_propagation::correlation::resume(trace_id, async {
+            let outcome = query_tracked_firmware_job_status(
+                &self.instrumentation,
+                self.client.as_ref(),
+                self.switch_system_image_client.as_deref(),
+                job,
+            )
+            .await;
+            self.finish_firmware_action(bmc_mac, job, outcome.0).await;
+            outcome
+        })
+        .await
+    }
+
+    async fn finish_firmware_action(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+        state: FirmwareState,
+    ) {
+        if matches!(
+            state,
+            FirmwareState::Completed | FirmwareState::Failed | FirmwareState::Cancelled
+        ) && let Err(error) =
+            db::direct_dispatch_rms_job::finish(&self.db, bmc_mac, job.kind(), job.job_id()).await
+        {
+            tracing::warn!(%bmc_mac, error = %error, "Failed to complete firmware log correlation");
+        }
+    }
+
     /// Creates an RMS backend whose diagnostic Events use the supplied destination.
     /// Retain its provider while backend requests can run.
     pub fn new(
@@ -1621,75 +1676,87 @@ impl RmsBackend {
             config_json,
             component_filters,
             options,
+            trace_id,
             ..
         }) = claimed
         else {
             return Some(StagedFirmwareObjectOutcome::Waiting);
         };
 
-        let submitted = self
-            .submit_staged_firmware_object(endpoint, &config_json, &component_filters, &options)
-            .await;
-        let job_id = match submitted {
-            Ok(Some(job_id)) => job_id,
-            Ok(None) => {
-                return Some(self.abandon_staged_firmware_object(
+        trace_propagation::correlation::resume(trace_id, async {
+            let submitted = self
+                .submit_staged_firmware_object(endpoint, &config_json, &component_filters, &options)
+                .await;
+            let job_id = match submitted {
+                Ok(Some(job_id)) => job_id,
+                Ok(None) => {
+                    return Some(self.abandon_staged_firmware_object(
                     bmc_mac,
                     &system_image_job,
                     "RMS accepted the firmware-object update without a job id, so its progress \
                      cannot be tracked"
                         .to_owned(),
                 ));
-            }
-            Err(error) => {
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        bmc_mac_address = %bmc_mac,
+                        %error,
+                        "staged switch firmware-object update failed to submit"
+                    );
+                    return Some(self.abandon_staged_firmware_object(
+                        bmc_mac,
+                        &system_image_job,
+                        error,
+                    ));
+                }
+            };
+
+            // Release the phase only while it is still the one this poll claimed.
+            // A newer update for this switch owns its staged phase and its tracked
+            // jobs now, and both of this poll's are stale.
+            let released = {
+                let staged = self.staged_firmware_objects.lock().unwrap();
+                matches!(
+                    staged.get(&bmc_mac),
+                    Some(StagedFirmwareObject::Submitting {
+                        system_image_job: job,
+                    }) if *job == system_image_job
+                )
+            };
+            if !released {
                 tracing::warn!(
                     bmc_mac_address = %bmc_mac,
-                    %error,
-                    "staged switch firmware-object update failed to submit"
+                    backend_job_id = %job_id,
+                    "a newer switch update superseded this firmware-object update after RMS \
+                     accepted it, so its job is not tracked"
                 );
-                return Some(self.abandon_staged_firmware_object(
-                    bmc_mac,
-                    &system_image_job,
-                    error,
-                ));
+                return Some(StagedFirmwareObjectOutcome::Waiting);
             }
-        };
 
-        // Release the phase only while it is still the one this poll claimed.
-        // A newer update for this switch owns its staged phase and its tracked
-        // jobs now, and both of this poll's are stale.
-        let released = {
-            let mut staged = self.staged_firmware_objects.lock().unwrap();
-            let mine = matches!(
-                staged.get(&bmc_mac),
-                Some(StagedFirmwareObject::Submitting {
-                    system_image_job: job,
-                }) if *job == system_image_job
-            );
-            if mine {
-                staged.remove(&bmc_mac);
-            }
-            mine
-        };
-        if !released {
-            tracing::warn!(
+            tracing::info!(
                 bmc_mac_address = %bmc_mac,
                 backend_job_id = %job_id,
-                "a newer switch update superseded this firmware-object update after RMS \
-                 accepted it, so its job is not tracked"
+                "Submitted the staged switch firmware-object update after its NVOS job completed"
             );
-            return Some(StagedFirmwareObjectOutcome::Waiting);
-        }
-
-        tracing::info!(
-            bmc_mac_address = %bmc_mac,
-            backend_job_id = %job_id,
-            "Submitted the staged switch firmware-object update after its NVOS job completed"
-        );
-        let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
-        self.add_tracked_switch_firmware_job(bmc_mac, job.clone())
-            .await;
-        Some(StagedFirmwareObjectOutcome::Submitted(job))
+            let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
+            self.add_tracked_switch_firmware_job(bmc_mac, job.clone())
+                .await;
+            // Keep Submitting visible until both persisted and in-memory job
+            // tracking include the follow-up job.
+            {
+                let mut staged = self.staged_firmware_objects.lock().unwrap();
+                if matches!(
+                    staged.get(&bmc_mac),
+                    Some(StagedFirmwareObject::Submitting { system_image_job: current })
+                        if *current == system_image_job
+                ) {
+                    staged.remove(&bmc_mac);
+                }
+            }
+            Some(StagedFirmwareObjectOutcome::Submitted(job))
+        })
+        .await
     }
 
     /// Submits one staged firmware-object apply, returning its backend job id.
@@ -1925,11 +1992,28 @@ impl RmsBackend {
                 )
             })?;
         let job_labels = job_kind.to_labels()?;
-        let jobs = rms_get_switch_job_tree(
-            &self.instrumentation,
-            self.client.as_ref(),
-            job_labels,
+        let trace_id = match db::direct_dispatch_rms_job::trace_id(
+            &self.db,
+            bmc_mac,
+            job_kind,
             &parent_job_id,
+        )
+        .await
+        {
+            Ok(trace_id) => trace_id,
+            Err(error) => {
+                tracing::warn!(%bmc_mac, error = %error, "Failed to read reset log correlation");
+                None
+            }
+        };
+        let jobs = trace_propagation::correlation::resume(
+            trace_id,
+            rms_get_switch_job_tree(
+                &self.instrumentation,
+                self.client.as_ref(),
+                job_labels,
+                &parent_job_id,
+            ),
         )
         .await?;
         let parent = jobs
@@ -2780,17 +2864,31 @@ impl PowerShelfManager for RmsBackend {
                 include_child_job_states: false,
             };
 
-            match red::instrumented(
-                &self.instrumentation,
-                "rms",
-                "get_job_status",
-                self.client.get_job_status(request),
+            let trace_id = self
+                .firmware_trace_id(
+                    *pmc_mac,
+                    &RmsTrackedFirmwareJob::FirmwareObject(job_id.clone()),
+                )
+                .await;
+            match trace_propagation::correlation::resume(
+                trace_id,
+                red::instrumented(
+                    &self.instrumentation,
+                    "rms",
+                    "get_job_status",
+                    self.client.get_job_status(request),
+                ),
             )
             .await
             {
                 Ok(response) => {
                     let (state, error) = firmware_job_status_result(response, &job_id);
-
+                    self.finish_firmware_action(
+                        *pmc_mac,
+                        &RmsTrackedFirmwareJob::FirmwareObject(job_id.clone()),
+                        state,
+                    )
+                    .await;
                     statuses.push(PowerShelfFirmwareUpdateStatus {
                         pmc_mac: *pmc_mac,
                         state,
@@ -3644,7 +3742,7 @@ fn summarize_firmware_batch(
     let success = batch.status == rms::ReturnCode::Success as i32
         && stats.failed_nodes == 0
         && node_failure.is_none();
-    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then_some(batch.job_id.clone()));
+    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then(|| batch.job_id.clone()));
 
     if success {
         return (true, None, job_id);
@@ -4236,6 +4334,7 @@ impl NvSwitchManager for RmsBackend {
                 if let Some(system_image_job) = system_image_job {
                     staged_firmware_object = Some(StagedFirmwareObject::Staged {
                         system_image_job,
+                        trace_id: trace_propagation::correlation::current_id(),
                         config_json: bundle_version.to_owned(),
                         component_filters: component_filters.clone(),
                         options: options.clone(),
@@ -4390,13 +4489,7 @@ impl NvSwitchManager for RmsBackend {
             let mut states = Vec::with_capacity(jobs.len());
             let mut errors = Vec::new();
             for job in &jobs {
-                let (state, error) = query_tracked_firmware_job_status(
-                    &self.instrumentation,
-                    self.client.as_ref(),
-                    self.switch_system_image_client.as_deref(),
-                    job,
-                )
-                .await;
+                let (state, error) = self.poll_firmware_job(bmc_mac, job).await;
                 states.push(state);
                 if let Some(error) = error {
                     errors.push(error);
@@ -4415,13 +4508,7 @@ impl NvSwitchManager for RmsBackend {
                 .await
             {
                 Some(StagedFirmwareObjectOutcome::Submitted(job)) => {
-                    let (state, error) = query_tracked_firmware_job_status(
-                        &self.instrumentation,
-                        self.client.as_ref(),
-                        self.switch_system_image_client.as_deref(),
-                        &job,
-                    )
-                    .await;
+                    let (state, error) = self.poll_firmware_job(bmc_mac, &job).await;
                     states.push(state);
                     if let Some(error) = error {
                         errors.push(error);
@@ -4438,7 +4525,19 @@ impl NvSwitchManager for RmsBackend {
                 Some(StagedFirmwareObjectOutcome::Waiting) => {
                     states.push(FirmwareState::InProgress)
                 }
-                None => {}
+                None => {
+                    // A concurrent poll may have published a follow-up after
+                    // our snapshot. Its state has not been polled here yet.
+                    if self
+                        .firmware_jobs
+                        .lock()
+                        .unwrap()
+                        .get(&bmc_mac)
+                        .is_some_and(|current| current.iter().any(|job| !jobs.contains(job)))
+                    {
+                        states.push(FirmwareState::InProgress);
+                    }
+                }
             }
 
             if states.is_empty() {
@@ -4892,8 +4991,22 @@ impl NvSwitchManager for RmsBackend {
         endpoint: &SwitchEndpoint,
         next_password: &str,
     ) -> Result<String, ComponentManagerError> {
-        let identities =
-            resolve_switch_identities(&self.db, std::slice::from_ref(&endpoint.bmc_mac)).await?;
+        let macs = std::slice::from_ref(&endpoint.bmc_mac);
+        let mut identities = resolve_switch_identities(&self.db, macs).await?;
+        // Initial password rotation precedes managed switch creation. A managed
+        // row with missing rack metadata must not fall back to expected inventory.
+        if !identities.contains_key(&endpoint.bmc_mac)
+            && db::switch::find_ids_by_bmc_macs(&self.db, macs)
+                .await
+                .map_err(|error| {
+                    ComponentManagerError::Internal(format!(
+                        "failed to look up switch for password rotation: {error}"
+                    ))
+                })?
+                .is_empty()
+        {
+            identities.extend(resolve_pre_ingestion_switch_identities(&self.db, macs).await?);
+        }
 
         let resolved = self
             .resolve_switch_or_power_shelf_node(
@@ -5816,16 +5929,20 @@ async fn rms_configure_switch_certificate(
     });
 
     let batch = response.response.ok_or_else(|| {
-        let jobs = response
+        let mut message = "RMS switch certificate submission returned no batch result".to_string();
+        for (index, job) in response
             .jobs
             .iter()
             .filter(|job| !job.job_id.trim().is_empty())
-            .map(|job| format!("node {}: job {}", job.node_id, job.job_id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut message = "RMS switch certificate submission returned no batch result".to_string();
-        if !jobs.is_empty() {
-            message.push_str(&format!("; returned node jobs: {jobs}"));
+            .enumerate()
+        {
+            message.push_str(if index == 0 {
+                "; returned node jobs: "
+            } else {
+                ", "
+            });
+            write!(message, "node {}: job {}", job.node_id, job.job_id)
+                .expect("writing to a String cannot fail");
         }
         ComponentManagerError::OperationOutcomeUnknown(message)
     })?;
@@ -6524,13 +6641,7 @@ impl ComputeTrayManager for RmsBackend {
 
             let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
 
-            let (state, error) = query_tracked_firmware_job_status(
-                &self.instrumentation,
-                self.client.as_ref(),
-                None,
-                &job,
-            )
-            .await;
+            let (state, error) = self.poll_firmware_job(ep.bmc_mac, &job).await;
 
             statuses.push(ComputeTrayFirmwareUpdateStatus {
                 bmc_ip: ep.bmc_ip,
@@ -6553,13 +6664,7 @@ impl ComputeTrayManager for RmsBackend {
     ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
         let job = RmsTrackedFirmwareJob::FirmwareObject(job_id.to_string());
 
-        let (state, error) = query_tracked_firmware_job_status(
-            &self.instrumentation,
-            self.client.as_ref(),
-            None,
-            &job,
-        )
-        .await;
+        let (state, error) = self.poll_firmware_job(bmc_mac, &job).await;
 
         Ok(ComputeTrayFirmwareUpdateStatus {
             bmc_ip,
@@ -6586,6 +6691,8 @@ mod tests {
     use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::SwitchId;
+    use db::TransactionVending as _;
+    use db::db_read::PgPoolReader;
     use model::rack::FirmwareUpgradeDeviceInfo;
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -6932,7 +7039,9 @@ mod tests {
 
         assert!(
             calls
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .all(|pair| pair[0].job_id == "child" && pair[1].job_id == "parent")
         );
 
@@ -7415,6 +7524,14 @@ mod tests {
         };
 
         let job = NvosUpdateJob {
+            request: Some(model::rack::RackNvosUpdateRequest {
+                target_version: Some("firmware-id".into()),
+                requested_at: chrono::Utc::now(),
+                switch_ids: vec![],
+                firmware: false,
+                skipped: false,
+                failure: None,
+            }),
             job_id: Some("parent-job".into()),
             firmware_id: "firmware-id".into(),
             image_filename: "nvos.img".into(),
@@ -7439,6 +7556,15 @@ mod tests {
             .get_nvos_update_status(&job)
             .await
             .expect("NVOS polling should succeed");
+        assert_eq!(
+            updated.request.as_ref().unwrap().requested_at,
+            job.request.as_ref().unwrap().requested_at
+        );
+
+        assert_eq!(
+            updated.request.as_ref().unwrap().target_version.as_deref(),
+            Some("firmware-id")
+        );
 
         assert_eq!(updated.switches[0].node_id, "new-node-id");
         assert_eq!(updated.switches[0].status, "in_progress");
@@ -8879,7 +9005,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_2, &expected_rack, false).await;
         txn.commit().await.unwrap();
@@ -8895,6 +9021,7 @@ mod tests {
             switch_mac,
             StagedFirmwareObject::Staged {
                 system_image_job: "system-job".to_owned(),
+                trace_id: None,
                 config_json: "private manifest".to_owned(),
                 component_filters: vec!["bmc".to_owned()],
                 options: FirmwareUpdateOptions {
@@ -9106,6 +9233,7 @@ mod tests {
                 config_json,
                 component_filters,
                 options,
+                ..
             } = staged.get(&switch_mac).unwrap()
             else {
                 panic!("passive read changed the staged phase")
@@ -9149,7 +9277,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "hostname-from-db", &rack).await;
         txn.commit().await.unwrap();
         let mut first = make_sw_endpoint(SW_MAC_1);
@@ -9257,7 +9385,7 @@ mod tests {
         capabilities.compute.count = 1;
         capabilities.switch.count = 2;
         capabilities.power_shelf.count = 2;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         txn.commit().await.unwrap();
         let compute = [make_ct_endpoint(CT_IP_1, CT_MAC_1)];
@@ -9335,7 +9463,7 @@ mod tests {
                 Ok(Vec::new())
             );
 
-            let mut blocker = pool.begin().await.unwrap();
+            let mut blocker = pool.txn_begin().await.unwrap();
             let lock_statement = match role {
                 ROLE_COMPUTE => "LOCK TABLE machines IN ACCESS EXCLUSIVE MODE",
                 ROLE_SWITCH => "LOCK TABLE switches IN ACCESS EXCLUSIVE MODE",
@@ -9351,8 +9479,9 @@ mod tests {
                 .unwrap();
             let mut read = Box::pin(request());
             let fragment = format!("FROM {table}");
+            let mut observer = PgPoolReader::from(pool.clone());
             let blocked_pid = tokio::select! {
-                observed = tokio::time::timeout(Duration::from_secs(2), db::test_support::postgres::wait_for_blocked_query(&pool, blocker_pid, &fragment)) => observed.unwrap(),
+                observed = tokio::time::timeout(Duration::from_secs(2), db::test_support::postgres::wait_for_blocked_query(&mut observer, blocker_pid, &fragment)) => observed.unwrap(),
                 result = &mut read => panic!("{role} query did not block: {result:?}"),
             };
             assert_eq!(blocked_pid, reader_pid);
@@ -9399,7 +9528,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn power_observations_identify_management_macs_in_endpoint_order(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ps1, ps2, sw1, sw2) = make_backend(&pool).await;
-        let mut txn = pool.begin().await.expect("begin compute setup");
+        let mut txn = pool.txn_begin().await.expect("begin compute setup");
         let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
         let ct2 = seed_machine(&mut txn, CT_MAC_2, CT_IP_2, "CT-002", &rack_id).await;
         txn.commit().await.expect("commit compute setup");
@@ -9580,7 +9709,10 @@ mod tests {
     async fn compute_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
         let rack_id = RackId::new("expected-compute-rack");
-        let mut txn = pool.begin().await.expect("begin expected compute setup");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin expected compute setup");
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &rack_id, false).await;
         txn.commit().await.expect("commit expected compute setup");
         let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
@@ -9607,7 +9739,10 @@ mod tests {
     async fn compute_power_read_rejects_ip_owner_without_rack(pool: sqlx::PgPool) {
         let (mock, backend, owner_rack_id, _, _, _, _) = make_backend(&pool).await;
         let expected_rack_id = RackId::new("expected-compute-rack");
-        let mut txn = pool.begin().await.expect("begin conflicting owner setup");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin conflicting owner setup");
 
         // The requested MAC has valid expected inventory, while a different
         // machine owns its supplied IP without belonging to any managed rack.
@@ -9681,7 +9816,7 @@ mod tests {
     async fn shelf_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
         let rack_id = RackId::new("expected-shelf-rack");
-        let mut txn = pool.begin().await.expect("begin expected shelf setup");
+        let mut txn = pool.txn_begin().await.expect("begin expected shelf setup");
         seed_pre_ingestion_power_shelf(&mut txn, UNKNOWN_MAC, &rack_id, false).await;
         txn.commit().await.expect("commit expected shelf setup");
         let endpoint = make_ps_endpoint(UNKNOWN_MAC);
@@ -10377,7 +10512,7 @@ mod tests {
     async fn make_compute_tray_backend(
         pool: &sqlx::PgPool,
     ) -> (Arc<MockRmsApi>, RmsBackend, RackId, MachineId, MachineId) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
         let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
         db::rack::create(
@@ -10808,7 +10943,7 @@ mod tests {
         // a pre-ingestion power shelf, which previously failed with an
         // identity-lookup error.
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
 
@@ -11616,7 +11751,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ps_list_firmware_pre_ingestion_uses_expected_rack_profile(pool: sqlx::PgPool) {
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
@@ -12422,6 +12557,117 @@ mod tests {
                 }),
             Some("nvos-pass"),
             "endpoint must retain the current password until RMS accepts the job"
+        );
+
+        // Expected inventory still has a valid rack, but it must not mask
+        // missing rack metadata on the managed switch.
+        let updated = sqlx::query("UPDATE switches SET rack_id = NULL WHERE id = $1")
+            .bind(sw1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        let error = NvSwitchManager::ensure_password_rotation(&backend, &endpoint, "next-password")
+            .await
+            .expect_err("a managed switch without a rack must prevent RMS dispatch");
+        assert!(matches!(
+            error,
+            ComponentManagerError::Internal(message) if message == RMS_IDENTITY_LOOKUP_ERROR
+        ));
+        assert_eq!(mock.update_switch_system_password_calls().await.len(), 1);
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_pre_ingestion_password_rotation_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+        let mut txn = pool.txn_begin().await.unwrap();
+        db::expected_rack::create(
+            &mut txn,
+            &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
+                rack_id: rack_id.clone(),
+                rack_profile_id: RackProfileId::new(TEST_RACK_PROFILE_ID),
+                metadata: model::metadata::Metadata::default(),
+            },
+        )
+        .await
+        .unwrap();
+        db::expected_switch::create(
+            &mut txn,
+            model::expected_switch::ExpectedSwitch {
+                bmc_mac_address: endpoint.bmc_mac,
+                rack_id: Some(rack_id.clone()),
+                nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+                    mac_address: endpoint.nvos_mac,
+                    is_primary: true,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "WITH segment AS (
+                INSERT INTO network_segments (name, version, network_segment_type)
+                VALUES ('preingestion-password', 'V1-T0', 'admin') RETURNING id
+             )
+             INSERT INTO machine_interfaces
+                (segment_id, mac_address, primary_interface, hostname)
+             SELECT id, $1, false, 'preingestion-nvos' FROM segment",
+        )
+        .bind(endpoint.nvos_mac)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        // Neither a managed switch nor a live rack exists. Password rotation
+        // addresses the expected switch and its unassociated NVOS interface.
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool.clone(),
+            Arc::new(rack_profile_config()),
+            true,
+            carbide_instrument::Instrumentation::noop(),
+        );
+        let node_id = endpoint.bmc_mac.to_string();
+        mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "password-job".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+        assert_eq!(
+            NvSwitchManager::ensure_password_rotation(&backend, &endpoint, "next-password")
+                .await
+                .unwrap(),
+            "password-job"
+        );
+
+        let calls = mock.update_switch_system_password_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].username, "nvos-admin");
+        assert_eq!(calls[0].password, "next-password");
+        let nodes = &calls[0].nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.node_id, node_id);
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_descriptor_node(node, ROLE_SWITCH);
+        assert!(node.bmc_endpoint.is_none());
+        let host = node.host_endpoint.as_ref().unwrap();
+        let interface = host.interface.as_ref().unwrap();
+        assert_eq!(interface.ip_address, endpoint.nvos_ip.to_string());
+        assert_eq!(interface.mac_address, endpoint.nvos_mac.to_string());
+        assert_eq!(interface.host_name.as_deref(), Some("preingestion-nvos"));
+        assert_eq!(
+            host.credentials,
+            Some(credentials_to_rms(&endpoint.nvos_credentials))
         );
     }
 
@@ -13351,13 +13597,17 @@ mod tests {
     async fn sw_mixed_update_defers_firmware_object_until_nvos_completes(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
         let eps = vec![make_sw_endpoint(SW_MAC_1)];
-        queue_mixed_switch_update(
-            &mock,
-            &backend,
-            &sw1.to_string(),
-            &eps,
-            &firmware_update_options(),
-            "sw-nvos-job",
+        let origin = trace_propagation::correlation::TraceId::generate();
+        trace_propagation::correlation::scope(
+            origin,
+            queue_mixed_switch_update(
+                &mock,
+                &backend,
+                &sw1.to_string(),
+                &eps,
+                &firmware_update_options(),
+                "sw-nvos-job",
+            ),
         )
         .await;
 
@@ -13407,6 +13657,18 @@ mod tests {
 
         assert_eq!(statuses[0].state, FirmwareState::InProgress);
         let apply_calls = mock.apply_firmware_object_calls().await;
+        assert_eq!(
+            db::direct_dispatch_rms_job::trace_id(
+                &pool,
+                SW_MAC_1.parse().unwrap(),
+                RmsJobKind::FirmwareObject,
+                "sw-fw-job",
+            )
+            .await
+            .unwrap(),
+            Some(origin),
+            "the follow-up job retains the submission's trace, not the poll's"
+        );
         assert_eq!(apply_calls.len(), 1);
         assert_eq!(apply_calls[0].config_json, r#"{"Id":"fw-json"}"#);
         assert_eq!(apply_calls[0].access_token.as_deref(), Some("token"));
@@ -14162,7 +14424,7 @@ mod tests {
         // entirely from the expected inventory, with the node id synthesized
         // from the BMC MAC.
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &rack_id, false).await;
         txn.commit().await.unwrap();
 

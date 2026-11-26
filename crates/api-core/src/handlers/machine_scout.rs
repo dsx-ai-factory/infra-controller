@@ -197,7 +197,7 @@ pub(crate) async fn forge_agent_control(
         let state = db::machine::lookup_host_state_by_dpu_machine_id(&mut txn, &dpu_machine_id)
             .await
             .map_err(CarbideError::from)?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;

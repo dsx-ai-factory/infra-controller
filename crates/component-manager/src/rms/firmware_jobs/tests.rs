@@ -6,6 +6,8 @@ use std::task::Poll;
 
 use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::capture_logs_async;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use sqlx::PgPool;
 
 use super::*;
@@ -712,7 +714,7 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .fetch_one(&reader_pool)
             .await
             .expect("reader PID");
-        let mut blocker = pool.begin().await.expect("block tracking table");
+        let mut blocker = pool.txn_begin().await.expect("block tracking table");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -722,8 +724,9 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .await
             .expect("blocker PID");
         let mut read = Box::pin(ComputeTrayManager::get_firmware_jobs(&backend, &macs));
+        let mut observer = PgPoolReader::from(pool.clone());
         let blocked_pid = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 result.expect("get_all entered table wait")
             }
             result = &mut read => {
@@ -819,7 +822,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
         let first_mac = MacAddress::new([2, 0, 0, 0, 5, 1]);
         let second_mac = MacAddress::new([2, 0, 0, 0, 5, 2]);
         let deadline = Instant::now() + READ_TIMEOUT;
-        let mut blocker = pool.begin().await.expect("first tracking blocker");
+        let mut blocker = pool.txn_begin().await.expect("first tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -835,8 +838,9 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             &reads,
             deadline,
         ));
+        let mut observer = PgPoolReader::from(pool.clone());
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("first recovery query must reach its lock wait");
             }
             result = &mut first => {
@@ -883,7 +887,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
 
         // Reblock before polling the queued future: its observed lock wait now
         // proves it was admitted after the first recovery released its permit.
-        let mut blocker = pool.begin().await.expect("second tracking blocker");
+        let mut blocker = pool.txn_begin().await.expect("second tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -893,7 +897,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             .await
             .expect("second blocker PID");
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("queued recovery eventually acquires a session");
             }
             result = &mut second => {

@@ -275,9 +275,7 @@ async fn test_create_instance_with_ipxe_template_os(_: PgPoolOptions, options: P
     // Verify that the boot flow renders the iPXE template correctly: fetch the PXE
     // instructions for the machine's host interface and assert the script contains
     // the parameter value provided via the raw-ipxe template.
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
 
     let pxe = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
@@ -596,9 +594,7 @@ async fn test_create_instance_with_os_image_and_verify_pxe_rendering(
     let instance = tinstance.rpc_instance().await;
     assert_eq!(instance.status().tenant(), rpc::forge::TenantState::Ready);
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
 
     let pxe = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
@@ -712,9 +708,7 @@ async fn test_create_instance_with_raw_ipxe_os_and_verify_pxe_rendering(
         other => panic!("expected OperatingSystemId variant, got {other:?}"),
     }
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
 
     let pxe = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
@@ -834,9 +828,7 @@ async fn test_create_instance_with_templated_ipxe_os_with_artifacts_and_verify_p
     let instance = tinstance.rpc_instance().await;
     assert_eq!(instance.status().tenant(), rpc::forge::TenantState::Ready);
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
 
     let pxe = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)

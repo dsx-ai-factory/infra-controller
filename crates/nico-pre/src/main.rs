@@ -347,10 +347,12 @@ fn write_result(dir: &Path, result: &RunResult) -> eyre::Result<PathBuf> {
     match published {
         Some(Ok(path)) => Ok(path),
         Some(Err(e)) => Err(e.into()),
-        None => eyre::bail!(
-            "a thousand result files already carry {stamp} in {}",
-            dir.display()
-        ),
+        None => {
+            eyre::bail!(
+                "a thousand result files already carry {stamp} in {}",
+                dir.display()
+            );
+        }
     }
 }
 

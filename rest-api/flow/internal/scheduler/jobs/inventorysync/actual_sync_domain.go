@@ -4,6 +4,7 @@
 package inventorysync
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -350,6 +351,6 @@ func sortedUUIDValues(values map[string]uuid.UUID) []uuid.UUID {
 	for _, id := range values {
 		ids = append(ids, id)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
 	return ids
 }

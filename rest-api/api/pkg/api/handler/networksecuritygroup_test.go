@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,6 @@ import (
 	"net/url"
 	"reflect"
 
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -770,7 +770,7 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 			jsonData, _ := json.Marshal(test.requestPayload)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2372,7 +2372,7 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 			jsonData, _ := json.Marshal(test.requestPayload)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

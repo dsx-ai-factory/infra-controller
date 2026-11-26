@@ -5,13 +5,16 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -20,6 +23,8 @@ import (
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
 	"go.opentelemetry.io/otel/attribute"
+	temporalEnums "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	temporalClient "go.temporal.io/sdk/client"
 	tp "go.temporal.io/sdk/temporal"
 
@@ -77,6 +82,10 @@ func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *s
 // @Router /v2/org/{org}/nico/vpc [post]
 func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Create", c)
+	// Prerequisites, the Site call and local completion share one response budget.
+	// This leaves time to send the response before the server's write deadline.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -130,7 +139,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must be in Registered state in order to proceed", site.ID))
+		logger.Warn().Msgf("Site: %v specified in request data must be in Registered state in order to proceed", site.ID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must be in Registered state in order to proceed", nil)
 	}
 	// Get Tenant for this org
@@ -157,16 +166,23 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 	vpcDAO := cdbm.NewVpcDAO(cvh.dbSession)
 	if apiRequest.ID != nil {
-		_, total, err := vpcDAO.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.DefaultLimit)}, nil)
-		if err != nil {
-			logger.Error().Err(err).Msg("db error checking for ID uniqueness of tenant vpc")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Vpc due to DB error", nil)
-		}
-		if total > 0 {
-			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.ID.String()).Msg("vpc with same ID already exists")
-			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "A Vpc with specified ID already exists", validation.Errors{
-				"id": errors.New(apiRequest.ID.String()),
-			})
+		// REST IDs are global. Core IDs belong to a Site and can differ from
+		// older REST IDs, so check both before saving another creation request.
+		for _, filter := range []cdbm.VpcFilterInput{
+			{VpcIDs: []uuid.UUID{*apiRequest.ID}, IncludeDeleted: true},
+			{ControllerVpcIDs: []uuid.UUID{*apiRequest.ID}, SiteIDs: []uuid.UUID{site.ID}, IncludeDeleted: true},
+		} {
+			_, total, err := vpcDAO.GetAll(ctx, nil, filter, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.DefaultLimit)}, nil)
+			if err != nil {
+				logger.Error().Err(err).Msg("db error checking for ID uniqueness of tenant vpc")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Vpc due to DB error", nil)
+			}
+			if total > 0 {
+				logger.Warn().Str("tenantId", tenant.ID.String()).Str("vpcID", apiRequest.ID.String()).Msg("vpc with same ID already exists")
+				return cutil.NewAPIErrorResponse(c, http.StatusConflict, "A VPC with specified ID already exists", validation.Errors{
+					"id": errors.New(apiRequest.ID.String()),
+				})
+			}
 		}
 	}
 
@@ -218,6 +234,9 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	if apiErr := util.ValidateSitePowerManagement(siteConfig, apiRequest.PowerResourceGroup); apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
+	if apiRequest.PowerResourceGroup != nil && !cvh.cfg.GetDPSEnabled() {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Power resource groups require REST DPS power provisioning to be enabled", nil)
+	}
 
 	// Network Virtualization type support
 	networkVirtualizationType := apiRequest.NetworkVirtualizationType
@@ -235,7 +254,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	// Verify if site has been enabled for FNN type
 	if *networkVirtualizationType == cdbm.VpcFNN {
 		if !siteConfig.NativeNetworking {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have native networking enabled in order to create FNN VPCs", site.ID))
+			logger.Warn().Msgf("Site: %v specified in request data must have native networking enabled in order to create FNN VPCs", site.ID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must have native networking enabled in order to create FNN VPCs", nil)
 		}
 	}
@@ -297,7 +316,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	var defaultNvllPartitionId *uuid.UUID
 	if apiRequest.NVLinkLogicalPartitionID != nil {
 		if !siteConfig.NVLinkPartition {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", site.ID))
+			logger.Warn().Msgf("Site: %v specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", site.ID)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data must have NVLink Partition enabled in order to create VPC with default NVLink Partition", nil)
 		}
 
@@ -345,13 +364,18 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to provision Tenant on Site", nil)
 	}
 
+	stc, err := cvh.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	if apiRequest.ID == nil {
+		apiRequest.ID = cutil.GetPtr(uuid.New())
+	}
 	dpsGroupCreated := false
 	if cvh.cfg.GetDPSEnabled() && apiRequest.PowerResourceGroup != nil {
 		if cvh.dps == nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusServiceUnavailable, "DPS power provisioning is unavailable", nil)
-		}
-		if apiRequest.ID == nil {
-			apiRequest.ID = cutil.GetPtr(uuid.New())
 		}
 		externalID, derr := dpsclient.ExternalIDFromVPCID(apiRequest.ID.String())
 		if derr != nil {
@@ -367,23 +391,11 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		dpsGroupCreated = true
 	}
 
-	sdDAO := cdbm.NewStatusDetailDAO(cvh.dbSession)
-
-	var vpc *cdbm.Vpc
-	var ssd *cdbm.StatusDetail
-	controllerVpc := &corev1.Vpc{}
-	controllerVpcModel := &cdbm.Vpc{}
-
-	// timeoutResp lets the closure signal a post-rollback handler — the
-	// TerminateWorkflow call has to run after the closure returns so that
-	// the DB tx unwinds before we make the second remote call. nil means
-	// no timeout occurred and the normal flow continues.
-	var timeoutResp func() error
-
-	err = cdb.WithTx(ctx, cvh.dbSession, func(tx *cdb.Tx) error {
-		// Create VPC
-		vpcInput := cdbm.VpcCreateInput{
+	// Save the caller's identity and intent before Core can create the VPC.
+	vpc, err := cdb.WithTxResult(ctx, cvh.dbSession, func(tx *cdb.Tx) (*cdbm.Vpc, error) {
+		created, derr := vpcDAO.Create(ctx, tx, cdbm.VpcCreateInput{
 			ID:                        apiRequest.ID,
+			ControllerVpcID:           apiRequest.ID,
 			Name:                      apiRequest.Name,
 			Description:               apiRequest.Description,
 			Org:                       org,
@@ -394,175 +406,148 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			NetworkVirtualizationType: networkVirtualizationType,
 			SlaacEnabled:              slaacEnabled,
 			RoutingProfile:            routingProfile,
-			PowerResourceGroup:        apiRequest.PowerResourceGroup,
 			RoutingProfileOverrides:   apiRequest.RoutingProfileOverrides.ToDB(),
+			PowerResourceGroup:        apiRequest.PowerResourceGroup,
 			NVLinkLogicalPartitionID:  defaultNvllPartitionId,
 			Labels:                    labels,
-			Status:                    cdbm.VpcStatusProvisioning,
+			Status:                    cdbm.VpcStatusPending,
 			CreatedBy:                 *dbUser,
 			Vni:                       apiRequest.Vni,
-		}
-
-		createdVpc, derr := vpcDAO.Create(ctx, tx, vpcInput)
+		})
 		if derr != nil {
-			logger.Error().Err(derr).Msg("error creating VPC DB entry")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed creating new VPC record, DB error", nil)
-		}
-
-		// Update the controller ID
-		// We need this to match the VPC ID.  This was previously handled
-		// by the async cloud workflow after successful creation on site.
-		uvpcInput := cdbm.VpcUpdateInput{
-			VpcID:           createdVpc.ID,
-			ControllerVpcID: cutil.GetPtr(createdVpc.ID),
-		}
-		updatedVpc, derr := vpcDAO.Update(ctx, tx, uvpcInput)
-		if derr != nil {
-			logger.Error().Err(derr).Msg("error creating VPC DB entry")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed updating new VPC record, DB error", nil)
-		}
-		vpc = updatedVpc
-
-		// Create status detail
-		createdSsd, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: cdbm.VpcStatusProvisioning, Message: cutil.GetPtr("VPC provisioning has been initiated on Site")})
-		if derr != nil {
-			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Status Detail for VPC", nil)
-		}
-		if createdSsd == nil {
-			logger.Error().Msg("Status Detail DB entry not returned from Create")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to get new Status Detail for VPC", nil)
-		}
-		ssd = createdSsd
-
-		stc, clientErr := cvh.scp.GetClientByID(vpc.SiteID)
-		if clientErr != nil {
-			logger.Error().Err(clientErr).Msg("failed to retrieve Temporal client for Site")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
-		}
-
-		createVpcRequest := apiRequest.ToProto(vpc)
-
-		workflowOptions := temporalClient.StartWorkflowOptions{
-			ID:                       "vpc-create-" + vpc.ID.String(),
-			TaskQueue:                queue.SiteTaskQueue,
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-		}
-
-		logger.Info().Msg("triggering VPC create workflow")
-
-		// Add context deadlines
-		wfCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-		defer cancel()
-
-		// Trigger Site workflow
-		we, wferr := stc.ExecuteWorkflow(wfCtx, workflowOptions, "CreateVPCV2", createVpcRequest)
-		if wferr != nil {
-			logger.Error().Err(wferr).Msg("failed to synchronously start Temporal workflow to create VPC")
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed start sync workflow to create VPC on Site: %s", wferr), nil)
-		}
-
-		wid := we.GetID()
-		logger.Info().Str("Workflow ID", wid).Msg("executed synchronous create VPC workflow")
-
-		// Block until the workflow has completed and returned success/error.
-		wferr = we.Get(wfCtx, controllerVpc)
-		if wferr != nil {
-			var timeoutErr *tp.TimeoutError
-			if errors.As(wferr, &timeoutErr) || wferr == context.DeadlineExceeded || wfCtx.Err() != nil {
-				logger.Error().Err(wferr).Msg("failed to create VPC, timeout occurred executing workflow on Site.")
-				timeoutResp = func() error {
-					return common.TerminateWorkflowOnTimeOut(c, logger, stc, wid, wferr, "VPC", "Create")
-				}
-				return cutil.NewAPIError(http.StatusInternalServerError, "VPC create workflow timed out", nil)
+			if (&cdb.PostgresErrorChecker{}).IsUniqueConstraintError(derr) {
+				return nil, cutil.NewAPIError(http.StatusConflict, "A VPC with specified ID already exists", validation.Errors{
+					"id": errors.New(apiRequest.ID.String()),
+				}).WithCause(derr)
 			}
-
-			code, unwrapped := common.UnwrapWorkflowError(wferr)
-			logger.Error().Err(unwrapped).Msg("failed to synchronously execute Temporal workflow to create VPC")
-			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create VPC on Site: %s", unwrapped), nil)
+			logger.Error().Err(derr).Msg("failed to create VPC record")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to create VPC record", nil).WithCause(derr)
 		}
-
-		controllerVpcModel.FromProto(controllerVpc)
-		if controllerVpcModel.RoutingProfile != nil {
-			updatedVpc, derr := vpcDAO.Update(ctx, tx, cdbm.VpcUpdateInput{
-				VpcID:          vpc.ID,
-				RoutingProfile: controllerVpcModel.RoutingProfile,
-			})
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error persisting Core-resolved VPC routing profile")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to persist Core-resolved VPC routing profile", nil)
-			}
-			vpc = updatedVpc
+		_, derr = cdbm.NewStatusDetailDAO(cvh.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: created.ID.String(),
+			Status:   cdbm.VpcStatusPending,
+			Message:  cutil.GetPtr("VPC creation is awaiting its original Site result"),
+		})
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to save Pending VPC history")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to create VPC status detail", nil).WithCause(derr)
 		}
-
-		logger.Info().Str("Workflow ID", wid).Msg("completed synchronous create VPC workflow")
-		return nil
+		return created, nil
 	})
-	// The wrapping `if err != nil` ensures real tx-helper errors (commit /
-	// rollback failures that wrap into something other than the cutil.APIError
-	// marker we returned for the timeout case) are surfaced via HandleTxError,
-	// while the timeout-case APIError falls through to the timeoutResp call.
 	if err != nil {
+		// This request has not submitted a VPC creation workflow.
+		// A constraint rejection or an already-rolled-back transaction proves
+		// this save did not commit. A lost reply or context error alone does not.
+		var pgErr *pgconn.PgError
+		commitRejected := errors.Is(err, cdb.ErrTransactionCommit) && (errors.Is(err, sql.ErrTxDone) || (errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23")))
+		if errors.Is(err, cdb.ErrTransactionCommit) && !commitRejected {
+			logger.Error().Err(err).Str("vpcID", apiRequest.ID.String()).Interface("powerResourceGroup", apiRequest.PowerResourceGroup).Msg("VPC persistence is unconfirmed; retaining DPS dependency")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to confirm persistence of VPC %s; inspect the original ID before creating another request", apiRequest.ID), nil)
+		}
 		var apiErr *cutil.APIError
-		if !errors.As(err, &apiErr) || timeoutResp == nil {
-			if dpsGroupCreated {
-				cleanupErr := cvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *apiRequest.PowerResourceGroup)
-				if cleanupErr != nil {
-					logger.Error().Err(cleanupErr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to compensate DPS resource group after VPC creation failure")
-				}
-			}
-			return common.HandleTxError(c, logger, err, "Failed to create VPC due to DB transaction error")
-		}
-	}
-	if timeoutResp != nil {
-		responseErr := timeoutResp()
+		conflict := errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict
 		if dpsGroupCreated {
-			cleanupErr := cvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *apiRequest.PowerResourceGroup)
-			if cleanupErr != nil {
-				logger.Error().Err(cleanupErr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to compensate DPS resource group after VPC creation failure")
+			// Cleanup has its own short budget after the caller stops waiting.
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), cutil.WorkflowContextNewAfterTimeout)
+			defer cancelCleanup()
+			cleanup := true
+			if conflict || commitRejected {
+				winners, _, readErr := vpcDAO.GetAll(cleanupCtx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}, IncludeDeleted: true}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
+				if readErr != nil || (conflict && len(winners) != 1) {
+					logger.Error().Err(readErr).Str("vpcID", apiRequest.ID.String()).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("cannot establish DPS group ownership after failed VPC persistence; retaining group")
+					cleanup = false
+				} else if len(winners) != 0 {
+					cleanup = winners[0].PowerResourceGroup == nil || *winners[0].PowerResourceGroup != *apiRequest.PowerResourceGroup
+				}
 			}
-		}
-		return responseErr
-	}
-
-	statusDetails := []cdbm.StatusDetail{*ssd}
-
-	// Make a best-effort attempt to cache the remaining controller-reported
-	// state for the response. The resolved routing profile was committed above.
-	activeVni := controllerVpcModel.ActiveVni
-	effectiveRoutingProfile := controllerVpcModel.EffectiveRoutingProfile
-	if activeVni != nil || effectiveRoutingProfile != nil {
-		uvpcInput := cdbm.VpcUpdateInput{
-			VpcID:                   vpc.ID,
-			ActiveVni:               activeVni,
-			EffectiveRoutingProfile: effectiveRoutingProfile,
-		}
-		if activeVni != nil {
-			uvpcInput.Status = cutil.GetPtr(cdbm.VpcStatusReady)
-		}
-		updatedVpc, err := vpcDAO.Update(ctx, nil, uvpcInput)
-		if err != nil {
-			logger.Error().Err(err).Msg("error while caching controller-reported VPC VNI and effective routing profile")
-		} else {
-			// Update the vpc being returned if all went well.
-			vpc = updatedVpc
-
-			if activeVni != nil {
-				// Best effort create status detail
-				ssd, err = sdDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: cdbm.VpcStatusReady, Message: cutil.GetPtr("VPC is ready for use")})
-				if err != nil {
-					logger.Error().Err(err).Msg("error creating Status Detail DB entry")
-				} else if ssd == nil {
-					logger.Error().Err(err).Msg("unexpected nil Status Detail returned from DB")
-				} else {
-					statusDetails = append(statusDetails, *ssd)
+			if cleanup {
+				cleanupErr := cvh.dps.DeleteResourceGroup(cleanupCtx, *apiRequest.PowerResourceGroup)
+				if cleanupErr != nil {
+					logger.Error().Err(cleanupErr).Str("powerResourceGroup", *apiRequest.PowerResourceGroup).Msg("failed to compensate DPS resource group before VPC dispatch; external reconciliation is required")
 				}
 			}
 		}
+		return common.HandleTxError(c, logger, err, fmt.Sprintf("Failed to create VPC record %s", apiRequest.ID))
 	}
 
-	// Create response
-	apiVpc := model.NewAPIVpc(*vpc, statusDetails, tenantCanViewEffectiveRoutingProfile)
+	// Only the successful INSERT owner starts this execution. Inventory recovers a lost reply.
+	workflowOptions := temporalClient.StartWorkflowOptions{
+		ID:                                       "vpc-create-" + vpc.ID.String(),
+		TaskQueue:                                queue.SiteTaskQueue,
+		WorkflowExecutionTimeout:                 cutil.WorkflowExecutionTimeout,
+		WorkflowIDReusePolicy:                    temporalEnums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowIDConflictPolicy:                 temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
+	}
+	wfCtx := ctx
+	if wfCtx.Err() != nil {
+		// ExecuteWorkflow has not been called, so this process can prove non-dispatch.
+		decisionCtx, cancelDecision := context.WithTimeout(context.WithoutCancel(ctx), cutil.WorkflowContextNewAfterTimeout)
+		defer cancelDecision()
+		decision, decisionErr := vpcDAO.RejectCreation(decisionCtx, vpc.ID)
+		if decisionErr != nil {
+			logger.Error().Err(decisionErr).Msg("failed to record that VPC creation was not dispatched")
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, fmt.Sprintf("VPC creation was not dispatched; inspect VPC %s to confirm its state because its failure could not be saved", vpc.ID), nil)
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, fmt.Sprintf("VPC creation was not dispatched; VPC %s is %s", vpc.ID, decision.Status), nil)
+	}
+	we, wferr := stc.ExecuteWorkflow(wfCtx, workflowOptions, "CreateVPCV2", apiRequest.ToProto(vpc))
+	if wferr != nil {
+		logger.Error().Err(wferr).Msg("failed to start original VPC creation workflow; retaining Pending record")
+		code := http.StatusInternalServerError
+		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
+		var startDeadline *serviceerror.DeadlineExceeded
+		if errors.As(wferr, &alreadyStarted) {
+			code = http.StatusConflict
+		} else if wfCtx.Err() != nil || errors.As(wferr, &startDeadline) {
+			code = http.StatusGatewayTimeout
+		}
+		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("Failed to start VPC creation workflow; inspect VPC %s to confirm its state", vpc.ID), nil)
+	}
+	controllerVpc := &corev1.Vpc{}
+	wferr = we.Get(wfCtx, controllerVpc)
+	if wferr != nil {
+		logger.Error().Err(wferr).Msg("VPC creation result is unconfirmed; retaining Pending record and dependencies")
+		var timeoutErr *tp.TimeoutError
+		if wfCtx.Err() != nil || errors.As(wferr, &timeoutErr) {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, fmt.Sprintf("VPC creation workflow timed out; inspect VPC %s to confirm its state", vpc.ID), nil)
+		}
+		code, unwrapped := common.UnwrapWorkflowError(wferr)
+		return cutil.NewAPIErrorResponse(c, code, fmt.Sprintf("%s; inspect VPC %s to confirm its state", unwrapped, vpc.ID), nil)
+	}
+	creationID := vpc.ID
+	vpc, err = vpcDAO.CompleteCreation(wfCtx, creationID, controllerVpc)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to complete saved VPC creation")
+		if wfCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, fmt.Sprintf("VPC creation completion is unconfirmed after timeout; inspect VPC %s", creationID), nil)
+		}
+		if errors.Is(err, cdbm.ErrVpcCreationRejected) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("VPC creation was cancelled; inspect VPC %s to confirm its state", creationID), nil)
+		}
+		if errors.Is(err, cdbm.ErrVpcCreationConflict) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("Core VPC does not match the saved creation inputs; inspect VPC %s to confirm its state", creationID), nil)
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to complete VPC creation; inspect VPC %s to confirm its state", creationID), nil)
+	}
+	// Creation is already committed. Read the response and its history from one
+	// snapshot so concurrent deletion cannot mix Ready with Deleting history.
+	apiVpc, err := cdb.WithTxResultOpts(wfCtx, cvh.dbSession, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(tx *cdb.Tx) (model.APIVpc, error) {
+		current, err := vpcDAO.GetByID(wfCtx, tx, creationID, nil)
+		if err != nil {
+			return model.APIVpc{}, err
+		}
+		statusDetails, _, err := cdbm.NewStatusDetailDAO(cvh.dbSession).GetAll(wfCtx, tx,
+			cdbm.StatusDetailFilterInput{EntityIDs: []string{creationID.String()}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit), OrderBy: &cdbp.OrderBy{Field: "created", Order: cdbp.OrderAscending}})
+		if err != nil {
+			return model.APIVpc{}, err
+		}
+		return model.NewAPIVpc(*current, statusDetails, tenantCanViewEffectiveRoutingProfile), nil
+	})
+	if err != nil {
+		logger.Error().Err(err).Str("vpcID", creationID.String()).Msg("VPC creation completed; status history is unavailable for this response")
+		apiVpc = model.NewAPIVpc(*vpc, nil, tenantCanViewEffectiveRoutingProfile)
+	}
 
 	logger.Info().Msg("finishing API handler")
 
@@ -680,6 +665,12 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	if vpc.TenantID != tenant.ID {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
 	}
+	if vpc.Status == cdbm.VpcStatusPending {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation is pending; its original inputs cannot be changed", nil)
+	}
+	if vpc.CreationRejectedAt != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation has stopped; delete the saved request instead", nil)
+	}
 
 	// TargetedInstanceCreation supplies both policies, but keep write authorization
 	// separate from effective-profile response visibility.
@@ -782,8 +773,8 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	var defaultNvllPartitionId *uuid.UUID
 	if apiRequest.NVLinkLogicalPartitionID != nil {
 		if !siteConfig.NVLinkPartition {
-			logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID.String()))
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID.String()), nil)
+			logger.Warn().Msgf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Partition enabled in order to update VPC with default NVLink Partition", vpc.SiteID), nil)
 		}
 
 		// Verify that the existing default NVLink Logical Partition is not being used by any Instance from the VPC
@@ -1174,13 +1165,6 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC", nil)
 	}
 
-	// Validate request attributes
-	verr := apiRequest.Validate(vpc)
-	if verr != nil {
-		logger.Warn().Err(verr).Msg("error validating VPC update request data")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating VPC virtualization update request data", verr)
-	}
-
 	// Get Tenant for this org
 	tenant, err := common.GetTenantForOrg(ctx, nil, uvvh.dbSession, org)
 	if err != nil {
@@ -1194,6 +1178,19 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Check that VPC belongs to the Tenant
 	if vpc.TenantID != tenant.ID {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
+	}
+	if vpc.Status == cdbm.VpcStatusPending {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation is pending; its original inputs cannot be changed", nil)
+	}
+	if vpc.CreationRejectedAt != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation has stopped; delete the saved request instead", nil)
+	}
+
+	// Validate request attributes
+	verr := apiRequest.Validate(vpc)
+	if verr != nil {
+		logger.Warn().Err(verr).Msg("error validating VPC update request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating VPC virtualization update request data", verr)
 	}
 
 	tenantCanViewEffectiveRoutingProfile, err := common.TenantHasTargetedInstanceCreation(ctx, nil, uvvh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &vpc.SiteID})
@@ -1227,7 +1224,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Verify if site has been enabled for FNN type
 	// No need to check for FNN type, as the request validator guarantees that
 	if !siteConfig.NativeNetworking {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", vpc.SiteID))
+		logger.Warn().Msgf("Site: %v that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", vpc.SiteID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site that VPC belongs to does not have native networking enabled, unable to update virtualization type to FNN", nil)
 	}
 
@@ -1603,7 +1600,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		// For each siteIDStr, check if the corresponding site exists
 		for _, siteID := range siteIDs {
 			if _, ok := sitesByID[siteID]; !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Could not find Site with ID specified in query: %s", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Could not find Site with ID specified in query: %s", siteID), nil)
 			}
 		}
 	}
@@ -1621,7 +1618,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		for _, status := range statusStrings {
 			_, ok := cdbm.VpcStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 			}
 			statuses = append(statuses, status)
@@ -1721,7 +1718,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		}
 		for _, nvLinkLogicalPartitionID := range nvLinkLogicalPartitionIDs {
 			if _, ok := nvLinkLogicalPartitionIDsMap[nvLinkLogicalPartitionID]; !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition ID: %s specified in query does not exist for current Tenant", nvLinkLogicalPartitionID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition ID: %s specified in query does not exist for current Tenant", nvLinkLogicalPartitionID), nil)
 			}
 		}
 		vpcFilter.NVLinkLogicalPartitionIDs = nvLinkLogicalPartitionIDs
@@ -1789,6 +1786,9 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Delete Handler ~~~~~ //
 
+// vpcDeletionCommitReserve leaves time to save a confirmed Site deletion locally.
+const vpcDeletionCommitReserve = 2 * time.Second
+
 // DeleteVPCHandler is the API Handler for deleting a VPC
 type DeleteVPCHandler struct {
 	dbSession *cdb.Session
@@ -1822,6 +1822,15 @@ func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *
 // @Router /v2/org/{org}/nico/vpc/{id} [delete]
 func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Delete", c)
+	// Settling Pending creation and deleting a committed VPC must fit in one
+	// response budget, even when both operations need a Site call.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+	// Both Site calls share an earlier deadline. The transaction retains the
+	// response budget, including any shorter deadline supplied by the caller.
+	deadline, _ := ctx.Deadline()
+	siteCtx, cancelSite := context.WithDeadline(ctx, deadline.Add(-vpcDeletionCommitReserve))
+	defer cancelSite()
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1889,9 +1898,56 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	}
 
 	// Verify if site is ready
-	if vpc.Site.Status != cdbm.SiteStatusRegistered {
+	if vpc.CreationRejectedAt == nil && vpc.Site.Status != cdbm.SiteStatusRegistered {
 		logger.Warn().Str("Site ID", vpc.SiteID.String()).Msg("Site associated with VPC must be in Registered state in order to proceed")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site associated with VPC must be in Registered state in order to proceed", nil)
+	}
+
+	var stc temporalClient.Client
+	// Core settles an unfinished create before REST releases any dependencies.
+	// It either returns the committed VPC or confirms cancellation and cleanup,
+	// including when the original request never reached Core.
+	if vpc.Status == cdbm.VpcStatusPending && vpc.CreationRejectedAt == nil {
+		var clientErr error
+		stc, clientErr = dvh.scp.GetClientByID(vpc.SiteID)
+		if clientErr != nil {
+			logger.Error().Err(clientErr).Msg("failed to retrieve Site client to cancel VPC creation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+		var result corev1.CancelVpcCreationResponse
+		apiErr := common.ExecuteCoreGRPC(siteCtx, stc, corev1.Forge_CancelVpcCreation_FullMethodName,
+			&corev1.CancelVpcCreationRequest{
+				Id: &corev1.VpcId{Value: vpc.GetSiteID().String()}, TenantOrganizationId: vpc.Org,
+			}, &result, "")
+		if apiErr != nil {
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("Core has not settled VPC creation; deletion is blocked")
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		if result.GetCreatedVpc() == nil && result.GetCancelled() == nil {
+			logger.Error().Msg("Core cancellation reply has no result; retaining Pending creation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Core did not confirm VPC creation or cancellation", nil)
+		}
+		if result.GetCreatedVpc() != nil {
+			completed, completeErr := vpcDAO.CompleteCreation(ctx, vpc.ID, result.GetCreatedVpc())
+			if completeErr != nil {
+				logger.Error().Err(completeErr).Msg("failed to complete VPC before deletion")
+				if errors.Is(completeErr, cdbm.ErrVpcCreationConflict) {
+					return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Core VPC does not match the saved creation inputs; deletion is blocked", nil)
+				}
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to complete VPC creation before deletion", nil)
+			}
+			vpc = completed
+		} else {
+			cancelled, cancelErr := vpcDAO.RejectCreation(ctx, vpc.ID)
+			if cancelErr != nil {
+				if errors.Is(cancelErr, cdb.ErrDoesNotExist) {
+					return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find VPC with specified ID", nil)
+				}
+				logger.Error().Err(cancelErr).Msg("failed to save confirmed VPC creation cancellation")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to save VPC creation cancellation", nil)
+			}
+			vpc = cancelled
+		}
 	}
 
 	// Check if VPC has any resources subnet attached
@@ -1927,6 +1983,37 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	}
 	if len(instances) > 0 {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Cannot delete VPC, one or more instances for this VPC", nil)
+	}
+
+	if vpc.CreationRejectedAt != nil {
+		// Creation has stopped and its allocation cleanup is confirmed, or this
+		// request was never sent. No Core deletion is needed for this local row.
+		deleted, deleteErr := vpcDAO.DeleteRejectedCreation(ctx, vpc.ID)
+		if deleteErr != nil {
+			logger.Error().Err(deleteErr).Msg("failed to delete rejected VPC request")
+			if vpc.PowerResourceGroup != nil {
+				logger.Error().Str("vpcID", vpc.ID.String()).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("Local VPC deletion is unconfirmed; DPS dependency may require reconciliation")
+			}
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete rejected VPC request", nil)
+		}
+		if !deleted {
+			return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
+		}
+		// The committed local deletion elects one cleanup caller. Failures leave the
+		// retained group reference for reconciliation, rather than retrying a reused name.
+		if vpc.PowerResourceGroup != nil {
+			if !dvh.cfg.GetDPSEnabled() || dvh.dps == nil {
+				logger.Error().Str("vpcID", vpc.ID.String()).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("DPS power provisioning is unavailable; external reconciliation is required")
+			} else {
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), cutil.WorkflowContextNewAfterTimeout)
+				defer cancelCleanup()
+				cleanupErr := dvh.dps.DeleteResourceGroup(cleanupCtx, *vpc.PowerResourceGroup)
+				if cleanupErr != nil {
+					logger.Error().Err(cleanupErr).Str("vpcID", vpc.ID.String()).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to clean up rejected VPC resource group; external reconciliation is required")
+				}
+			}
+		}
+		return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 	}
 
 	sdDAO := cdbm.NewStatusDetailDAO(dvh.dbSession)
@@ -1970,16 +2057,19 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete VPC", nil)
 		}
 
-		// Create status detail (best-effort: original code only logs on error)
+		// Record deletion history and log any failure.
 		if _, derr := sdDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: vpc.ID.String(), Status: *cutil.GetPtr(cdbm.VpcStatusDeleting), Message: cutil.GetPtr("received request for deletion, pending processing")}); derr != nil {
 			logger.Error().Err(derr).Msg("error creating Status Detail DB entry")
 		}
 
 		// Get the temporal client for the site we are working with.
-		stc, derr := dvh.scp.GetClientByID(vpc.SiteID)
-		if derr != nil {
-			logger.Error().Err(derr).Msg("failed to retrieve Temporal client for Site")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		if stc == nil {
+			var clientErr error
+			stc, clientErr = dvh.scp.GetClientByID(vpc.SiteID)
+			if clientErr != nil {
+				logger.Error().Err(clientErr).Msg("failed to retrieve Temporal client for Site")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+			}
 		}
 
 		deleteVpcRequest := &corev1.VpcDeletionRequest{
@@ -1994,11 +2084,13 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 
 		logger.Info().Msg("triggering VPC delete workflow")
 
-		// Add context deadlines
-		wfCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
-		defer cancel()
+		// Keep the same Site deadline after settling a Pending creation.
+		wfCtx := siteCtx
 
 		// Trigger Site workflow
+		if wfCtx.Err() != nil {
+			return cutil.NewAPIError(http.StatusGatewayTimeout, "VPC deletion has not started; retry deletion of the same VPC", nil)
+		}
 		we, wferr := stc.ExecuteWorkflow(wfCtx, workflowOptions, "DeleteVPCV2", deleteVpcRequest)
 		if wferr != nil {
 			logger.Error().Err(wferr).Msg("failed to synchronously start Temporal workflow to delete VPC")
@@ -2052,7 +2144,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 	if timeoutResp != nil {
 		return timeoutResp()
 	}
-	if dvh.cfg.GetDPSEnabled() && vpc.PowerResourceGroup != nil && dvh.dps != nil {
+	if vpc.CreationRejectedAt == nil && dvh.cfg.GetDPSEnabled() && vpc.PowerResourceGroup != nil && dvh.dps != nil {
 		cleanupErr := dvh.dps.DeleteResourceGroup(context.WithoutCancel(ctx), *vpc.PowerResourceGroup)
 		if cleanupErr != nil {
 			logger.Error().Err(cleanupErr).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to delete DPS resource group; external reconciliation is required")

@@ -55,15 +55,22 @@ spec:
                     default: false
                     description: |-
                       Apply node effect when labels change on the DPU object
-                      When set to true, label changes in Ready state will trigger node effect logic
+                      When set to true, label changes in Ready state will trigger node effect
+                      logic
                     type: boolean
                   customAction:
                     description: |-
-                      Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
-                      The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
-                      The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
-                      The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
-                      If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                      Name of a config map which contains a pod yaml definition to run which
+                      will apply the nodeEffect. The pod is expected to exit when node effect
+                      is done, if pod terminates with error then DPU would move to an error
+                      phase. The DPUNode's name will be exported as an environment variable,
+                      named as DPUNODE_NAME, to each container and init container in the pod.
+                      The labels and annotations of DPUNode will be exported in
+                      `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations`
+                      accordingly; the volume name `dpf-pod-info` is used to mount the labels
+                      and annotations. If any name confliction for env or volume, the
+                      controller will not export the name or labels/annotations of DPUNode
+                      accordingly.
                     type: string
                   customLabel:
                     additionalProperties:
@@ -76,20 +83,23 @@ spec:
                   force:
                     default: false
                     description: |-
-                      Force is the flag to indicate if the node effect should be applied immediately.
-                      If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                      Force is the flag to indicate if the node effect should be applied
+                      immediately. If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime
+                      and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when
+                      applying node effect for DPUNodeMaintenance CR
                     type: boolean
                   hold:
                     description: |-
-                      Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
-                      this is the default behavior in a non K8S environment
+                      Places annotation `wait-for-external-nodeeffect` and waits for it to be
+                      removed this is the default behavior in a non K8S environment
                     type: boolean
                   noEffect:
                     description: Do not do any action on the DPU node
                     type: boolean
                   nodeMaintenanceAdditionalRequestors:
-                    description: Additional requestors to be added to the NvidiaNodeMaintenance
-                      CR when Drain is selected
+                    description: |-
+                      Additional requestors to be added to the NvidiaNodeMaintenance CR when
+                      Drain is selected
                     items:
                       type: string
                     type: array
@@ -195,14 +205,16 @@ spec:
                   type: object
                 type: array
               maxUnavailableDPUNodes:
-                description: MaxUnavailableDPUNodes is the maximum number of DPUNodes
-                  that are unavailable during the node effect period.
+                description: |-
+                  MaxUnavailableDPUNodes is the maximum number of DPUNodes that are
+                  unavailable during the node effect period.
                 format: int32
                 minimum: 1
                 type: integer
               multiDPUOperationsSyncWaitTime:
-                description: MultiDPUOperationsSyncWaitTime  is the wait time between
-                  DPUs on the same node.
+                description: |-
+                  MultiDPUOperationsSyncWaitTime  is the wait time between DPUs on the
+                  same node.
                 type: string
               nodeEffectSyncStartTime:
                 description: NodeEffectSyncStartTime is the time when the node effect

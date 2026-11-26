@@ -39,7 +39,7 @@ pub(in crate::tests) async fn create_vpc(
                 name,
                 description: vpc_metadata
                     .as_ref()
-                    .map_or("".to_string(), |s| s.description.clone()),
+                    .map_or_else(String::new, |s| s.description.clone()),
                 labels: vpc_metadata
                     .as_ref()
                     .map_or(Vec::new(), |s| s.labels.clone()),

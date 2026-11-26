@@ -41,16 +41,11 @@ async fn load_machine_interfaces(
     env: &TestEnv,
     machine_id: MachineId,
 ) -> Vec<model::machine::MachineInterfaceSnapshot> {
-    let mut txn = env.test_harness.db_txn().await;
-    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[machine_id])
+    db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[machine_id])
         .await
         .expect("machine interfaces should load")
         .remove(&machine_id)
-        .expect("managed host should have interface rows");
-    txn.commit()
-        .await
-        .expect("interface lookup transaction should commit");
-    interfaces
+        .expect("managed host should have interface rows")
 }
 
 /// Submits the exact managed interface UUID used by both the operator
@@ -449,14 +444,10 @@ async fn test_multi_dpu(pool: sqlx::PgPool) {
         !hosts.is_empty(),
         "At least one host should have been returned"
     );
+    let expected_host_machine_id = host_machine_id.to_string();
     let host = hosts
         .into_iter()
-        .find(|h| {
-            h.machine_id
-                .as_ref()
-                .map(|m| m == &host_machine_id.to_string())
-                .unwrap_or(false)
-        })
+        .find(|h| h.machine_id.as_deref() == Some(expected_host_machine_id.as_str()))
         .unwrap_or_else(|| {
             panic!("Could not find expected host {host_machine_id} in managed_hosts output")
         });

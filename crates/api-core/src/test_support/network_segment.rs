@@ -26,6 +26,7 @@ use ::rpc::forge::forge_server::Forge;
 use carbide_uuid::network::NetworkSegmentId;
 #[cfg(test)]
 use carbide_uuid::vpc::VpcId;
+use db::TransactionVending as _;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
 
@@ -100,9 +101,7 @@ pub async fn create_static_assignments_segment(
     api: &Api,
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> NetworkSegmentId {
-    let mut txn = db::Transaction::begin(&api.database_connection)
-        .await
-        .unwrap();
+    let mut txn = api.database_connection.txn_begin().await.unwrap();
     crate::db_init::ensure_static_assignments_segment(api, &mut txn, subdomain_id)
         .await
         .unwrap();

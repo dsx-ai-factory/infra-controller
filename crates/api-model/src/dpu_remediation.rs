@@ -45,6 +45,13 @@ pub struct Author {
     name: String,
 }
 
+impl Author {
+    /// Borrows the stored name exactly as supplied, including whitespace and case.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+}
+
 impl From<String> for Author {
     fn from(value: String) -> Self {
         Self { name: value }
@@ -60,6 +67,13 @@ impl Display for Author {
 #[derive(Clone, Debug)]
 pub struct Reviewer {
     name: String,
+}
+
+impl Reviewer {
+    /// Borrows the stored name exactly as supplied, including whitespace and case.
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
 }
 
 impl From<String> for Reviewer {

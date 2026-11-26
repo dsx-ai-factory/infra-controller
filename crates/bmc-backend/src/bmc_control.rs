@@ -18,10 +18,19 @@
 use std::time::SystemTime;
 
 use bmc_drivers::CatalogError;
-use bmc_platform::{BmcControl, DriverOutcome, PlatformError, TimeStatus};
+use bmc_platform::{
+    BmcControl, DriverOutcome, ManagerSettings, ManagerSettingsDiff, ManagerSettingsStatus,
+    PlatformError, TimeStatus,
+};
 use bmc_runtime::BoundDriver;
+use carbide_instrument::Instrumentation;
+use carbide_redfish::libredfish::host_interface::{
+    HostInterfaceStaticIpv4Repair, ensure_gb200_host_interface_static_ipv4,
+    gb200_host_interface_static_ipv4_is_missing,
+};
 use carbide_redfish::nv_redfish::RedfishBmc;
 use libredfish::{EnabledDisabled, Redfish};
+use serde_json::json;
 
 use crate::BackendBmc;
 use crate::convert::platform_error;
@@ -171,6 +180,65 @@ impl BackendBmcControl<'_> {
                     .set_host_management_network_access(enabled)
                     .await
             }
+        }
+    }
+
+    /// See [`BmcControl::apply_settings`]. libredfish implements only the
+    /// GB200 `hostusb0` static IPv4 address, reporting a different address as
+    /// manual intervention as the GB200 driver does; `instrumentation` records
+    /// its raw requests.
+    pub async fn apply_settings(
+        &self,
+        profile: &ManagerSettings,
+        instrumentation: &Instrumentation,
+    ) -> Result<DriverOutcome, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                if !profile.attributes.is_empty() {
+                    return Err(PlatformError::Unsupported);
+                }
+                match ensure_gb200_host_interface_static_ipv4(instrumentation, *client)
+                    .await
+                    .map_err(platform_error)?
+                {
+                    HostInterfaceStaticIpv4Repair::AlreadyConfigured
+                    | HostInterfaceStaticIpv4Repair::Patched => Ok(DriverOutcome::complete()),
+                    HostInterfaceStaticIpv4Repair::Conflicting => {
+                        Err(PlatformError::ManualInterventionRequired {
+                            code: "gb200-host-interface-ipv4-conflict".to_string(),
+                        })
+                    }
+                }
+            }
+            Self::Drivers(bmc_control) => bmc_control.apply_settings(profile).await,
+        }
+    }
+
+    /// See [`BmcControl::settings_status`]. libredfish reports only the GB200
+    /// `hostusb0` static IPv4 address, keyed as the GB200 driver reports it.
+    /// Its model does not deserialize address values, so it never reports the
+    /// address applied: `actual` is an empty list when no address is
+    /// configured and unknown otherwise.
+    pub async fn settings_status(&self) -> Result<ManagerSettingsStatus, PlatformError> {
+        match self {
+            Self::Libredfish(client) => {
+                let missing = gb200_host_interface_static_ipv4_is_missing(*client)
+                    .await
+                    .map_err(platform_error)?;
+                Ok(ManagerSettingsStatus {
+                    is_applied: false,
+                    differences: vec![ManagerSettingsDiff {
+                        key: "hostusb0.IPv4StaticAddresses".to_string(),
+                        expected: json!([{
+                            "Address": "10.0.1.1",
+                            "SubnetMask": "255.255.255.0",
+                            "Gateway": "0.0.0.0",
+                        }]),
+                        actual: missing.then(|| json!([])),
+                    }],
+                })
+            }
+            Self::Drivers(bmc_control) => bmc_control.settings_status().await,
         }
     }
 }

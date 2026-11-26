@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 mod metrics;
 
 use std::default::Default;
@@ -27,6 +28,7 @@ use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
+use itertools::Itertools;
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
     MachineValidation, MachineValidationRunItem, MachineValidationRunItemState,
@@ -209,7 +211,7 @@ impl MachineValidationManager {
         // later phase restart from a lower MachineId while higher-ID locks
         // from an earlier phase were still held, recreating SQLSTATE 40P01
         // (`deadlock_detected`) with another ordered multi-machine writer.
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation::find_active(&mut txn).await?,
@@ -227,7 +229,7 @@ impl MachineValidationManager {
             .into_iter()
             .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for stale_attempt in db::machine::MachineRowLockOrderIter::new(
             db::machine_validation_execution::find_stale_active_attempts(
@@ -256,7 +258,7 @@ impl MachineValidationManager {
             .into_iter()
             .for_each(|completion| self.instrumentation.emit(completion));
 
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let mut completions = Vec::new();
         for validation in db::machine::MachineRowLockOrderIter::new(stale_validations(
             db::machine_validation::find_active(&mut txn).await?,
@@ -330,7 +332,7 @@ impl MachineValidationManager {
         // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
         // retention never turns into an unbounded delete transaction.
         const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut txn = self.database_connection.txn_begin().await?;
         let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
             txn.as_pgconn(),
             self.config.attempt_logs.retention,
@@ -416,7 +418,6 @@ async fn reconcile_terminal_run_items(
             .iter()
             .filter(|item| item.state == MachineValidationRunItemState::Failed)
             .map(|item| item.display_name.as_str())
-            .collect::<Vec<_>>()
             .join(", ");
         let error_message = format!(
             "Machine validation run {} completed with failed run item(s): {}",
@@ -614,7 +615,7 @@ async fn record_failed_validation_side_effects(
         return Ok(completion);
     };
 
-    let Some(machine) = db::machine::find_by_validation_id(txn, &validation.id).await? else {
+    let Some(machine) = db::machine::find_by_validation_id(&mut *txn, &validation.id).await? else {
         tracing::warn!(
             machine_validation_id = %validation.id,
             machine_id = %validation.machine_id,
@@ -699,7 +700,7 @@ mod tests {
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         let run_item_id = MachineValidationRunItemId::new();
         let attempt_id = MachineValidationAttemptId::new();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query(
             "INSERT INTO machine_validation (
                 id, machine_id, start_time, name, context, total, completed,
@@ -734,7 +735,7 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut monitor_txn = pool.begin().await?;
+        let mut monitor_txn = pool.txn_begin().await?;
         let selected = db::machine_validation_execution::find_stale_active_attempts(
             monitor_txn.as_mut(),
             heartbeat_timeout,
@@ -747,7 +748,7 @@ mod tests {
 
         // The API can commit a heartbeat after selection but before the
         // monitor acquires the parent run lock. Reuse that snapshot below.
-        let mut heartbeat_txn = pool.begin().await?;
+        let mut heartbeat_txn = pool.txn_begin().await?;
         assert_eq!(
             db::machine_validation_execution::record_heartbeat(
                 heartbeat_txn.as_mut(),

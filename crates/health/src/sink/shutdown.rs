@@ -195,7 +195,7 @@ mod tests {
     use crate::sink::report_worker::run_report_worker;
 
     type Discovery = BoxFuture<'static, Result<FinalRecordIteration, JoinError>>;
-    type Listener = BoxFuture<'static, Result<Result<(), String>, JoinError>>;
+    type Listener = BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>;
 
     /// Discovery iteration whose collector shutdown takes `drain` and then
     /// queues a final record, as a draining collector would.
@@ -529,7 +529,7 @@ mod tests {
                     fixture.discovery_returning_on_cancel(Duration::ZERO),
                     async move {
                         cancel_token.cancel();
-                        Ok(Ok(()))
+                        Ok(())
                     }
                     .boxed(),
                 ),
@@ -555,7 +555,7 @@ mod tests {
                 }
             };
 
-            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+            let (exit, logs) = capture_logs_async(crate::wait_for_service_exit(
                 discovery,
                 listener,
                 &fixture.cancel_token,
@@ -563,6 +563,8 @@ mod tests {
                 Duration::from_secs(20),
             ))
             .await;
+
+            assert!(exit.is_ok(), "{}", case.scenario);
 
             assert_eq!(
                 fixture.shutdowns.load(Ordering::SeqCst),
@@ -590,42 +592,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn uncancelled_service_exit_logs_the_failure_without_flushing_sinks() {
+    async fn uncancelled_service_exit_skips_the_flush_and_fails_on_listener_loss() {
         #[derive(Clone, Copy)]
         enum Exit {
-            ListenerShutdown,
             ListenerFails,
-            ListenerJoinFails,
             DiscoveryEnds,
             DiscoveryJoinFails,
         }
 
-        for (exit, level, message) in [
-            (
-                Exit::ListenerShutdown,
-                tracing::Level::INFO,
-                "Metrics listener shutdown",
-            ),
-            (
-                Exit::ListenerFails,
-                tracing::Level::ERROR,
-                "Metrics listener failed",
-            ),
-            (
-                Exit::ListenerJoinFails,
-                tracing::Level::ERROR,
-                "Metrics listener join error",
-            ),
+        for (exit, message, listener_lost) in [
+            (Exit::ListenerFails, "Metrics listener failed", true),
             (
                 Exit::DiscoveryEnds,
-                tracing::Level::ERROR,
                 "Discovery loop ended unexpectedly",
+                false,
             ),
-            (
-                Exit::DiscoveryJoinFails,
-                tracing::Level::ERROR,
-                "Discovery loop join error",
-            ),
+            (Exit::DiscoveryJoinFails, "Discovery loop join error", false),
         ] {
             let fixture = ServiceFixture::new(false);
             let flush_token = fixture.sink_workers.flush_token();
@@ -633,15 +615,10 @@ mod tests {
             let pending_listener: Listener = std::future::pending().boxed();
 
             let (discovery, listener): (Discovery, Listener) = match exit {
-                Exit::ListenerShutdown => (pending_discovery, async { Ok(Ok(())) }.boxed()),
                 Exit::ListenerFails => (
                     pending_discovery,
-                    async { Ok(Err("bind failed".to_string())) }.boxed(),
+                    async { Err("bind failed".into()) }.boxed(),
                 ),
-                Exit::ListenerJoinFails => {
-                    let error = join_error().await;
-                    (pending_discovery, async { Err(error) }.boxed())
-                }
                 Exit::DiscoveryEnds => {
                     let iteration = fixture.iteration(Duration::ZERO);
                     (async { Ok(iteration) }.boxed(), pending_listener)
@@ -652,7 +629,7 @@ mod tests {
                 }
             };
 
-            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+            let (result, logs) = capture_logs_async(crate::wait_for_service_exit(
                 discovery,
                 listener,
                 &fixture.cancel_token,
@@ -661,9 +638,17 @@ mod tests {
             ))
             .await;
 
+            match result {
+                Ok(()) => assert!(!listener_lost, "{message}"),
+                Err(error) => assert!(
+                    listener_lost && matches!(error, HealthError::MetricsListener(_)),
+                    "{message}: {error}"
+                ),
+            }
+
             assert!(
                 logs.iter()
-                    .any(|log| log.level == level && log.message == message),
+                    .any(|log| log.level == tracing::Level::ERROR && log.message == message),
                 "{message}"
             );
 
@@ -737,15 +722,16 @@ mod tests {
             fixture.cancel_token.cancel();
             let start = Instant::now();
 
-            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+            let (exit, logs) = capture_logs_async(crate::wait_for_service_exit(
                 discovery,
-                std::future::pending::<Result<Result<(), String>, JoinError>>(),
+                std::future::pending(),
                 &fixture.cancel_token,
                 fixture.sink_workers,
                 case.budget,
             ))
             .await;
 
+            assert!(exit.is_ok(), "{}", case.scenario);
             assert_eq!(start.elapsed(), case.returned_after, "{}", case.scenario);
 
             assert_eq!(

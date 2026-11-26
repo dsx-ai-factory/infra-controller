@@ -24,13 +24,14 @@ use std::path::PathBuf;
 use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
-use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
+use carbide_dpf::types::{DpfProxyDetails, DpfRegistryMirror, DpuDeploymentType};
 use carbide_firmware::FirmwareConfig;
 use carbide_firmware::defaults::{
     BF2_BMC_VERSION, BF2_CEC_VERSION, BF2_NIC_VERSION, BF2_UEFI_VERSION, BF3_BMC_VERSION,
     BF3_CEC_VERSION, BF3_NIC_VERSION, BF3_UEFI_VERSION,
 };
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
+pub use carbide_ib_fabric::config::UfmAuthMode;
 use carbide_ib_fabric::config::{IBFabricConfig, IbFabricDefinition};
 use carbide_machine_controller::config::power_manager::default_power_options;
 use carbide_machine_controller::config::{
@@ -425,8 +426,9 @@ pub struct CarbideConfig {
     /// (e.g., "prod" or "fake").
     pub dpu_ipmi_tool_impl: Option<String>,
 
-    /// Number of retries when IPMI returns an error during
-    /// DPU reboot.
+    /// Total process attempts per command for the production IPMI tool; defaults to three.
+    /// Zero starts no process and returns an invalid-retry error. Queued instance
+    /// reboots use one bounded attempt independently of this legacy setting.
     pub dpu_ipmi_reboot_attempts: Option<u32>,
 
     /// Number of consecutive HTTP 401/403 responses from a BMC before the
@@ -654,6 +656,10 @@ pub struct CarbideConfig {
     /// RackStateController related configuration parameter
     #[serde(default)]
     pub rack_state_controller: RackStateControllerConfig,
+
+    /// NVLink Domain controller scheduling, independent of the Rack controller.
+    #[serde(default)]
+    pub nvlink_domain_state_controller: NvLinkDomainStateControllerConfig,
 
     /// PowerShelfStateController related configuration parameter
     #[serde(default)]
@@ -916,9 +922,16 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub arm_pxe_boot_url_override: Option<String>,
 
-    /// Canonical PXE base URL
+    /// Scout firmware-download base, used when `nico_pxe_service_url` is absent or empty.
     #[serde(default = "default_pxe_public_base_url")]
     pub pxe_public_base_url: String,
+
+    /// Optional site-wide PXE service URL for Scout firmware downloads and DPU DHCP configuration.
+    /// A nonempty value takes precedence over `pxe_public_base_url` for firmware downloads.
+    /// Omitted by default; supplied strings, including empty values, are preserved.
+    /// Core reads this setting at startup, so changes require a restart.
+    #[serde(default)]
+    pub nico_pxe_service_url: Option<String>,
 
     /// Vendors for which the state controller should pin the UEFI HTTP boot
     /// URL on the BMC (via Redfish `HttpBootUri`) in addition to the existing
@@ -1320,8 +1333,9 @@ pub enum UfmCredentialSource {
     /// Local environment/file UFM entries are ignored.
     Backend,
     /// Read UFM credentials only from the local environment/file sources.
-    /// Every configured fabric must be present when IB management starts, and
-    /// persistent backend mutation is disabled.
+    /// Every configured fabric without explicit client-certificate authentication
+    /// must be present when IB management starts, and persistent backend mutation
+    /// is disabled.
     Local,
 }
 
@@ -1557,7 +1571,12 @@ impl CarbideConfig {
 
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
-            pxe_public_base_url: self.pxe_public_base_url.clone(),
+            pxe_public_base_url: self
+                .nico_pxe_service_url
+                .as_ref()
+                .filter(|url| !url.is_empty())
+                .unwrap_or(&self.pxe_public_base_url)
+                .clone(),
             firmware_global: self.firmware_global.clone(),
             machine_state_controller: self.machine_state_controller.clone(),
             host_health: self.host_health,
@@ -1653,10 +1672,11 @@ pub enum PerObjectStateMetricObjectType {
     VpcPrefix,
     SpdmAttestation,
     IbPartition,
+    NvlinkDomain,
 }
 
 impl PerObjectStateMetricObjectType {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Machine,
         Self::Switch,
         Self::Rack,
@@ -1665,6 +1685,7 @@ impl PerObjectStateMetricObjectType {
         Self::VpcPrefix,
         Self::SpdmAttestation,
         Self::IbPartition,
+        Self::NvlinkDomain,
     ];
 
     /// The `object_type` label token; must match what the controllers record.
@@ -1678,6 +1699,7 @@ impl PerObjectStateMetricObjectType {
             Self::VpcPrefix => "vpc_prefix",
             Self::SpdmAttestation => "spdm_attestation",
             Self::IbPartition => "ib_partition",
+            Self::NvlinkDomain => "nvlink_domain",
         }
     }
 }
@@ -2103,11 +2125,16 @@ pub struct DpfConfig {
     pub enabled: bool,
     /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
     /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Selects HBN and DTS `service.nameSource`: `dpuService` when true, otherwise `release`.
     /// Enable only with DPF 30.0 rc.4 or newer and HBN, DTS, and NICo chart versions
     /// that support this naming scheme.
     /// This site-wide value overrides per-service Helm values and is read at startup.
     #[serde(default, rename = "multiClusterSupport")]
     pub multi_cluster_support: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage on all DPF deployments.
+    /// Changing this setting generates new flavors and can reprovision existing DPUs.
+    #[serde(default)]
+    pub enable_pci_switch_emulation: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2167,6 +2194,16 @@ pub struct DpfConfig {
     /// configured to route outbound HTTPS traffic through the specified proxy.
     #[serde(default)]
     pub proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors for the DPU. Each `[[dpf.registry_mirrors]]` entry adds
+    /// `/etc/containerd/certs.d/<upstream>/hosts.toml` to every deployment's DPUFlavor, so the
+    /// DPU pulls that registry's images from the mirror first and falls back to the upstream
+    /// registry. containerd on the DPU reads the files only when its registry `config_path`
+    /// includes `/etc/containerd/certs.d`, which is the default from containerd 2.2.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning every DPU at the
+    /// site.
+    #[serde(default)]
+    pub registry_mirrors: Vec<DpfRegistryMirror>,
     /// `bf.cfg` lines appended to every deployment's DPUFlavor `bfcfgParameters`.
     ///
     /// Each entry is passed through verbatim; NICo applies no quoting or interpretation. The
@@ -2195,6 +2232,7 @@ impl Default for DpfConfig {
         Self {
             enabled: false,
             multi_cluster_support: false,
+            enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),
@@ -2203,6 +2241,7 @@ impl Default for DpfConfig {
             services: Box::default(),
             extra_services: Box::default(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             deployments: DpfDeploymentsConfig::default(),
         }
@@ -2311,7 +2350,7 @@ impl DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.5.0-89_26.07_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.6.0-86_26.10_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -2556,6 +2595,8 @@ pub struct DpfServiceConfig {
     pub docker_image_pull_secret: Option<String>,
     /// Chart-native values deep-merged over NICo's generated template values.
     /// Tables merge recursively. Scalars and arrays replace generated values.
+    /// For HBN and DTS, `multiClusterSupport` overrides `service.nameSource` after merging:
+    /// `dpuService` when enabled, or `release` when disabled or omitted.
     #[serde(default)]
     pub extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -4278,6 +4319,15 @@ pub struct PowerShelfStateControllerConfig {
     pub rack_firmware_reprovisioning_enabled: bool,
 }
 
+/// NVLink Domain controller scheduling configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NvLinkDomainStateControllerConfig {
+    /// Common scheduling and concurrency settings; defaults match Rack.
+    #[serde(default)]
+    pub controller: StateControllerConfig,
+}
+
 /// RackStateController related config
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -5160,7 +5210,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
             metrics_endpoint: value
                 .metrics_endpoint
                 .map(|x| x.to_string())
-                .unwrap_or("NA".to_string()),
+                .unwrap_or_else(|| "NA".to_string()),
             database_url: value.database_url,
             max_database_connections: value.max_database_connections,
             enable_ip_fabric: value.ib_config.unwrap_or_default().enabled,
@@ -5195,7 +5245,9 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .keys()
                 .cloned()
                 .collect_vec(),
-            dpu_ipmi_tool_impl: value.dpu_ipmi_tool_impl.unwrap_or("Not Set".to_string()),
+            dpu_ipmi_tool_impl: value
+                .dpu_ipmi_tool_impl
+                .unwrap_or_else(|| "Not Set".to_string()),
             dpu_ipmi_reboot_attempt: value.dpu_ipmi_reboot_attempts.unwrap_or_default(),
             initial_domain_name: value.initial_domain_name,
             sitename: value.sitename,
@@ -5634,6 +5686,25 @@ mod tests {
     use model::vpc::VpcRoutingProfileOverrides;
 
     use super::*;
+
+    #[test]
+    fn per_object_state_metrics_accepts_nvlink_domains() {
+        let config: PerObjectStateMetricsConfig = toml::from_str(
+            r#"enabled = true
+object_types = ["nvlink_domain"]"#,
+        )
+        .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.object_types.len(), 1);
+        let domain = config.object_types[0];
+        assert_eq!(domain.as_str(), "nvlink_domain");
+        assert_eq!(serde_json::to_value(domain).unwrap(), "nvlink_domain");
+        assert!(
+            PerObjectStateMetricsConfig::default()
+                .object_types
+                .contains(&domain)
+        );
+    }
 
     /// Disabling both bearer tokens and machine mTLS would lock every node out
     /// of the API; validation must refuse the combination, and each mechanism
@@ -6751,6 +6822,7 @@ path = "credentials.yaml"
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
             full_lockdown_recovery_enabled: true,
+            instance_reboot_queue_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -6802,6 +6874,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6828,6 +6901,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -7681,6 +7755,59 @@ path = "credentials.yaml"
                     .extract()
                     .unwrap();
                 config.allow_insecure_discovery
+            },
+        );
+    }
+
+    #[test]
+    fn nico_pxe_service_url_preserves_value_and_selects_firmware_base() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: "",
+                    expect: (None, default_pxe_public_base_url()),
+                },
+                Check {
+                    scenario: "legacy URL without discovery",
+                    input: r#"pxe_public_base_url = "http://legacy.example:8080""#,
+                    expect: (None, "http://legacy.example:8080".to_string()),
+                },
+                Check {
+                    scenario: "empty discovery retains legacy URL",
+                    input: "nico_pxe_service_url = \"\"\npxe_public_base_url = \"http://legacy.example:8080\"",
+                    expect: (
+                        Some(String::new()),
+                        "http://legacy.example:8080".to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "unchanged URL",
+                    input: r#"nico_pxe_service_url = "http://Boot.Example:8080/""#,
+                    expect: (
+                        Some("http://Boot.Example:8080/".to_string()),
+                        "http://Boot.Example:8080/".to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "discovery URL overrides legacy URL",
+                    input: "nico_pxe_service_url = \"http://Boot.Example:8080/\"\npxe_public_base_url = \"http://legacy.example:8080\"",
+                    expect: (
+                        Some("http://Boot.Example:8080/".to_string()),
+                        "http://Boot.Example:8080/".to_string(),
+                    ),
+                },
+            ],
+            |patch| {
+                let config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(patch))
+                    .extract()
+                    .unwrap();
+                let firmware_base = config
+                    .machine_state_handler_site_config()
+                    .pxe_public_base_url;
+                (config.nico_pxe_service_url, firmware_base)
             },
         );
     }
@@ -8786,7 +8913,7 @@ mqtt_endpoint = "mqtt.forge"
                 dpa_config.astra.underlay_ip_rail_id_bit_len,
                 dpa_config.astra.underlay_ip_software_plane_id_bit_len,
             ),
-            (16, 13, 4, 8)
+            (16, 13, 3, 2)
         );
     }
 
@@ -9306,6 +9433,85 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
             "configured order is preserved" {
                 "extra_bfcfg_parameters = [\"FIRST=1\", \"SECOND=2\"]\n"
                     => vec!["FIRST=1".to_string(), "SECOND=2".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn dpf_registry_mirrors_parse_from_an_array_of_tables() {
+        // (upstream, mirror, override_path, server, ca_pem, dial_timeout) of every parsed entry.
+        type Entry = (
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let parse = |body: &str| -> Result<Vec<Entry>, ()> {
+            let config = toml::from_str::<DpfConfig>(body).map_err(drop)?;
+            Ok(config
+                .registry_mirrors
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.upstream,
+                        m.mirror,
+                        m.override_path,
+                        m.server,
+                        m.ca_pem,
+                        m.dial_timeout,
+                    )
+                })
+                .collect())
+        };
+
+        scenarios!(
+            run = |body: &str| parse(body);
+
+            "absent key defaults to no mirrors" {
+                "enabled = true\n" => Yields(vec![]),
+            }
+
+            "only upstream and mirror are required" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com".to_string(),
+                    false,
+                    None,
+                    None,
+                    None,
+                )]),
+            }
+
+            "every field is carried through" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com/v2/nvcr-cache\"\n\
+                 override_path = true\n\
+                 server = \"https://nvcr.io\"\n\
+                 ca_pem = \"-----BEGIN CERTIFICATE-----\"\n\
+                 dial_timeout = \"5s\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com/v2/nvcr-cache".to_string(),
+                    true,
+                    Some("https://nvcr.io".to_string()),
+                    Some("-----BEGIN CERTIFICATE-----".to_string()),
+                    Some("5s".to_string()),
+                )]),
+            }
+
+            "missing mirror is rejected" {
+                "[[registry_mirrors]]\nupstream = \"nvcr.io\"\n" => Fails,
+            }
+
+            "unknown key is rejected" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n\
+                 skip_verify = true\n" => Fails,
             }
         );
     }
@@ -10123,6 +10329,19 @@ helm_repo_url = "oci://registry.example.test/doca"
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_pci_switch_emulation_is_opt_in() {
+        assert!(!DpfConfig::default().enable_pci_switch_emulation);
+        value_scenarios!(
+            run = |input: &str| toml::from_str::<DpfConfig>(input).unwrap().enable_pci_switch_emulation;
+            "PCI switch emulation" {
+                "" => false,
+                "enable_pci_switch_emulation = false" => false,
+                "enable_pci_switch_emulation = true" => true,
+            }
+        );
     }
 
     #[test]

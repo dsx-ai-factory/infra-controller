@@ -44,21 +44,24 @@ spec:
             properties:
               bridge:
                 description: |-
-                  Bridge specifies the name of the OVS bridge to which the network interface will be connected.
-                  This bridge name is used in the CNI configuration for the OVS plugin.
+                  Bridge specifies the name of the OVS bridge to which the network
+                  interface will be connected. This bridge name is used in the CNI
+                  configuration for the OVS plugin.
                 type: string
               chainedCNIs:
                 description: |-
-                  ChainedCNIs specifies additional CNI plugins to be chained after the base OVS plugin.
-                  When specified, the NAD will use the CNI chaining format with the OVS plugin as the
-                  first plugin, followed by the plugins defined in this list.
-                  This allows adding capabilities like RDMA support on top of the base network interface.
-                  If empty, the NAD uses a single OVS plugin configuration (backward compatible format).
+                  ChainedCNIs specifies additional CNI plugins to be chained after the base
+                  OVS plugin. When specified, the NAD will use the CNI chaining format with
+                  the OVS plugin as the first plugin, followed by the plugins defined in
+                  this list. This allows adding capabilities like RDMA support on top of
+                  the base network interface. If empty, the NAD uses a single OVS plugin
+                  configuration (backward compatible format).
                 items:
                   description: |-
                     CNIPlugin defines a CNI plugin to be used in a chained CNI configuration.
-                    When multiple CNI plugins are specified in ChainedCNIs, they are executed in order
-                    after the base OVS CNI plugin to provide additional network functionality.
+                    When multiple CNI plugins are specified in ChainedCNIs, they are executed in
+                    order after the base OVS CNI plugin to provide additional network
+                    functionality.
                   properties:
                     config:
                       description: |-
@@ -68,8 +71,9 @@ spec:
                       x-kubernetes-preserve-unknown-fields: true
                     type:
                       description: |-
-                        Type specifies the CNI plugin type to be used in the chain.
-                        Currently only "rdma" is supported, which enables RDMA capabilities for the network interface.
+                        Type specifies the CNI plugin type to be used in the chain. Currently
+                        only "rdma" is supported, which enables RDMA capabilities for the network
+                        interface.
                       enum:
                       - rdma
                       type: string
@@ -78,7 +82,8 @@ spec:
                   type: object
                 type: array
               dpuClusterSelector:
-                description: DPUClusterSelector determines in which clusters the DPUServiceNAD
+                description: |-
+                  DPUClusterSelector determines in which clusters the DPUServiceNAD
                   controller should apply the configuration.
                 properties:
                   matchExpressions:
@@ -126,19 +131,23 @@ spec:
                 x-kubernetes-map-type: atomic
               ipam:
                 description: |-
-                  IPAM enables IP Address Management for the network interfaces attached to this network
-                  When set to true, a DPUServiceChain that references the DPUServiceInterface that has
-                  requested this network must be created and include the relevant IPAM information. See
-                  DPUServiceChain documentation for more.
-                  When set to false, the network interfaces attached to this network will not get an IP
+                  IPAM enables IP Address Management for the network interfaces attached to
+                  this network When set to true, a DPUServiceChain that references the
+                  DPUServiceInterface that has requested this network must be created and
+                  include the relevant IPAM information. See DPUServiceChain documentation
+                  for more. When set to false, the network interfaces attached to this
+                  network will not get an IP
                 type: boolean
               resourceType:
                 description: |-
-                  ResourceType specifies the type of network resource to allocate for pods using this NAD.
+                  ResourceType specifies the type of network resource to allocate for pods
+                  using this NAD.
                   - "vf": Virtual Function (SR-IOV VF) from the DPU's physical ports
-                  - "sf": Scalable Function from the DPU (maps to nvidia.com/bf_sf or nvidia.com/bf_sf_trusted)
+                  - "sf": Scalable Function from the DPU (maps to nvidia.com/bf_sf or
+                    nvidia.com/bf_sf_trusted)
                   - "veth": Virtual Ethernet pair (no device plugin resource required)
-                  The resource type determines which SR-IOV device plugin resource will be requested.
+                  The resource type determines which SR-IOV device plugin resource will be
+                  requested.
                 enum:
                 - vf
                 - sf
@@ -148,10 +157,10 @@ spec:
                 default: 1500
                 description: |-
                   ServiceMTU specifies the MTU size in bytes for the network interface.
-                  This value is passed to the OVS CNI plugin and determines the maximum packet size.
-                  If there is a DPUServiceChain that references an interface that is part of this network,
-                  then the MTU that is defined in the DPUServiceChain takes precedence.
-                  The default is 1500.
+                  This value is passed to the OVS CNI plugin and determines the maximum
+                  packet size. If there is a DPUServiceChain that references an interface
+                  that is part of this network, then the MTU that is defined in the
+                  DPUServiceChain takes precedence. The default is 1500.
                 maximum: 9216
                 minimum: 1280
                 type: integer

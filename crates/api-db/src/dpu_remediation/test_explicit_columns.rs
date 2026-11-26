@@ -34,7 +34,7 @@ async fn remediation_queries_survive_added_columns(
 
     // Keep the API's prepared statements while another connection adds the columns.
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE dpu_remediations ADD COLUMN test_added_column text;
@@ -51,7 +51,7 @@ async fn remediation_queries_survive_added_columns(
 async fn exercise_remediation_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x73; 32],

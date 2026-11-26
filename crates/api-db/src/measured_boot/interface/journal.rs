@@ -29,6 +29,7 @@ use measured_boot::records::{MeasurementJournalRecord, MeasurementMachineState};
 use sqlx::PgConnection;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 use crate::measured_boot::interface::common;
 
 /// insert_measurement_journal_record is a very basic insert of a
@@ -98,10 +99,10 @@ pub async fn delete_journal_where_id(
 /// if it exists. This leverages the generic get_object_for_id
 /// function since its a simple/common pattern.
 pub async fn get_measurement_journal_record_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     journal_id: MeasurementJournalId,
 ) -> Result<Option<MeasurementJournalRecord>, DatabaseError> {
-    common::get_object_for_id(txn, journal_id)
+    common::get_object_for_id(conn, journal_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_journal_record_by_id"))
 }
@@ -111,10 +112,10 @@ pub async fn get_measurement_journal_record_by_id(
 /// if it exists. This leverages the generic get_object_for_id
 /// function since its a simple/common pattern.
 pub async fn get_measurement_journal_record_by_report_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     report_id: MeasurementReportId,
 ) -> Result<Option<MeasurementJournalRecord>, DatabaseError> {
-    common::get_object_for_id(txn, report_id)
+    common::get_object_for_id(conn, report_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_journal_record_by_report_id"))
 }
@@ -123,9 +124,9 @@ pub async fn get_measurement_journal_record_by_report_id(
 /// instances in the database. This leverages the generic get_all_objects
 /// function since its a simple/common pattern.
 pub async fn get_measurement_journal_records(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<MeasurementJournalRecord>, DatabaseError> {
-    common::get_all_objects(txn)
+    common::get_all_objects(conn)
         .await
         .map_err(|e| e.with_op_name("get_measurement_journal_records"))
 }
@@ -134,10 +135,10 @@ pub async fn get_measurement_journal_records(
 /// records for a given machine ID, which is used by the `journal list`
 /// CLI option.
 pub async fn get_measurement_journal_records_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> Result<Vec<MeasurementJournalRecord>, DatabaseError> {
-    common::get_objects_where_id(txn, machine_id)
+    common::get_objects_where_id(conn, machine_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_journal_records_for_machine_id"))
 }

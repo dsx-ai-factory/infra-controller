@@ -135,14 +135,11 @@ impl VerifierResponseJwt {
 
         let kid = jwt_header
             .kid
-            .ok_or(NrasError::Jwt("No kid found in JWT header".to_string()))?;
+            .ok_or_else(|| NrasError::Jwt("No kid found in JWT header".to_string()))?;
 
-        let decoding_key = keystore
-            .find_key(&kid)
-            .ok_or(NrasError::DecodingKeyNotFound(format!(
-                "DecodingKey not found for kid - {}",
-                kid
-            )))?;
+        let decoding_key = keystore.find_key(&kid).ok_or_else(|| {
+            NrasError::DecodingKeyNotFound(format!("DecodingKey not found for kid - {}", kid))
+        })?;
 
         // The service profile permits ES384; do not expand the accepted algorithms
         // merely because an incoming token names a different one.

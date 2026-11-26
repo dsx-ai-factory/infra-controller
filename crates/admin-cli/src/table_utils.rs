@@ -18,6 +18,24 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
+/// Hard-wraps a single line without changing its content.
+pub(crate) fn wrap_line(value: &str, width: usize) -> String {
+    if width == 0 {
+        return value.to_string();
+    }
+
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index > 0 && index % width == 0 {
+            output.push('\n');
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum MaxWidthSpec {
     All(usize),
@@ -152,21 +170,15 @@ impl ColumnWidths {
         }
         unmatched.sort_unstable();
 
-        Some(format!(
-            "--max-width column(s) {} did not match any column in this output \
+        let mut message = "--max-width column(s) ".to_string();
+        append_quoted_columns(&mut message, &unmatched);
+        message.push_str(
+            " did not match any column in this output \
              (COLUMN must exactly match the displayed header text, case-insensitive, \
-             and was ignored). Valid columns here: {}",
-            unmatched
-                .iter()
-                .map(|c| format!("'{c}'"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            headers
-                .iter()
-                .map(|h| format!("'{h}'"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ))
+             and was ignored). Valid columns here: ",
+        );
+        append_quoted_columns(&mut message, headers);
+        Some(message)
     }
 }
 
@@ -259,21 +271,26 @@ impl ColumnSelection {
         }
         unmatched.sort_unstable();
 
-        Some(format!(
-            "--columns value(s) {} did not match any column in this output (COLUMN must \
+        let mut message = "--columns value(s) ".to_string();
+        append_quoted_columns(&mut message, &unmatched);
+        message.push_str(
+            " did not match any column in this output (COLUMN must \
              exactly match the displayed header text, case-insensitive, and was ignored). \
-             Valid columns here: {}",
-            unmatched
-                .iter()
-                .map(|c| format!("'{c}'"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            headers
-                .iter()
-                .map(|h| format!("'{h}'"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ))
+             Valid columns here: ",
+        );
+        append_quoted_columns(&mut message, headers);
+        Some(message)
+    }
+}
+
+fn append_quoted_columns(output: &mut String, columns: &[&str]) {
+    for (index, column) in columns.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push('\'');
+        output.push_str(column);
+        output.push('\'');
     }
 }
 
@@ -404,13 +421,19 @@ mod tests {
 
     #[test]
     fn unmatched_column_produces_a_warning_listing_valid_headers() {
-        let widths = ColumnWidths::new(&[MaxWidthSpec::Column("Sate".to_string(), 40)]);
+        let widths = ColumnWidths::new(&[
+            MaxWidthSpec::Column("界'".to_string(), 20),
+            MaxWidthSpec::Column("Sate".to_string(), 40),
+        ]);
         let message = widths
             .describe_unmatched_columns(&["", "Machine IDs (H/D)", "State"])
             .expect("should warn about the unmatched column");
-        assert!(message.contains("'Sate'"));
-        assert!(message.contains("'State'"));
-        assert!(message.contains("'Machine IDs (H/D)'"));
+        assert_eq!(
+            message,
+            "--max-width column(s) 'Sate', '界'' did not match any column in this output \
+             (COLUMN must exactly match the displayed header text, case-insensitive, \
+             and was ignored). Valid columns here: '', 'Machine IDs (H/D)', 'State'"
+        );
     }
 
     #[test]
@@ -451,13 +474,16 @@ mod tests {
 
     #[test]
     fn unmatched_requested_column_produces_a_warning_listing_valid_headers() {
-        let selection = ColumnSelection::new(&["Sate".to_string()]);
+        let selection = ColumnSelection::new(&["Sate".to_string(), String::new()]);
         let message = selection
             .describe_unmatched_columns(&["", "Id", "State"])
             .expect("should warn about the unmatched column");
-        assert!(message.contains("'Sate'"));
-        assert!(message.contains("'State'"));
-        assert!(message.contains("'Id'"));
+        assert_eq!(
+            message,
+            "--columns value(s) '', 'Sate' did not match any column in this output (COLUMN must \
+             exactly match the displayed header text, case-insensitive, and was ignored). \
+             Valid columns here: '', 'Id', 'State'"
+        );
     }
 
     #[test]

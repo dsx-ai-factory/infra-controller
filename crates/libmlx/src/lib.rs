@@ -23,3 +23,18 @@ pub mod profile;
 pub mod registry;
 pub mod runner;
 pub mod variables;
+
+fn write_joined<T: std::fmt::Display>(
+    formatter: &mut std::fmt::Formatter<'_>,
+    values: impl IntoIterator<Item = T>,
+    separator: &str,
+) -> std::fmt::Result {
+    let mut values = values.into_iter();
+    if let Some(first) = values.next() {
+        write!(formatter, "{first}")?;
+        for value in values {
+            write!(formatter, "{separator}{value}")?;
+        }
+    }
+    Ok(())
+}

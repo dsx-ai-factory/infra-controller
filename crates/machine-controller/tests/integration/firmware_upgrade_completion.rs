@@ -39,6 +39,14 @@ impl TestContext {
     }
 
     async fn init_with_runtime(pool: PgPool, configure: impl FnOnce(&mut CarbideConfig)) -> Self {
+        Self::init_with_host(pool, configure, ManagedHostConfig::default()).await
+    }
+
+    async fn init_with_host(
+        pool: PgPool,
+        configure: impl FnOnce(&mut CarbideConfig),
+        host_config: ManagedHostConfig,
+    ) -> Self {
         let env = Env::builder(pool)
             .configure_runtime(configure)
             .build()
@@ -51,7 +59,7 @@ impl TestContext {
         let mh = env
             .test_harness
             .managed_host_builder(&site_explorer, underlay_segment)
-            .with_config(ManagedHostConfig::default())
+            .with_config(host_config)
             .build()
             .await
             .0;
@@ -97,7 +105,7 @@ impl TestManagedHostFirmwareExt for TestManagedHost {
                 deadline,
                 delivered_at: Some(chrono::Utc::now()),
                 task_json: String::new(),
-                result,
+                result: result.map(Box::new),
             },
             retry_count: 0,
         })
@@ -612,7 +620,8 @@ async fn scout_delivery_contact_window(pool: PgPool) {
 #[sqlx_test]
 async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgPool) {
     const RETRIES_TOTAL: &str = "carbide_host_reprovision_retries_total";
-    let retry_interval = chrono::TimeDelta::hours(1);
+    // Ages on both sides of a nondefault interval distinguish it from the production default.
+    let retry_interval = chrono::TimeDelta::minutes(15);
     let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
         config.firmware_global.host_firmware_upgrade_retry_interval = retry_interval;
     })
@@ -621,7 +630,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
 
     // Still inside the retry interval: the machine stays put and nothing is
     // counted.
-    mh.put_in_failed_firmware_upgrade(chrono::Utc::now(), 0)
+    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - chrono::TimeDelta::minutes(10), 0)
         .await;
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
@@ -644,7 +653,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
 
     // Past the retry interval with budget left: one retry is taken and
     // counted, and the consumed attempt lands in the state's retry_count.
-    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - retry_interval * 2, 0)
+    mh.put_in_failed_firmware_upgrade(chrono::Utc::now() - chrono::TimeDelta::minutes(20), 0)
         .await;
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
@@ -668,7 +677,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
     // Past the retry interval with the budget exhausted: the machine parks in
     // the failure state and the counter does not move again.
     mh.put_in_failed_firmware_upgrade(
-        chrono::Utc::now() - retry_interval * 2,
+        chrono::Utc::now() - chrono::TimeDelta::minutes(20),
         MAX_FIRMWARE_UPGRADE_RETRIES,
     )
     .await;
@@ -825,4 +834,103 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
     let machine = mh.host.machine().await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert!(machine.host_reprovision_requested.is_none());
+}
+
+#[sqlx_test]
+async fn missing_firmware_config_reenables_lockdown_before_ready(pool: PgPool) {
+    let cache = tempfile::tempdir().unwrap();
+    let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
+        config.host_models.clear();
+        config.firmware_global.firmware_directory = cache.path().to_owned();
+    })
+    .await;
+    mh.advance_to_converged_ready().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::Ready
+    );
+
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    let mut txn = env.test_harness.db_txn().await;
+    db::host_machine_update::trigger_host_reprovisioning_request(
+        &mut txn,
+        "Automated",
+        &mh.host.id,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.run_single_iteration().await;
+    let machine = mh.host.machine().await;
+    assert!(machine.host_reprovision_requested.is_none());
+    let expected = ManagedHostState::HostInit {
+        machine_state: model::machine::MachineState::WaitingForLockdown {
+            lockdown_info: model::machine::LockdownInfo {
+                state: model::machine::LockdownState::PollingLockdownStatus,
+                mode: model::machine::LockdownMode::Enable,
+            },
+        },
+    };
+    assert_eq!(machine.current_state(), &expected);
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Enabled),
+        "a firmware check with no config must restore lockdown before completing"
+    );
+}
+
+#[sqlx_test]
+async fn missing_firmware_config_keeps_lockdown_off_when_profile_disables_it(pool: PgPool) {
+    let cache = tempfile::tempdir().unwrap();
+    let mut host_config = ManagedHostConfig::default();
+    let mut expected_machine_data = model::expected_machine::ExpectedMachineData {
+        serial_number: host_config.serial.clone(),
+        ..Default::default()
+    };
+    expected_machine_data
+        .host_lifecycle_profile
+        .disable_lockdown = Some(true);
+    host_config.expected_machine_data = Some(expected_machine_data);
+    let TestContext { mut env, mh } = TestContext::init_with_host(
+        pool,
+        |config| {
+            config.host_models.clear();
+            config.firmware_global.firmware_directory = cache.path().to_owned();
+        },
+        host_config,
+    )
+    .await;
+    mh.advance_to_converged_ready().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::Ready
+    );
+
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    let mut txn = env.test_harness.db_txn().await;
+    db::host_machine_update::trigger_host_reprovisioning_request(
+        &mut txn,
+        "Automated",
+        &mh.host.id,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.run_single_iteration().await;
+    let machine = mh.host.machine().await;
+    assert!(machine.host_reprovision_requested.is_none());
+    assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Disabled),
+        "a profile with disable_lockdown must keep lockdown off, got {:?}",
+        env.redfish_sim.lockdown_states()
+    );
 }

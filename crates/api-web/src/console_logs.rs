@@ -17,7 +17,7 @@ use rpc::protos::console_log::StreamConsoleLogsRequest;
 use rpc::protos::forge::forge_server::Forge;
 use serde::{Serialize, Serializer};
 
-use super::Base;
+use super::{Base, filters};
 
 #[derive(Template)]
 #[template(path = "console_logs.html")]

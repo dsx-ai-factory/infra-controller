@@ -108,6 +108,13 @@ type SSHKeyGroupFilterInput struct {
 	Versions       []string
 	Statuses       []string
 	SearchQuery    *string
+	IncludeDeleted bool
+}
+
+// SSHKeyGroupClearInput identifies nullable SSH Key Group fields to clear.
+type SSHKeyGroupClearInput struct {
+	SSHKeyGroupID uuid.UUID
+	Deleted       bool
 }
 
 var _ bun.BeforeAppendModelHook = (*SSHKeyGroup)(nil)
@@ -141,9 +148,11 @@ type SSHKeyGroupDAO interface {
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyGroup, int, error)
 	//
-	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error)
+	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (*SSHKeyGroup, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupClearInput) (*SSHKeyGroup, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -229,6 +238,9 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 	skgs := []SSHKeyGroup{}
 
 	query := db.GetIDB(tx, skgsd.dbSession).NewSelect().Model(&skgs)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.Names != nil {
 		query = query.Where("skg.name IN (?)", bun.In(filter.Names))
@@ -280,18 +292,19 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 	return skgs, paginator.Total, nil
 }
 
-// GenerateAndUpdateVersion generates version based on current content and updates the version field
-func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error) {
-	// Generate SHA1 hash version using SSHKeyGroup ID
+// GenerateAndUpdateVersion generates versions based on current content and
+// updates the Group, plus every Site association unless groupOnly is true.
+func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error) {
 	// Retrieve SSH Key Group
 	dbskg, err := skgsd.GetByID(ctx, tx, id, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Initialize hash with SSH Key Group
+	// Generate SHA1 hash version using SSHKeyGroup ID.
 	skgHash := sha1.New()
-	skgHash.Write([]byte(dbskg.ID.String()))
+	sshKeyGroupIDBytes, _ := dbskg.ID.MarshalText()
+	skgHash.Write(sshKeyGroupIDBytes)
 
 	// Retrieve SSH Key Group Association details for calculating hash version based on SSH Key Group ID
 	skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(skgsd.dbSession)
@@ -310,7 +323,8 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 	for _, skgsa := range dbskgsas {
 		// skipping the association if it is in deleting status
 		if skgsa.Status != SSHKeyGroupSiteAssociationStatusDeleting {
-			skgHash.Write([]byte(skgsa.SiteID.String()))
+			siteIDBytes, _ := skgsa.SiteID.MarshalText()
+			skgHash.Write(siteIDBytes)
 
 			// Continue updating hash if in future we added support for VPC/Instance
 		}
@@ -331,30 +345,31 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 
 	// Initialize hash with SSH Key Group Associations
 	skgsaHash := sha1.New()
-	skgHash.Write([]byte(dbskg.ID.String()))
+	skgHash.Write(sshKeyGroupIDBytes)
 
 	// Update hash based on SSH Key ID
 	for _, ska := range dbska {
-		skgHash.Write([]byte(ska.SSHKeyID.String()))
-		skgsaHash.Write([]byte(ska.SSHKeyID.String()))
+		sshKeyIDBytes, _ := ska.SSHKeyID.MarshalText()
+		skgHash.Write(sshKeyIDBytes)
+		skgsaHash.Write(sshKeyIDBytes)
 	}
 
-	// Update version for SSH Key Group
 	skgVersion := hex.EncodeToString(skgHash.Sum(nil))
-	uskgsa, err := skgsd.Update(ctx, tx, SSHKeyGroupUpdateInput{SSHKeyGroupID: id, Version: &skgVersion})
-	if err != nil {
-		return nil, err
+	skgsaVersion := hex.EncodeToString(skgsaHash.Sum(nil))
+
+	updatedGroup, err := skgsd.Update(ctx, tx, SSHKeyGroupUpdateInput{SSHKeyGroupID: id, Version: &skgVersion})
+	if err != nil || groupOnly {
+		return updatedGroup, err
 	}
 
 	// Update version for all SSH Key Group Associations
-	skgsaVersion := hex.EncodeToString(skgsaHash.Sum(nil))
 	curTime := db.GetCurTime()
 	_, err = db.GetIDB(tx, skgsd.dbSession).NewUpdate().Model((*SSHKeyGroupSiteAssociation)(nil)).Column("version", "updated").Set("version = ?", skgsaVersion).Set("updated = ?", curTime).Where("sshkey_group_id = ?", id).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return uskgsa, nil
+	return updatedGroup, nil
 }
 
 // Update updates specified fields of an existing SSHKeyGroup
@@ -417,6 +432,40 @@ func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHK
 		return nil, err
 	}
 	return nv, nil
+}
+
+// Clear clears selected nullable fields on an SSHKeyGroup.
+func (skgsd SSHKeyGroupSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupClearInput) (_ *SSHKeyGroup, retErr error) {
+	ctx, sshKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.Clear")
+	defer func() { cotel.EndSpan(sshKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(sshKeyGroupDAOSpan, attribute.String("id", input.SSHKeyGroupID.String()))
+
+	skg := &SSHKeyGroup{ID: input.SSHKeyGroupID}
+	updatedFields := []string{}
+	if input.Deleted {
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, skgsd.dbSession).
+			NewUpdate().
+			Model(skg).
+			Column(updatedFields...).
+			Where("skg.id = ?", input.SSHKeyGroupID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := skgsd.GetByID(ctx, tx, input.SSHKeyGroupID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete deletes an SSHKeyGroup by ID

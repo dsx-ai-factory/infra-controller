@@ -32,8 +32,13 @@ guide explains each step.
    `dpf-operator-system` namespace. The Core install in the next step needs both:
    `nico-api.dpf.rbacCreate: true` in the simulation values renders a Role in
    that namespace, and `[dpf] enabled = true` makes nico-api expect the CRDs
-   at startup. The Makefile default `IMG=dpf-sim-controller:dev` is a local
-   name that no cluster can pull, so pass the image explicitly:
+   at startup. nico-api also reads `status.version` of the
+   `DPFOperatorConfig` named `dpfoperatorconfig` at startup and exits when it
+   is missing. The running simulator creates that object and writes the
+   version. A nico-api that starts before the simulator restarts until the
+   version is there, and `setup.sh` fails after waiting 600 seconds for it.
+   The Makefile default `IMG=dpf-sim-controller:dev` is a local name that no
+   cluster can pull, so pass the image explicitly:
 
    ```bash
    DPF_SIM_IMAGE="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:$(git rev-parse --short HEAD)"
@@ -116,9 +121,10 @@ cycle). Repeating `helm upgrade --install` with the same values is always safe.
   [Why Cross-Compilation Is Required](#why-cross-compilation-is-required).
 - A container registry you can push to and the cluster can pull from
   (referenced through `NICO_IMAGE_REGISTRY`, the same convention as `setup.sh`)
-- The DPF simulator deployed in `dpf-operator-system` before the Core
+- The DPF simulator running in `dpf-operator-system` before the Core
   install, as in [Quick Path](#quick-path) step 1. The simulation Core values
-  render a Role in that namespace
+  render a Role in that namespace, and nico-api reads the `DPFOperatorConfig`
+  the simulator creates there
 - A NICo Core site deployed by `helm-prereqs/setup.sh`, which installs the
   cert-manager ClusterIssuer and the External Secrets Operator (ESO) the chart
   relies on
@@ -1112,7 +1118,7 @@ gone. Rerun the loop until
 each kind.
 
 `make -C dev/k8s/dpf-sim-controller undeploy` removes the simulator itself and
-leaves the DPF CRDs in place.
+leaves the DPF CRDs and the `DPFOperatorConfig` in place.
 
 ### Per-BMC Vault Credentials
 
@@ -1144,7 +1150,9 @@ kubectl get secret nico-vault-token -n nico-system -o jsonpath='{.data.token}' |
 `setup.sh --skip-dpf --core-values values/nico-core-simulation.yaml` recreates
 the site from scratch, including the database and Vault. Uninstall machine-a-tron and
 delete the DPF CRs first. `clean.sh` does not cover the machine-a-tron
-namespace.
+namespace. It deletes `dpf-operator-system` and the DPF CRDs, which removes
+the simulator and its `DPFOperatorConfig`, so repeat
+[Quick Path](#quick-path) step 1 before `setup.sh`.
 
 ## Non-Obvious Fixes
 

@@ -82,7 +82,7 @@ pub async fn create(
 }
 
 pub async fn find_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: Option<VpcId>,
 ) -> Result<Vec<VpcPeeringId>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new("SELECT id FROM vpc_peerings");
@@ -97,7 +97,7 @@ pub async fn find_ids(
 
     let query = builder.build_query_as();
     let vpc_peering_ids: Vec<VpcPeeringId> = query
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("vpc_peering::find_ids", e))?;
 
@@ -105,13 +105,13 @@ pub async fn find_ids(
 }
 
 pub async fn find_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ids: Vec<VpcPeeringId>,
 ) -> Result<Vec<VpcPeering>, DatabaseError> {
     let query = "SELECT id, vpc1_id, vpc2_id, deletion_version FROM vpc_peerings WHERE id=ANY($1)";
     let vpc_peering_list = sqlx::query_as::<_, VpcPeering>(query)
         .bind(ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -133,10 +133,12 @@ pub async fn find_by_id_for_update(
 }
 
 /// Lists only peerings whose permission removal has been requested.
-pub async fn find_deleting_ids(txn: &mut PgConnection) -> Result<Vec<VpcPeeringId>, DatabaseError> {
+pub async fn find_deleting_ids(
+    conn: impl DbReader<'_>,
+) -> Result<Vec<VpcPeeringId>, DatabaseError> {
     let query = "SELECT id FROM vpc_peerings WHERE deletion_version IS NOT NULL ORDER BY id";
     sqlx::query_scalar(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -185,15 +187,18 @@ pub async fn update_controller_state_outcome(
 /// Finds hosts that can still use either endpoint's permissions. Instance
 /// search includes current, old, and requested network configurations and
 /// retained address reservations, including deleting Instances.
-pub async fn find_receivers(
-    txn: &mut PgConnection,
+pub async fn find_receivers<DB>(
+    conn: &mut DB,
     peering: &VpcPeering,
-) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut instance_ids = Vec::new();
     for vpc_id in [peering.vpc_id, peering.peer_vpc_id] {
         instance_ids.extend(
             crate::instance::find_ids(
-                &mut *txn,
+                &mut *conn,
                 InstanceSearchFilter {
                     vpc_id: Some(vpc_id.to_string()),
                     ..Default::default()
@@ -205,7 +210,7 @@ pub async fn find_receivers(
     instance_ids.sort_unstable();
     instance_ids.dedup();
     let mut hosts = crate::managed_host::load_by_instance_ids(
-        txn,
+        conn,
         &instance_ids,
         LoadSnapshotOptions::default(),
     )
@@ -220,7 +225,7 @@ pub async fn find_receivers(
 }
 
 pub async fn get_vpc_peer_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
 ) -> Result<Vec<VpcId>, DatabaseError> {
     let query = r#"
@@ -236,7 +241,7 @@ pub async fn get_vpc_peer_ids(
     let vpc_id: Uuid = vpc_id.into();
     let vpc_peer_ids = sqlx::query_scalar(query)
         .bind(vpc_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -246,25 +251,25 @@ pub async fn get_vpc_peer_ids(
 /// Returns retained peers for admission, including permissions whose removal
 /// has not yet been acknowledged. DPU rendering uses [`get_active_vpc_peer_vnis`].
 pub async fn get_vpc_peer_vnis(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
     virtualization_types: Vec<VpcVirtualizationType>,
 ) -> Result<Vec<(VpcId, i32)>, DatabaseError> {
-    get_peer_vnis(txn, vpc_id, virtualization_types, false).await
+    get_peer_vnis(conn, vpc_id, virtualization_types, false).await
 }
 
 /// Returns only active imports for DPU rendering. Admission must instead use
 /// [`get_vpc_peer_vnis`] so permissions awaiting acknowledgement still conflict.
 pub async fn get_active_vpc_peer_vnis(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
     virtualization_types: Vec<VpcVirtualizationType>,
 ) -> Result<Vec<(VpcId, i32)>, DatabaseError> {
-    get_peer_vnis(txn, vpc_id, virtualization_types, true).await
+    get_peer_vnis(conn, vpc_id, virtualization_types, true).await
 }
 
 async fn get_peer_vnis(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
     virtualization_types: Vec<VpcVirtualizationType>,
     active_only: bool,
@@ -286,22 +291,25 @@ async fn get_peer_vnis(
         .bind(vpc_id)
         .bind(virtualization_types)
         .bind(active_only)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(peer_vpc_vnis)
 }
 
-pub async fn get_prefixes_by_vpcs(
-    txn: &mut PgConnection,
+pub async fn get_prefixes_by_vpcs<DB>(
+    conn: &mut DB,
     vpcs: &Vec<VpcId>,
-) -> Result<Vec<String>, DatabaseError> {
-    let vpc_prefixes = crate::vpc_prefix::find_by_vpcs(txn, vpcs)
+) -> Result<Vec<String>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let vpc_prefixes = crate::vpc_prefix::find_by_vpcs(&mut *conn, vpcs)
         .await?
         .into_iter()
         .map(|vpc_prefix| vpc_prefix.config.prefix.to_string());
-    let vpc_segment_prefixes = crate::network_prefix::find_by_vpcs(txn, vpcs)
+    let vpc_segment_prefixes = crate::network_prefix::find_by_vpcs(conn, vpcs)
         .await?
         .into_iter()
         .map(|segment_prefix| segment_prefix.prefix.to_string());

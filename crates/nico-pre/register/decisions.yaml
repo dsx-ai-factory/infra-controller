@@ -873,7 +873,8 @@ decisions:
     no Contour deployment in `projectcontour` that setup.sh does not own, since it refuses to adopt one.
     InfiniBand ticked: `nico-pre-config`: `[ib_config] enabled = true`, `[ib_fabrics.default]` with exactly
     one endpoint and a pkey range inside 0x0 to 0x7FFF, `allow_insecure` reported when true, and a UFM
-    credential resolving from the configured source, the UFM credential ownership row; `nico-pre-fabric`,
+    credential resolving from the configured source unless `auth = "client_certificate"`, the UFM credential
+    ownership row; `nico-pre-fabric`,
     from the staging host: the endpoint answers with the configured token or client certificate, `/app/ufm_version`
     is 6.23.1-6 or later, the pkey range overlaps no partition UFM already reports, and for mTLS the server
     certificate carries the `default.ufm.nico` and `default.ufm.<site domain>` SANs; worksheet: UFM runs

@@ -34,40 +34,40 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 		expectedError string
 	}{
 		{
-			desc: "DefaultBmcUsername with 16 multibyte characters",
+			desc: "DefaultBmcUsername with 255 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcUsername with 17 multibyte characters",
+			desc: "DefaultBmcUsername with 256 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcUsername: BMC username must be 16 characters or less.",
+			expectedError: "defaultBmcUsername: BMC username must be 255 characters or less.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				ChassisSerialNumber: "SERIAL123",
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC password must be 20 characters or less.",
+			expectedError: "defaultBmcPassword: BMC password must be 255 characters or less.",
 		},
 		{
 			desc: "ChassisSerialNumber with 32 multibyte characters",
@@ -179,44 +179,44 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
+		// Boundary tests for BMC username (max 255 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username is exactly 255 characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 255)),
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
+			desc: "error when BMC username is 256 characters (over limit)",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 255)),
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 256)),
 				ChassisSerialNumber: validChassisSerial,
 			},
 			expectErr: true,
@@ -407,6 +407,39 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 				HostLifecycleProfile: nil,
 			},
 			expectErr: false,
+		},
+		{
+			desc: "ok with dpuPolicy ignore",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when dpuPolicy is invalid",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("bogus")),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when dpuPolicy is empty string",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("")),
+			},
+			expectErr: true,
 		},
 	}
 	for _, tc := range tests {
@@ -772,9 +805,11 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 		desc                 string
 		isDpfEnabled         *bool
 		retainBmcCredentials *bool
+		dpuPolicy            *cdbm.ExpectedMachineDpuPolicy
 		hostLifecycleProfile cdbm.HostLifecycleProfile
 		wantDpfJSON          string
 		wantRetainJSON       string
+		wantDpuPolicyJSON    string
 		wantProfile          *APIHostLifecycleProfile
 		labels               cdbm.Labels
 		dpuSerials           []string
@@ -830,6 +865,15 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantDpfJSON:  "true",
 		},
 		{
+			desc:              "unset DPU policy is returned as Inherit",
+			wantDpuPolicyJSON: `"Inherit"`,
+		},
+		{
+			desc:              "stored DPU policy is returned",
+			dpuPolicy:         cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+			wantDpuPolicyJSON: `"Ignore"`,
+		},
+		{
 			desc:           "unset BMC credential retention is returned as false",
 			wantRetainJSON: "false",
 		},
@@ -875,6 +919,7 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 				Labels:                   tc.labels,
 				IsDpfEnabled:             tc.isDpfEnabled,
 				RetainBmcCredentials:     tc.retainBmcCredentials,
+				DpuPolicy:                tc.dpuPolicy,
 				HostLifecycleProfile:     tc.hostLifecycleProfile,
 				Interfaces:               tc.interfaces,
 				Created:                  cdb.GetCurTime(),
@@ -907,6 +952,9 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			}
 			if tc.wantInterfacesJSON != "" {
 				assert.JSONEq(t, tc.wantInterfacesJSON, string(fields["interfaces"]))
+			}
+			if tc.wantDpuPolicyJSON != "" {
+				assert.Equal(t, tc.wantDpuPolicyJSON, string(fields["dpuPolicy"]))
 			}
 		})
 	}
@@ -1084,32 +1132,32 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 		expectedError string
 	}{
 		{
-			desc: "DefaultBmcUsername with 16 multibyte characters",
+			desc: "DefaultBmcUsername with 255 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcUsername with 17 multibyte characters",
+			desc: "DefaultBmcUsername with 256 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 17)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcUsername: BMC Username must be 1-16 characters.",
+			expectedError: "defaultBmcUsername: BMC Username must be 1-255 characters.",
 		},
 		{
-			desc: "DefaultBmcPassword with 20 multibyte characters",
+			desc: "DefaultBmcPassword with 255 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
 			},
 		},
 		{
-			desc: "DefaultBmcPassword with 21 multibyte characters",
+			desc: "DefaultBmcPassword with 256 multibyte characters",
 			obj: APIExpectedMachineUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr:     true,
-			expectedError: "defaultBmcPassword: BMC Password must be 1-20 characters.",
+			expectedError: "defaultBmcPassword: BMC Password must be 1-255 characters.",
 		},
 		{
 			desc: "ChassisSerialNumber with 32 multibyte characters",
@@ -1296,44 +1344,44 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// Boundary tests for BMC username (max 16 characters)
+		// Boundary tests for BMC username (max 255 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username is exactly 255 characters",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 255)),
 				DefaultBmcPassword:  &validPassword,
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
+			desc: "error when BMC username is 256 characters (over limit)",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
-				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 17)),
+				DefaultBmcUsername:  cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword:  &validPassword,
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: &validChassisSerial,
 				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword:  cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:              map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -1432,6 +1480,28 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 				HostLifecycleProfile: nil,
 			},
 			expectErr: false,
+		},
+		{
+			desc:      "ok with dpuPolicy Nic",
+			obj:       APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic)},
+			expectErr: false,
+		},
+		{
+			desc:      "ok with dpuPolicy Inherit to reset it",
+			obj:       APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit)},
+			expectErr: false,
+		},
+		{
+			desc:          "error when dpuPolicy is empty",
+			obj:           APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy(""))},
+			expectErr:     true,
+			expectedError: "dpuPolicy: must be Inherit, Nic, or Ignore.",
+		},
+		{
+			desc:          "error when dpuPolicy is invalid",
+			obj:           APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy("Manage"))},
+			expectErr:     true,
+			expectedError: "dpuPolicy: must be Inherit, Nic, or Ignore.",
 		},
 	}
 
@@ -1971,6 +2041,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		body                 string
 		wantPaths            []string
 		wantReplaceLoopbacks bool
+		wantDpuMode          *corev1.DpuMode
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null,"bmcIpAddress":null,"retainBmcCredentials":null,"interfaces":null}`},
@@ -1993,6 +2064,9 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "server name selects server_name path", body: `{"serverName":"server-1"}`, wantPaths: []string{"server_name"}},
 		{name: "empty server name clears Core state", body: `{"serverName":""}`, wantPaths: []string{"server_name"}},
 		{name: "null server name preserves Core state", body: `{"serverName":null}`},
+		{name: "null dpu policy preserves Core state", body: `{"dpuPolicy":null}`, wantDpuMode: corev1.DpuMode_NIC_MODE.Enum()},
+		{name: "explicit dpu policy overrides the stored one", body: `{"dpuPolicy":"Ignore"}`, wantPaths: []string{"dpu_mode"}, wantDpuMode: corev1.DpuMode_NO_DPU.Enum()},
+		{name: "Inherit dpu policy resets Core to the site policy", body: `{"dpuPolicy":"Inherit"}`, wantPaths: []string{"dpu_mode"}, wantDpuMode: corev1.DpuMode_DPU_MODE.Enum()},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2003,6 +2077,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			// so the patch must carry the request value, not the row's.
 			patch := request.ToProto(&cdbm.ExpectedMachine{
 				SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), RetainBmcCredentials: cutil.GetPtr(true), ServerName: cutil.GetPtr("server-1"),
+				DpuPolicy:            cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic),
 				HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 				Interfaces: []cdbm.ExpectedMachineInterface{{
 					MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIP: cutil.GetPtr("198.51.100.9"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
@@ -2015,6 +2090,10 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			require.NotNil(t, decoded.UpdateMask)
 			assert.Equal(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
 			assert.Equal(t, test.wantReplaceLoopbacks, decoded.GetExpectedMachine().GetReplaceDpuLoopbacks())
+			if test.wantDpuMode != nil {
+				require.NotNil(t, decoded.GetExpectedMachine().DpuMode)
+				assert.Equal(t, *test.wantDpuMode, decoded.GetExpectedMachine().GetDpuMode())
+			}
 			if request.SlotID != nil {
 				labels := decoded.GetExpectedMachine().GetMetadata().GetLabels()
 				require.Len(t, labels, 1)

@@ -285,6 +285,8 @@ type ExpectedPowerShelfDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedPowerShelf, int, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedPowerShelf, error)
 }
@@ -502,6 +504,35 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 	}
 
 	return expectedPowerShelves, expectedPowerShelfPaginator.Total, nil
+}
+
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedPowerShelves matching the filter,
+// ordered by creation time, then ID
+// The returned slice is empty but not nil when no ExpectedPowerShelves match
+func (epsd ExpectedPowerShelfSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.GetAllIDsAndUpdated")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
+
+	if filter.ExpectedPowerShelfIDs != nil && len(filter.ExpectedPowerShelfIDs) == 0 {
+		return idsAndUpdated, nil
+	}
+
+	query := db.GetIDB(tx, epsd.dbSession).NewSelect().Model((*ExpectedPowerShelf)(nil)).Column("id", "updated")
+
+	query, err := epsd.setQueryWithFilter(filter, query, expectedPowerShelfDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("eps.created", "eps.id").Scan(ctx, &idsAndUpdated)
+	if err != nil {
+		return nil, err
+	}
+
+	return idsAndUpdated, nil
 }
 
 // Update updates specified fields of an existing ExpectedPowerShelf

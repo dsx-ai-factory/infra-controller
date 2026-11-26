@@ -21,6 +21,7 @@ use model::metadata::Metadata;
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn expected_rack_queries_survive_added_columns(
@@ -31,7 +32,7 @@ async fn expected_rack_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection applies DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_racks ADD COLUMN test_added_column text;",
@@ -47,7 +48,7 @@ async fn expected_rack_queries_survive_added_columns(
 async fn exercise_expected_rack_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let expected = ExpectedRack {
         rack_id: RackId::new("projection-rack"),
         rack_profile_id: RackProfileId::new("NVL72"),
@@ -142,7 +143,7 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
 
 #[crate::sqlx_test]
 async fn test_db_find_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let _ids = seed_expected_racks(&mut txn).await;
 
     let all = find_all(&mut txn).await?;
@@ -152,7 +153,7 @@ async fn test_db_find_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::
 
 #[crate::sqlx_test]
 async fn test_db_find_nonexistent(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = new_rack_id();
     let result = find_by_rack_id(&mut txn, &rack_id).await?;
     assert!(result.is_none());
@@ -161,7 +162,7 @@ async fn test_db_find_nonexistent(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
 
 #[crate::sqlx_test]
 async fn test_db_duplicate_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ids = seed_expected_racks(&mut txn).await;
 
     let result = create(
@@ -186,7 +187,7 @@ async fn test_db_duplicate_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
 
 #[crate::sqlx_test]
 async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ids = seed_expected_racks(&mut txn).await;
 
     let expected_rack = find_by_rack_id(&mut txn, &ids[0])
@@ -210,7 +211,7 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
 
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let found = find_by_rack_id(&mut txn, &ids[0]).await?.unwrap();
     assert_eq!(found.rack_profile_id.as_str(), "NVL72");
     assert_eq!(found.metadata.name, "updated-rack");
@@ -220,13 +221,13 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
 
 #[crate::sqlx_test]
 async fn test_db_delete(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ids = seed_expected_racks(&mut txn).await;
 
     delete(&mut txn, &ids[0]).await?;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let result = find_by_rack_id(&mut txn, &ids[0]).await?;
     assert!(result.is_none());
 
@@ -235,7 +236,7 @@ async fn test_db_delete(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
 
 #[crate::sqlx_test]
 async fn test_db_delete_nonexistent(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = new_rack_id();
 
     let result = delete(&mut txn, &rack_id).await;
@@ -246,13 +247,13 @@ async fn test_db_delete_nonexistent(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
 #[crate::sqlx_test]
 async fn test_db_clear(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let _ids = seed_expected_racks(&mut txn).await;
 
     clear(&mut txn).await?;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let all = find_all(&mut txn).await?;
     assert_eq!(all.len(), 0);
 

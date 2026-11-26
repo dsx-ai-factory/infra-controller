@@ -861,7 +861,7 @@ impl K8sConfigRepository for KubeRepository {
         }
     }
 
-    async fn apply_secret(
+    async fn create_secret_if_absent(
         &self,
         name: &str,
         namespace: &str,
@@ -881,21 +881,28 @@ impl K8sConfigRepository for KubeRepository {
             ),
             ..Default::default()
         };
-        // Server-side apply, matching `apply_configmap`: creates the Secret when
-        // absent and overwrites the data when present, so a rotated credential
-        // actually reaches the cluster.
-        api.patch(
-            name,
-            &PatchParams::apply("carbide-dpf-sdk").force(),
-            &Patch::Apply(&secret),
-        )
-        .await?;
-        Ok(())
+        match api.create(&PostParams::default(), &secret).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.reason == "AlreadyExists" => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
 #[async_trait]
 impl BmcCredentialRepository for KubeRepository {
+    async fn list_bmc_credential_secrets(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> Result<Vec<Secret>, DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        Ok(api
+            .list(&ListParams::default().labels(label_selector))
+            .await?
+            .items)
+    }
+
     async fn get_bmc_credential_secret(
         &self,
         name: &str,

@@ -24,7 +24,7 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchComponentResult, SwitchEndpoint};
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::switch::{
@@ -60,29 +60,37 @@ pub async fn handle_maintenance(
     };
     let request = request.as_ref();
 
-    match operation {
-        SwitchMaintenanceOperation::PowerOn => {
-            handle_power_on(switch_id, state, request, ctx).await
-        }
-        SwitchMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(switch_id, state, request, ctx, *graceful).await
-        }
-        SwitchMaintenanceOperation::Reset { graceful } => {
-            handle_reset(switch_id, state, request, ctx, *graceful).await
-        }
-        SwitchMaintenanceOperation::ReconfigureCertificate => {
-            handle_reconfigure_certificate(
-                switch_id,
-                state,
-                request,
-                ctx,
-                configure_certificate
-                    .clone()
-                    .unwrap_or(ConfigureCertificateState::Start),
-            )
-            .await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                SwitchMaintenanceOperation::PowerOn => {
+                    handle_power_on(switch_id, state, request, ctx).await
+                }
+                SwitchMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(switch_id, state, request, ctx, *graceful).await
+                }
+                SwitchMaintenanceOperation::Reset { graceful } => {
+                    handle_reset(switch_id, state, request, ctx, *graceful).await
+                }
+                SwitchMaintenanceOperation::ReconfigureCertificate => {
+                    handle_reconfigure_certificate(
+                        switch_id,
+                        state,
+                        request,
+                        ctx,
+                        configure_certificate
+                            .clone()
+                            .unwrap_or(ConfigureCertificateState::Start),
+                    )
+                    .await
+                }
+            }
+        },
+    )
+    .await
 }
 
 async fn handle_power_on(
@@ -243,7 +251,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_switch::clear_switch_maintenance_requested(&mut txn, *switch_id, request).await?
     {

@@ -45,7 +45,7 @@ impl IpLink {
         let data = serde_json::from_str::<Vec<IpLink>>(&data).map_err(|err| eyre::eyre!(err));
         data.map(|i| {
             i.into_iter()
-                .find(|x| x.ifname == Some(interface.to_string()))
+                .find(|x| x.ifname.as_deref() == Some(interface))
         })
     }
     async fn ip_links() -> eyre::Result<String> {

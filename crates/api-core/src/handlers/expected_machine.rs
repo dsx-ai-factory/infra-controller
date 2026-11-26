@@ -37,7 +37,7 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::interface_preallocator::{InterfacePreallocator, fixed_address_declarations};
 use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 lazy_static! {
@@ -57,18 +57,16 @@ pub(crate) async fn get(
         .try_into()
         .map_err(|e| CarbideError::InvalidArgument(format!("{}", e)))?;
 
-    let target_id = req
-        .id
-        .map(|u| u.to_string())
-        .or(req.bmc_mac_address.map(|m| m.to_string()))
-        .unwrap_or_default();
-
     let expected_machine = db::expected_machine::find(&api.database_connection, &req)
         .await
         .map_err(CarbideError::from)?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_machine",
-            id: target_id,
+            id: req
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| req.bmc_mac_address.map(|mac| mac.to_string()))
+                .unwrap_or_default(),
         })?;
 
     let response = rpc::ExpectedMachine::from(expected_machine);
@@ -85,7 +83,7 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
-    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
+    validate_new_expected_machine(&mut txn, &api.common_pools, &machine).await?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)
@@ -289,6 +287,47 @@ async fn validate_expected_machine(
     validate_reservation_pool_membership(txn, common_pools, machine).await
 }
 
+/// [`validate_expected_machine`] plus [`validate_fixed_address_segments`], for
+/// RPC paths that store a new record without reconciling its fixed addresses.
+/// Update paths omit the segment check because their reconciliation applies it
+/// to the same declarations and records the failure in its metrics.
+/// [`create_missing_from`] omits it because startup imports
+/// `expected_machines.json` before it creates the configured network segments.
+async fn validate_new_expected_machine(
+    txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    validate_expected_machine(&mut *txn, common_pools, machine).await?;
+    validate_fixed_address_segments(txn, machine).await
+}
+
+/// Reject a fixed address that fixed-address reconciliation would reject
+/// because no managed prefix contains it, or because it falls in a segment
+/// of the wrong type. Update and Site Explorer apply this check when they
+/// reconcile the address. Without it on create, a stored record could never
+/// be updated.
+async fn validate_fixed_address_segments(
+    txn: &mut sqlx::PgConnection,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    for interface in fixed_address_declarations(machine) {
+        if interface.allows_static_assignments_fallback() {
+            continue;
+        }
+        let Some(fixed_ip) = interface.fixed_ip else {
+            continue;
+        };
+        db::network_segment::for_managed_static_address(
+            &mut *txn,
+            fixed_ip,
+            interface.segment_type_guard(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Reject duplicate per-family addresses in the request. The child table also
 /// enforces uniqueness across machines and concurrent writers.
 fn validate_dpu_loopback_reservation_shape(machine: &ExpectedMachine) -> Result<(), CarbideError> {
@@ -397,7 +436,7 @@ where
         }
         model::resource_pool::ResourcePoolEntryState::Allocated { .. } => {
             Err(CarbideError::FailedPrecondition(format!(
-                "loopback address {value_text} is already allocated to another DPU"
+                "cannot verify that the DPU with OS/admin MAC {intended_dpu_oob_net0_mac} owns allocated loopback address {value_text}"
             )))
         }
     }
@@ -417,11 +456,7 @@ async fn pool_owner_is_dpu_oob_net0_mac(
         );
         return Ok(false);
     };
-    let interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_net0_mac).await?;
-    Ok(interfaces
-        .iter()
-        .any(|interface| interface.machine_id == Some(owner_id.into())))
+    Ok(db::machine_interface::dpu_owns_oob_mac(txn, &owner_id, intended_dpu_oob_net0_mac).await?)
 }
 
 /// Replace-all recreates parent rows. Preserve loopbacks that an older client
@@ -457,21 +492,26 @@ fn preserve_omitted_dpu_loopback_reservations(
 /// currently purely used by the expected_machines.json import path only, but
 /// lives here so it shares the same validation codepath as the API handler --
 /// including rejecting a DPU loopback reservation whose address is outside its
-/// pool, auto-assignable, or already allocated, rather than deferring that
-/// failure to DPU discovery.
+/// pool, auto-assignable, or allocated without proof of ownership by the intended DPU.
+///
+/// Unlike the RPC create paths, it does not reject a fixed address outside
+/// every managed prefix. Startup runs this import before it creates the
+/// configured network segments, so the segment for a valid address may not
+/// exist yet, and failing here would stop nico-api from starting before it
+/// could create that segment. Such a record is rejected on its first update.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     expected_machines: &[ExpectedMachine],
 ) -> Result<(), CarbideError> {
-    let existing_macs: HashSet<String> = db::expected_machine::find_all(&mut *txn)
+    let existing_macs: HashSet<MacAddress> = db::expected_machine::find_all(&mut *txn)
         .await?
         .into_iter()
-        .map(|m| m.bmc_mac_address.to_string())
+        .map(|m| m.bmc_mac_address)
         .collect();
 
     for expected_machine in expected_machines {
-        if existing_macs.contains(&expected_machine.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_machine.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_machine.bmc_mac_address,
                 "Expected machine already exists; not overwriting",
@@ -925,7 +965,7 @@ pub(crate) async fn replace_all(
     for replacement in replacements {
         let existing = find_previous_expected_machine(&previous, &replacement);
         let parsed = parse_expected_machine_for_insert(replacement, existing)?;
-        validate_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
+        validate_new_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
         if !seen_bmc_macs.insert(parsed.bmc_mac_address) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate expected machine BMC MAC address {} in replacement list",
@@ -1438,7 +1478,7 @@ async fn create_expected_machine(
     };
 
     normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
+    validate_new_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     db::expected_machine::create(txn, expected_machine).await?;
 
     Ok((result_machine, Vec::new()))
@@ -1720,11 +1760,8 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<ExpectedMachine>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
-
-    let mut expected = db::expected_machine::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
-
-    txn.commit().await?;
+    let mut expected =
+        db::expected_machine::find_many_by_bmc_mac_address(api.pg_pool(), &[mac]).await?;
 
     Ok(expected.remove(&mac))
 }

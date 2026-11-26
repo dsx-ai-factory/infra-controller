@@ -24,12 +24,10 @@
 //! UI lives in the separate `carbide-api-web` crate.
 
 // It's too cumbersome for tests to adhere to these, which are less important in testing anyway.
-// Keep this exemption limited to test builds so enabling `test-support` under `--all-features`
-// does not hide violations in production modules.
-#![cfg_attr(
-    any(test, feature = "test-support"),
-    allow(txn_held_across_await, txn_without_commit)
-)]
+#![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
+// Some functions in the Api type hit recursion limits in recent nightly rust when checking for
+// the Send trait: https://github.com/rust-lang/rust/issues/159228
+#![recursion_limit = "256"]
 
 // NOTE on pub vs non-pub mods:
 //
@@ -59,6 +57,7 @@ mod db_init;
 mod dhcp;
 mod dpa;
 mod dpf_services;
+mod dpu_service_sync_metrics;
 mod dynamic_settings;
 mod errors;
 mod ethernet_virtualization;
@@ -84,6 +83,8 @@ mod storage;
 mod vpc_peering_controller;
 
 #[cfg(any(test, feature = "test-support"))]
+// Dependents compile these fixtures with the `test-support` feature in ordinary library builds.
+#[allow(txn_held_across_await, txn_without_commit)]
 pub mod test_support;
 
 #[cfg(test)]

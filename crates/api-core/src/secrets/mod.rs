@@ -28,8 +28,8 @@
 //! Reads keep two behaviors the rest of the system learned from the Vault
 //! reader: the newest journal entry wins (ordered by the database-assigned
 //! `seq`), and an entry whose password is empty reads as no credential at
-//! all -- several delete flows "delete" by writing an empty-password
-//! tombstone.
+//! all -- the site-wide BMC root delete flow "deletes" by writing an
+//! empty-password tombstone.
 
 use std::sync::Arc;
 
@@ -39,8 +39,8 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialManager, CredentialReader, CredentialWriter, Credentials,
 };
-use db::ConditionalWrite;
 use db::secrets::{NewSecretEntry, SecretAlreadyExists};
+use db::{ConditionalWrite, TransactionVending as _};
 use model::secrets::SecretRow;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -384,10 +384,9 @@ impl CredentialReader for PostgresCredentialManager {
         let entry = self.decrypt_row(row).await?;
 
         timer.succeed();
-        // An empty password reads as no credential at all, exactly like the
-        // Vault reader: the UFM and site-wide BMC delete flows "delete" by
-        // writing an empty-password tombstone, and their consumers depend
-        // on getting None back.
+        // An empty password reads as no credential at all. The site-wide BMC
+        // delete flow "deletes" by writing an empty-password tombstone, and
+        // its consumers depend on getting None back.
         match entry.credentials {
             Credentials::UsernamePassword { ref password, .. } if password.is_empty() => Ok(None),
             credentials => Ok(Some(credentials)),
@@ -419,20 +418,14 @@ impl CredentialWriter for PostgresCredentialManager {
         // Without the path lock, `create_credentials` could check for absence,
         // let this write finish, then append an entry that replaces our value.
         // We don't check for absence here, so `INSERT` can take the table lock.
-        let mut txn = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        let mut txn = self.pool.txn_begin().await.map_err(PgSecretsError::from)?;
         db::secrets::lock_path_advisory(&mut txn, &path)
             .await
             .map_err(PgSecretsError::from)?;
         db::secrets::insert(&mut txn, &envelope.as_new_entry(&path))
             .await
             .map_err(PgSecretsError::from)?;
-        txn.commit()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit set", e)))?;
+        txn.commit().await.map_err(PgSecretsError::from)?;
 
         timer.succeed();
         Ok(())
@@ -459,11 +452,7 @@ impl CredentialWriter for PostgresCredentialManager {
         // write lock to order the check against a bulk import. Vault gave us
         // the first property through its compare-and-set; Postgres needs both
         // locks because the journal has no unique path index to enforce it.
-        let mut txn = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        let mut txn = self.pool.txn_begin().await.map_err(PgSecretsError::from)?;
         match db::secrets::insert_if_missing(&mut txn, &envelope.as_new_entry(&path))
             .await
             .map_err(PgSecretsError::from)?
@@ -473,9 +462,7 @@ impl CredentialWriter for PostgresCredentialManager {
                 return Err(PgSecretsError::AlreadyExists(path.to_string()).into());
             }
         }
-        txn.commit()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit create", e)))?;
+        txn.commit().await.map_err(PgSecretsError::from)?;
 
         timer.succeed();
         Ok(())

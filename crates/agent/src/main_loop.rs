@@ -800,6 +800,7 @@ impl CurrentNetworkVersion {
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
         config.dhcpv6_server_preference = None;
+        config.nico_pxe_service_url = None;
 
         // `host_interface_id` helps resolve the host machine ID when the agent
         // starts, but a later change does not affect HBN rendering.
@@ -2180,7 +2181,7 @@ async fn hack_dpu_os_to_load_atf_uefi_with_specific_versions() -> eyre::Result<(
             .await
             .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
-        String::from_utf8_lossy(&output.stdout).to_string()
+        String::from_utf8_lossy(&output.stdout).into_owned()
     };
 
     // The specific check is to see if we have not loaded but have a recommended ATF/UEFI is 2.9.

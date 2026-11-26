@@ -238,7 +238,7 @@ async fn populate_network_security_groups(api: Arc<Api>) {
         .unwrap();
 
     // Create default network security groups.
-    let mut txn = api.database_connection.begin().await.unwrap();
+    let mut txn = api.txn_begin().await.unwrap();
 
     // Just a default ID for group and single rule.
     let uid = "fd3ab096-d811-11ef-8fe9-7be4b2483448";

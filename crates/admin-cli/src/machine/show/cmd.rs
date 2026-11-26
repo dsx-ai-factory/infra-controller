@@ -73,7 +73,7 @@ fn convert_machine_to_nice_format(
         ("MACHINE TYPE", get_machine_type(machine.id)),
         (
             "FAILURE",
-            status.failure_details.unwrap_or("None".to_string()),
+            status.failure_details.unwrap_or_else(|| "None".to_string()),
         ),
         ("VERSION", machine.version),
         ("SKU", sku),

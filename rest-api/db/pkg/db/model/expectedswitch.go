@@ -407,6 +407,8 @@ type ExpectedSwitchDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error)
 }
@@ -650,6 +652,35 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 	}
 
 	return expectedSwitches, expectedSwitchPaginator.Total, nil
+}
+
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedSwitches matching the filter,
+// ordered by creation time, then ID
+// The returned slice is empty but not nil when no ExpectedSwitches match
+func (essd ExpectedSwitchSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAllIDsAndUpdated")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
+
+	if filter.ExpectedSwitchIDs != nil && len(filter.ExpectedSwitchIDs) == 0 {
+		return idsAndUpdated, nil
+	}
+
+	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model((*ExpectedSwitch)(nil)).Column("id", "updated")
+
+	query, err := essd.setQueryWithFilter(filter, query, expectedSwitchDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("es.created", "es.id").Scan(ctx, &idsAndUpdated)
+	if err != nil {
+		return nil, err
+	}
+
+	return idsAndUpdated, nil
 }
 
 // Update updates specified fields of an existing ExpectedSwitch

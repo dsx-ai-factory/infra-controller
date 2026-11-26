@@ -19,16 +19,19 @@
 //! and a bounded history of the work already done.
 
 use carbide_uuid::DbTable;
-use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait};
 use model::machine_pending_action::{
-    MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
+    MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind, PendingActionHost,
 };
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-/// Records that `kind` is owed for `machine_id`, returning the outstanding row.
+/// Records that `kind` is owed for `host_id`, returning the outstanding row.
+///
+/// The action is owed for a host, and [`find_outstanding_hosts`] reads the
+/// outstanding rows back as hosts, so the type keeps a DPU's ID out of them.
 ///
 /// Re-requesting an action that is already outstanding is a no-op write that
 /// preserves the original `requested_at`, so the returned timestamp is how long
@@ -36,7 +39,7 @@ use crate::{DatabaseError, DatabaseResult};
 /// starts a new row, leaving the earlier completion in the history.
 pub async fn request(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    host_id: &HostMachineId,
     kind: MachinePendingActionKind,
 ) -> DatabaseResult<MachinePendingAction> {
     // The conflict target is the partial unique index over outstanding rows, so
@@ -55,7 +58,7 @@ pub async fn request(
     );
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(machine_id)
+        .bind(host_id)
         .bind(kind)
         .fetch_one(txn)
         .await
@@ -157,6 +160,37 @@ pub async fn find_outstanding_by_machine_ids(
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
+/// Returns every host with an outstanding action of `kind`, with its managed
+/// state and whether an instance is allocated on it.
+///
+/// One statement for the whole fleet, for callers that summarize rather than
+/// page. Only the outstanding rows are read, which their partial index covers,
+/// so the cost follows the number of waiting hosts and not the size of the
+/// fleet or of the retained history. A host has at most one outstanding action
+/// of a kind, so the result is bounded by the number of hosts.
+pub async fn find_outstanding_hosts(
+    db: impl DbReader<'_>,
+    kind: MachinePendingActionKind,
+) -> DatabaseResult<Vec<PendingActionHost>> {
+    // `instances.machine_id` is unique, so the join cannot repeat a host.
+    const QUERY: &str = "SELECT
+        a.machine_id,
+        a.requested_at,
+        m.controller_state,
+        m.controller_state_version,
+        i.machine_id IS NOT NULL AS has_instance
+    FROM machine_pending_actions a
+    INNER JOIN machines m ON m.id = a.machine_id
+    LEFT JOIN instances i ON i.machine_id = a.machine_id
+    WHERE a.kind = $1 AND a.completed_at IS NULL";
+
+    sqlx::query_as(QUERY)
+        .bind(kind)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
 /// Returns a machine's actions, newest first.
 ///
 /// Any outstanding action sorts first, followed by the retained completions.
@@ -182,14 +216,17 @@ pub async fn find_all_for_machine(
 
 #[cfg(test)]
 mod tests {
-    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
-    use model::machine_pending_action::{MachinePendingActionActor, MachinePendingActionKind};
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use model::machine_pending_action::{
+        MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
+    };
     use sqlx::{PgConnection, PgPool};
 
     use super::{
         complete, find_all_for_machine, find_outstanding_by_machine_ids,
-        find_outstanding_machine_ids, is_outstanding, request,
+        find_outstanding_machine_ids, is_outstanding,
     };
+    use crate::{DatabaseResult, TransactionVending as _};
 
     const DPU_SERVICE_SYNC: MachinePendingActionKind = MachinePendingActionKind::DpuServiceSync;
     const AUTOMATIC: MachinePendingActionActor = MachinePendingActionActor::Automatic;
@@ -202,6 +239,17 @@ mod tests {
             hardware_id,
             MachineType::Host,
         )
+    }
+
+    /// [`super::request`] for a machine these tests name by its plain ID. Every
+    /// machine they create is a host.
+    async fn request(
+        txn: &mut PgConnection,
+        machine_id: &MachineId,
+        kind: MachinePendingActionKind,
+    ) -> DatabaseResult<MachinePendingAction> {
+        let host_id = HostMachineId::try_from(machine_id).expect("test machines are hosts");
+        super::request(txn, &host_id, kind).await
     }
 
     async fn seed_machine(
@@ -222,7 +270,7 @@ mod tests {
     async fn requests_are_scoped_to_one_machine(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let requested = machine_id(1);
         let untouched = machine_id(2);
         seed_machine(txn.as_mut(), &requested).await?;
@@ -252,7 +300,7 @@ mod tests {
     async fn a_completion_records_who_performed_it(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let by_carbide = machine_id(1);
         let by_operator = machine_id(2);
         for id in [&by_carbide, &by_operator] {
@@ -289,7 +337,7 @@ mod tests {
     async fn the_worklist_holds_only_outstanding_actions_longest_wait_first(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             find_outstanding_machine_ids(txn.as_mut(), DPU_SERVICE_SYNC)
                 .await?
@@ -335,7 +383,7 @@ mod tests {
     async fn re_requesting_outstanding_work_preserves_the_original_request_time(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
 
@@ -357,7 +405,7 @@ mod tests {
     async fn completing_retains_the_record_and_reopens_the_slot(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
 
@@ -394,7 +442,7 @@ mod tests {
     async fn history_is_capped_per_machine_without_evicting_outstanding_work(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let busy = machine_id(1);
         let quiet = machine_id(2);
         seed_machine(txn.as_mut(), &busy).await?;
@@ -437,7 +485,7 @@ mod tests {
     async fn deleting_the_machine_clears_its_actions(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = machine_id(1);
         seed_machine(txn.as_mut(), &machine_id).await?;
         request(txn.as_mut(), &machine_id, DPU_SERVICE_SYNC).await?;

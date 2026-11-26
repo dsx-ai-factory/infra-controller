@@ -18,7 +18,6 @@ use ::rpc::forge as rpc;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
-use db::TransactionVending;
 use sqlx::PgPool;
 
 use crate::CarbideError;
@@ -49,14 +48,12 @@ pub(super) async fn get_inner(
     pool: &PgPool,
     credential_reader: &dyn CredentialReader,
 ) -> Result<rpc::BmcMetaDataGetResponse, CarbideError> {
-    let mut txn = pool.txn_begin().await?;
     let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
-        &mut txn,
+        pool,
         request.bmc_endpoint_request,
         request.machine_id,
     )
     .await?;
-    txn.commit().await?;
 
     let bmc_mac_address: mac_address::MacAddress = bmc_endpoint_request
         .mac_address

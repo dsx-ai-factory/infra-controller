@@ -452,7 +452,7 @@ pub(super) async fn receiver_sources(
     let mut sources = match policy {
         VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
             db::vpc_peering::get_vpc_peer_vnis(
-                txn,
+                &mut *txn,
                 receiver.id,
                 receiver_type.capabilities().peers_with.to_vec(),
             )
@@ -582,11 +582,11 @@ pub(crate) async fn validate_instance_network(
     if !api.runtime_config.tenant_prefix_overlap_enabled {
         let mut duplicate_space = false;
         for (source_vpc_id, prefix) in &prefixes {
-            if db::vpc_prefix::probe(*prefix, txn)
+            if db::vpc_prefix::probe(*prefix, &mut *txn)
                 .await?
                 .iter()
                 .any(|other| other.vpc_id != *source_vpc_id)
-                || db::vpc_prefix::probe_segment_prefixes(*prefix, txn)
+                || db::vpc_prefix::probe_segment_prefixes(*prefix, &mut *txn)
                     .await?
                     .iter()
                     .any(|other| {

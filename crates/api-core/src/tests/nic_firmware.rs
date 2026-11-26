@@ -20,6 +20,7 @@ use std::time::Duration;
 use carbide_test_support::Outcome::FailsWith;
 use carbide_test_support::{Case, check_cases_async};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use futures::{FutureExt, StreamExt};
 use model::nic_firmware::NicFirmwareProfileId;
 use rpc::forge::forge_server::Forge;
@@ -1396,7 +1397,7 @@ async fn changed_inventory_reports_ambiguous_and_unmatched_card_selections(pool:
 
     // A later DPU association takes precedence over the saved card conflict,
     // without requiring another device report.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let segments = db::network_segment::admin(&mut txn).await.unwrap();
     let interface = db::machine_interface::create(
         &mut txn,
@@ -2253,7 +2254,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
                 .filter(|id| Some(*id) != secondary.attached_dpu_machine_id)
         })
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine_interface::associate_interface_with_dpu_machine(&secondary.id, &new_dpu, &mut txn)
         .await
         .unwrap();
@@ -2359,7 +2360,7 @@ async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool
     // Block the profile SELECT after the lookup has read both selections. The
     // writer replaces them and removes the old profile's hardware entry in one
     // commit, so mixing snapshots would report a false incompatibility.
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     sqlx::query("LOCK TABLE nic_firmware_profiles IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
         .await
@@ -2376,7 +2377,7 @@ async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool
         .api
         .get_desired_nic_firmware(Request::new(request.clone()));
     let change = async {
-        let reader_pid = db::test_support::postgres::wait_for_blocked_query(
+        let reader_pid = crate::tests::wait_for_blocked_query(
             &env.pool,
             writer_pid,
             "FROM nic_firmware_profiles WHERE id",

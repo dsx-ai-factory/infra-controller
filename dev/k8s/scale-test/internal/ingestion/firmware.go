@@ -1275,7 +1275,12 @@ func (f *firmwareRun) verifyPasses(ctx context.Context, end time.Time, w *writer
 func (t *FirmwareTest) CloseFirmwareWindows(ctx context.Context, w *writer.Writer) (detail json.RawMessage, err error) {
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, ctx.Err())
+			cause := ctx.Err()
+			// A same-deadline child read can finish before the parent timer fires.
+			if until, ok := ctx.Deadline(); cause == nil && ok && !time.Now().Before(until) {
+				cause = context.DeadlineExceeded
+			}
+			err = errors.Join(err, cause)
 		}
 	}()
 	f := t.wave

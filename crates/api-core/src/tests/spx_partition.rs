@@ -790,8 +790,7 @@ async fn deleting_spx_partition_releases_vni_only_once(pool: sqlx::PgPool) {
     let partition = create_partition(&env, "first partition").await;
     let id = partition.id.expect("SPX partition ID");
     let vni = partition.vni.to_string();
-    let mut txn = env.db_txn().await;
-    let allocated_entry = db::resource_pool::find_value(&mut *txn, &vni)
+    let allocated_entry = db::resource_pool::find_value(&env.pool, &vni)
         .await
         .expect("find SPX allocation")
         .into_iter()
@@ -804,7 +803,6 @@ async fn deleting_spx_partition_releases_vni_only_once(pool: sqlx::PgPool) {
             owner_type: OwnerType::SpxPartition.to_string(),
         }
     );
-    txn.commit().await.expect("finish allocation read");
 
     env.api
         .delete_spx_partition(Request::new(SpxPartitionDeletionRequest { id: Some(id) }))

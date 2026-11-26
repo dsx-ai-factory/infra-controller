@@ -126,11 +126,7 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
                     // Recurse into one more level
                     let req = Request::builder()
                         .method(Method::GET)
-                        .uri(format!(
-                            "{}?$expand=.($levels={})",
-                            uri.clone(),
-                            expand_level - 1
-                        ))
+                        .uri(format!("{}?$expand=.($levels={})", uri, expand_level - 1))
                         .body(Body::empty())
                         .unwrap();
                     process(State(state), req).await

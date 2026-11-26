@@ -358,8 +358,8 @@ pub(super) fn get_tpm_eventlog() -> Option<Vec<u8>> {
 
     if !output.status.success() {
         tracing::error!(
-            stderr = %String::from_utf8(output.stderr)
-                .unwrap_or("<could not parse stderr log>".to_string()),
+            stderr = %std::str::from_utf8(&output.stderr)
+                .unwrap_or("<could not parse stderr log>"),
             "Error retrieving TPM event log",
         );
         None
@@ -402,27 +402,27 @@ pub(super) fn get_tpm_description(ctx: &mut Context) -> Option<TpmDescription> {
                     CString::from_vec_with_nul(tagged_property.value().to_be_bytes().to_vec())
                         .map(|s| {
                             s.into_string()
-                                .unwrap_or("Could not convert spec_version".to_string())
+                                .unwrap_or_else(|_| "Could not convert spec_version".to_string())
                         })
-                        .unwrap_or("Could not convert spec_version".to_string());
+                        .unwrap_or_else(|_| "Could not convert spec_version".to_string());
             }
             PropertyTag::VendorString1 => {
                 vendor_1 =
                     CString::from_vec_with_nul(tagged_property.value().to_be_bytes().to_vec())
                         .map(|s| {
                             s.into_string()
-                                .unwrap_or("Could not convert spec_version".to_string())
+                                .unwrap_or_else(|_| "Could not convert spec_version".to_string())
                         })
-                        .unwrap_or("Could not convert spec_version".to_string());
+                        .unwrap_or_else(|_| "Could not convert spec_version".to_string());
             }
             PropertyTag::VendorString2 => {
                 vendor_2 =
                     CString::from_vec_with_nul(tagged_property.value().to_be_bytes().to_vec())
                         .map(|s| {
                             s.into_string()
-                                .unwrap_or("Could not convert spec_version".to_string())
+                                .unwrap_or_else(|_| "Could not convert spec_version".to_string())
                         })
-                        .unwrap_or("Could not convert spec_version".to_string());
+                        .unwrap_or_else(|_| "Could not convert spec_version".to_string());
             }
             PropertyTag::FirmwareVersion1 => firmware_version_1 = tagged_property.value(),
             PropertyTag::FirmwareVersion2 => firmware_version_2 = tagged_property.value(),
@@ -432,7 +432,9 @@ pub(super) fn get_tpm_description(ctx: &mut Context) -> Option<TpmDescription> {
 
     tracing::debug!(family_indicator = %spec_version, "Read TPM family indicator");
 
-    let vendor = vendor_1.clone() + vendor_2.as_str();
+    let vendor_is_empty = vendor_1.is_empty() && vendor_2.is_empty();
+    let mut vendor = vendor_1;
+    vendor.push_str(&vendor_2);
     tracing::debug!(%vendor, "Read TPM vendor");
 
     let firmware_version = format!("0x{firmware_version_1:x}.0x{firmware_version_2:x}");
@@ -441,8 +443,7 @@ pub(super) fn get_tpm_description(ctx: &mut Context) -> Option<TpmDescription> {
 
     if firmware_version_1 == 0
         && firmware_version_2 == 0
-        && vendor_1 == String::default()
-        && vendor_2 == String::default()
+        && vendor_is_empty
         && spec_version == String::default()
     {
         tracing::error!("GetTpmDescription: Could not extract tpm description");

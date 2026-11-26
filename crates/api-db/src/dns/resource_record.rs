@@ -221,7 +221,7 @@ pub async fn find_ptr_record(
       AND (SELECT count(*) FROM ptr_candidates) = 1"#;
 
     sqlx::query_as::<_, DbPtrRecord>(query)
-        .bind(address.to_string())
+        .bind(address)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -309,6 +309,7 @@ mod tests {
     use model::dns::{NewDomain, ZoneTtl};
 
     use super::find_record;
+    use crate::TransactionVending as _;
     use crate::dns::domain;
 
     /// Seeds a machine, its instance, a forward zone, and a network segment of
@@ -410,7 +411,7 @@ mod tests {
             },
         ];
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) =
             seed_instance_segment(txn.as_mut(), "forward", "tenant.example.com", "tenant").await;
         for case in &cases {
@@ -447,7 +448,7 @@ mod tests {
         // A host_inband instance address *is* the host's own interface address,
         // already published by the shortname view -- the instance arm must skip it
         // so it is not served twice.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_instance_segment(
             txn.as_mut(),
             "host-forward",
@@ -496,7 +497,7 @@ mod tests {
             },
         ];
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) =
             seed_instance_segment(txn.as_mut(), "reverse", "tenant.example.com", "tenant").await;
         for case in &cases {
@@ -529,7 +530,7 @@ mod tests {
     // existing zone takes effect on the next answer.
     #[crate::sqlx_test]
     async fn zone_default_ttl_applies_to_served_records(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
         let (instance, segment, vpc) =
             seed_instance_segment(txn.as_mut(), "ttl", "ttl.example.com", "tenant").await;
         add_address(
@@ -590,7 +591,7 @@ mod tests {
     async fn duplicate_overlay_addresses_have_no_reverse_ptr(pool: sqlx::PgPool) {
         // An address shared by two VPCs has two valid names. Until the request
         // includes VPC identity, PTR lookup must return neither one.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for (fixture_name, zone) in [
             ("duplicate-a", "tenant-a.example.com"),
             ("duplicate-b", "tenant-b.example.com"),
@@ -624,7 +625,7 @@ mod tests {
         // Cleanup may retain an address after its segment is soft-deleted. It
         // still counts as an owner so stale state can only suppress another
         // tenant's PTR, never expose it.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (named_instance_id, named_segment_id, named_vpc_id) =
             seed_instance_segment(txn.as_mut(), "named-owner", "named.example.com", "tenant").await;
         add_address(
@@ -676,7 +677,7 @@ mod tests {
         // Ownership is counted before DNS eligibility. A Data interface that
         // would not publish its own PTR still makes the overlay owner's answer
         // ambiguous.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_instance_segment(
             txn.as_mut(),
             "machine-duplicate",
@@ -729,7 +730,7 @@ mod tests {
         // A host_inband address is the host's own; its PTR comes from the machine
         // source, not the instance arm. With no machine interface here there is no
         // answer -- proving the instance arm excludes host_inband.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_instance_segment(
             txn.as_mut(),
             "host-reverse",
@@ -763,7 +764,7 @@ mod tests {
     async fn soa_lookup_uses_the_recreated_live_reverse_zone(pool: sqlx::PgPool) {
         // A deleted reverse-zone spelling may be recreated as a new live row.
         // SOA lookup must select that live replacement instead of the old row.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let mut old = NewDomain::new("0.10.in-addr.arpa");
         old.soa.as_mut().unwrap().0.primary_ns = "old.example.com".to_string();
         let old = domain::persist(old, txn.as_mut()).await.unwrap();
@@ -784,7 +785,7 @@ mod tests {
     async fn a_deleted_forward_domain_has_no_soa_record(pool: sqlx::PgPool) {
         // Soft deletion removes a forward zone from service even though its
         // SOA data remains stored for lifecycle history.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let domain = domain::persist(NewDomain::new("deleted.example.com"), txn.as_mut())
             .await
             .unwrap();
@@ -804,7 +805,7 @@ mod tests {
         // With a live parent zone above, the handler would otherwise answer the
         // child's stale A record as authoritative through the parent, and its
         // existence would turn the parent's NXDOMAIN into NODATA.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         domain::persist(NewDomain::new("example.com"), txn.as_mut())
             .await
             .unwrap();
@@ -858,7 +859,7 @@ mod tests {
     async fn a_deleted_instance_domain_has_no_reverse_ptr(pool: sqlx::PgPool) {
         // An overlay address remains stored while its domain is deleted, but
         // DNS must not publish a PTR through that inactive zone.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (instance_id, segment_id, vpc_id) = seed_instance_segment(
             txn.as_mut(),
             "deleted-instance-domain",
@@ -895,7 +896,7 @@ mod tests {
     async fn a_deleted_machine_domain_has_no_reverse_ptr(pool: sqlx::PgPool) {
         // A machine interface keeps its address while its domain is deleted,
         // but DNS must not publish a PTR through that inactive zone.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let (_, segment_id, _) = seed_instance_segment(
             txn.as_mut(),
             "deleted-machine-domain",

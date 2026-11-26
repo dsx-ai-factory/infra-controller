@@ -14,23 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bullseye
+FROM arm64v8/rust:1.100.0-slim-bookworm@sha256:84fb9722598fd9f4851a3d8afa3f55cd8a9b1ccd35444a405f25b666a8b93963
 
-# Bullseye does not package mold. Keep this image on Bullseye for artifact
-# compatibility and install the pinned upstream ARM64 binary instead.
+# Install the pinned upstream ARM64 mold binary.
 ARG MOLD_VERSION=2.30.0
 ARG MOLD_SHA256=258aaf2b7808ea22fca625480efdf7a13830e9ee311716db0ba9c62af1770c07
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
-
-# Bullseye security package downloads return 404 from deb.debian.org.
-# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
-# and install PostgreSQL 13 without changing the base image version.
-RUN sed -i \
-    's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
-    /etc/apt/sources.list
 
 # Change CACHEKEY to whatever so docker doesn't re-use the cache from before if you want apt to actually run.
 #
@@ -64,7 +56,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 		openssl \
 		pigz \
 		pkg-config \
-		postgresql-13 \
+		postgresql-15 \
 		protobuf-compiler \
 		sudo \
 		unzip \
@@ -99,4 +91,4 @@ RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/va
 RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" && chmod +x /usr/local/bin/kubectl
 
 # create a postgres user
-RUN /etc/init.d/postgresql start && su postgres -c "/usr/lib/postgresql/13/bin/createuser -d root" && /etc/init.d/postgresql stop
+RUN /etc/init.d/postgresql start && su postgres -c "/usr/lib/postgresql/15/bin/createuser -d root" && /etc/init.d/postgresql stop

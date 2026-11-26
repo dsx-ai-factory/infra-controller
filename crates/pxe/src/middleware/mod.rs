@@ -34,8 +34,11 @@ pub(super) async fn normalize_request<B>(mut request: Request<B>) -> Request<B> 
 
     let uri = request.uri_mut();
     if let Some(p_q) = uri.path_and_query() {
-        let path_and_query = p_q.to_string();
-        let removed_duplicated_slashes = path_and_query.as_str().replace("//", "/");
+        let mut removed_duplicated_slashes = p_q.as_str().replace("//", "/");
+        // `PathAndQuery::Display` supplies the slash for a query without a path.
+        if p_q.as_str().starts_with('?') {
+            removed_duplicated_slashes.insert(0, '/');
+        }
         let new_path_and_query = match PathAndQuery::from_str(removed_duplicated_slashes.as_str()) {
             Ok(path_and_query) => path_and_query,
             _ => unreachable!(),
@@ -74,12 +77,28 @@ mod test {
     use super::*;
     #[tokio::test]
     async fn test_url_normalize() {
-        let request = Request::builder()
-            .uri("http://localhost:8080/api/v0/cloud-init//dpu/user-data")
-            .body(())
-            .unwrap();
-        let result = normalize_request(request).await;
-        assert_eq!(result.uri().path(), "/api/v0/cloud-init/dpu/user-data");
+        check_cases_async(
+            [
+                Case {
+                    scenario: "duplicated path slashes",
+                    input: "http://localhost:8080/api/v0/cloud-init//dpu/user-data",
+                    expect: Yields("/api/v0/cloud-init/dpu/user-data".to_string()),
+                },
+                Case {
+                    scenario: "query without an explicit path retains its leading slash",
+                    input: "http://localhost:8080?buildarch=0",
+                    expect: Yields("/?buildarch=0".to_string()),
+                },
+            ],
+            |uri| async move {
+                let request = Request::builder().uri(uri).body(()).unwrap();
+                let result = normalize_request(request).await;
+                Ok::<_, std::convert::Infallible>(
+                    result.uri().path_and_query().unwrap().as_str().to_string(),
+                )
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

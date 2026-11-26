@@ -1094,6 +1094,7 @@ mod tests {
     use sqlx::types::Json;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const MIGRATION: &str =
         include_str!("../migrations/20260728120000_machine_boot_interfaces.sql");
@@ -1241,7 +1242,7 @@ mod tests {
     async fn initialize_only_sets_an_uninitialized_host(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(1);
         let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 1]);
@@ -1285,7 +1286,7 @@ mod tests {
     async fn rollout_baseline_only_applies_to_existing_stable_ready_or_assigned_hosts(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let cases = [
             (host_machine_id(30), ManagedHostState::Ready, true),
             (
@@ -1347,7 +1348,7 @@ mod tests {
     async fn verification_is_a_cas_and_is_exposed_in_machine_snapshots(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(34);
         seed_machine(txn.as_mut(), &machine_id).await?;
         assert_eq!(
@@ -1436,7 +1437,7 @@ mod tests {
     async fn observation_results_reject_a_newer_desired_generation(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(44);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -1495,7 +1496,7 @@ mod tests {
     async fn observation_drift_reopens_the_exact_pair_once(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(45);
         let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -1580,7 +1581,7 @@ mod tests {
 
         for (marker, observation) in [(46, Observation::Verify), (47, Observation::Reopen)] {
             let machine_id = host_machine_id(marker);
-            let mut setup = pool.begin().await?;
+            let mut setup = pool.txn_begin().await?;
             seed_machine(setup.as_mut(), &machine_id).await?;
             setup.commit().await?;
 
@@ -1590,7 +1591,7 @@ mod tests {
                 ])),
                 version: ConfigVersion::invalid(),
             };
-            let mut holder = pool.begin().await?;
+            let mut holder = pool.txn_begin().await?;
             let newer_desired = set(
                 holder.as_mut(),
                 &machine_id,
@@ -1603,7 +1604,7 @@ mod tests {
             let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(holder.as_mut())
                 .await?;
-            let mut waiter = pool.begin().await?;
+            let mut waiter = pool.txn_begin().await?;
             let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(waiter.as_mut())
                 .await?;
@@ -1653,7 +1654,10 @@ mod tests {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                holder.commit().await
+                holder
+                    .commit()
+                    .await
+                    .map_err(Box::<dyn std::error::Error>::from)
             };
             let (observation_result, target_commit) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1686,7 +1690,7 @@ mod tests {
     async fn try_set_uses_cas_without_bumping_noops(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = predicted_host_machine_id(2);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 3]);
@@ -1798,7 +1802,7 @@ mod tests {
     async fn set_serializes_operator_updates_without_weakening_pairs(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(5);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 8]);
@@ -1886,7 +1890,7 @@ mod tests {
         ];
         let sentinel =
             DateTime::from_timestamp(1_700_004_000, 123_000_000).expect("fixture timestamp");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         for (index, case) in cases.into_iter().enumerate() {
             let machine_id = predicted_host_machine_id(70 + index as u8);
@@ -1936,7 +1940,7 @@ mod tests {
     async fn operator_reconciliation_creates_a_pending_generation_without_weakening_pairs(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(37);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 10]);
@@ -1994,7 +1998,7 @@ mod tests {
     async fn existing_reconciliation_preserves_selection_and_records_active_unknowns(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let attributed_machine_id = host_machine_id(61);
         seed_machine(txn.as_mut(), &attributed_machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 1]);
@@ -2091,7 +2095,7 @@ mod tests {
     async fn existing_reconciliation_refreshes_same_mac_without_reselecting(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(63);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 4]);
@@ -2154,7 +2158,7 @@ mod tests {
     async fn enrichment_only_strengthens_the_matching_mac(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(3);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 5]);
@@ -2229,7 +2233,7 @@ mod tests {
     async fn enrichment_carries_current_verification_without_hiding_target_changes(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine_id = host_machine_id(36);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 8]);
@@ -2280,7 +2284,7 @@ mod tests {
     async fn incomplete_targets_are_keyset_paged(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let unset_host = host_machine_id(10);
         let mac_only_host = host_machine_id(11);
         let unset_prediction = predicted_host_machine_id(12);
@@ -2354,7 +2358,7 @@ mod tests {
     async fn incomplete_targets_skip_mac_only_hosts_without_an_interface_id_source(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let unset_host = host_machine_id(40);
         let unresolvable_host = host_machine_id(41);
         let resolvable_host = host_machine_id(42);
@@ -2482,7 +2486,7 @@ mod tests {
             .execute(&pool)
             .await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let predicted_id = predicted_host_machine_id(20);
         let dpu_id = dpu_machine_id(21);
         seed_machine(txn.as_mut(), &predicted_id).await?;
@@ -2571,7 +2575,7 @@ mod tests {
 
         let preexisting_id = predicted_host_machine_id(60);
         let defaulted_insert_id = host_machine_id(61);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         seed_machine(txn.as_mut(), &preexisting_id).await?;
         seed_machine(txn.as_mut(), &defaulted_insert_id).await?;
         txn.commit().await?;
@@ -2674,7 +2678,7 @@ mod tests {
             .execute(&pool)
             .await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let existing_host = host_machine_id(40);
         let in_flight_host = host_machine_id(42);
         seed_machine(txn.as_mut(), &existing_host).await?;

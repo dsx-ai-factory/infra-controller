@@ -50,14 +50,15 @@ impl PreingestionManagerStatic {
     /// no-op completion, and terminal failures.
     pub(super) async fn start_rack_firmware(
         &self,
-        db: &PgPool,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
         let Some(dependencies) = self.rack_firmware.as_ref() else {
             return Ok(false);
         };
 
-        let Some((bmc_mac, aliases)) = Self::rack_firmware_identity(db, endpoint).await? else {
+        let Some((bmc_mac, aliases)) =
+            Self::rack_firmware_identity(&self.database_connection, endpoint).await?
+        else {
             return Ok(false);
         };
 
@@ -71,14 +72,16 @@ impl PreingestionManagerStatic {
                 PreingestionState::RackFirmwareUpdateWait { .. }
             )
         }) {
-            self.wait_for_rack_firmware(db, endpoint).await?;
+            self.wait_for_rack_firmware(endpoint).await?;
             return Ok(true);
         }
 
-        let Some(identity) = db::expected_machine::find_rms_identities_by_bmc_macs(db, &[bmc_mac])
-            .await?
-            .pop()
-        else {
+        let Some(identity) = db::expected_machine::find_rms_identities_by_bmc_macs(
+            &self.database_connection,
+            &[bmc_mac],
+        )
+        .await?
+        .pop() else {
             return Ok(false);
         };
 
@@ -117,7 +120,6 @@ impl PreingestionManagerStatic {
 
         let Some(profile_id) = identity.rack_profile_id else {
             self.fail_rack_firmware(
-                db,
                 &addresses,
                 format!(
                     "expected rack compute tray {bmc_mac} in rack {} has no rack profile",
@@ -131,7 +133,6 @@ impl PreingestionManagerStatic {
 
         let Some(profile) = dependencies.rack_profiles.get(profile_id.as_str()) else {
             self.fail_rack_firmware(
-                db,
                 &addresses,
                 format!("rack profile {profile_id} is not configured"),
             )
@@ -147,7 +148,7 @@ impl PreingestionManagerStatic {
                 "Rack profile has no firmware object; skipping automatic firmware update"
             );
 
-            self.set_rack_firmware_state(db, &addresses, PreingestionState::Complete)
+            self.set_rack_firmware_state(&addresses, PreingestionState::Complete)
                 .await?;
 
             tracing::info!(
@@ -167,32 +168,25 @@ impl PreingestionManagerStatic {
             Ok(Some(preparation)) => preparation,
             Ok(None) => return Ok(true),
             Err(reason) => {
-                self.fail_rack_firmware(db, &addresses, reason).await?;
+                self.fail_rack_firmware(&addresses, reason).await?;
 
                 return Ok(true);
             }
         };
 
-        self.submit_rack_firmware(
-            db,
-            &addresses,
-            dependencies.compute_tray.as_ref(),
-            preparation,
-        )
-        .await?;
+        self.submit_rack_firmware(&addresses, dependencies.compute_tray.as_ref(), preparation)
+            .await?;
 
         Ok(true)
     }
 
     async fn submit_rack_firmware(
         &self,
-        db: &PgPool,
         addresses: &[IpAddr],
         compute_tray: &dyn ComputeTrayManager,
         preparation: PreparedRackFirmware,
     ) -> PreingestionManagerResult<()> {
         self.set_rack_firmware_state(
-            db,
             addresses,
             PreingestionState::RackFirmwareUpdateWait {
                 backend_job_id: None,
@@ -238,7 +232,6 @@ impl PreingestionManagerStatic {
                 [result] => result.clone(),
                 _ => {
                     self.fail_rack_firmware(
-                        db,
                         addresses,
                         format!(
                             "RMS returned {} results for one rack compute tray",
@@ -259,14 +252,13 @@ impl PreingestionManagerStatic {
                     "RMS firmware submission did not reach the backend; will retry"
                 );
 
-                self.set_rack_firmware_state(db, addresses, PreingestionState::RecheckVersions)
+                self.set_rack_firmware_state(addresses, PreingestionState::RecheckVersions)
                     .await?;
 
                 return Ok(());
             }
             Err(error) => {
                 self.fail_rack_firmware(
-                    db,
                     addresses,
                     format!("rack firmware submission outcome is unknown: {error}"),
                 )
@@ -290,7 +282,7 @@ impl PreingestionManagerStatic {
                 );
             }
 
-            self.fail_rack_firmware(db, addresses, reason).await?;
+            self.fail_rack_firmware(addresses, reason).await?;
 
             return Ok(());
         }
@@ -305,7 +297,6 @@ impl PreingestionManagerStatic {
             );
 
             self.set_rack_firmware_state(
-                db,
                 addresses,
                 PreingestionState::RackFirmwareUpdateWait {
                     backend_job_id: Some(backend_job_id),
@@ -318,7 +309,7 @@ impl PreingestionManagerStatic {
 
         // RMS accepted the request without returning a durable job to poll, so
         // ingestion can continue.
-        self.set_rack_firmware_state(db, addresses, PreingestionState::Complete)
+        self.set_rack_firmware_state(addresses, PreingestionState::Complete)
             .await?;
 
         tracing::info!(
@@ -428,13 +419,13 @@ impl PreingestionManagerStatic {
     /// Polls the RMS job and applies its outcome to every BMC IP alias.
     pub(super) async fn wait_for_rack_firmware(
         &self,
-        db: &PgPool,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<()> {
-        let Some((bmc_mac, aliases)) = Self::rack_firmware_identity(db, endpoint).await? else {
+        let Some((bmc_mac, aliases)) =
+            Self::rack_firmware_identity(&self.database_connection, endpoint).await?
+        else {
             return self
                 .fail_rack_firmware(
-                    db,
                     &[endpoint.address],
                     "BMC identity is missing while polling an RMS firmware job".to_string(),
                 )
@@ -455,7 +446,6 @@ impl PreingestionManagerStatic {
         let Some(backend_job_id) = waiting_jobs.next() else {
             return self
                 .fail_rack_firmware(
-                    db,
                     &addresses,
                     "RMS firmware wait state is missing for the rack compute tray".to_string(),
                 )
@@ -465,7 +455,6 @@ impl PreingestionManagerStatic {
         if waiting_jobs.any(|candidate| candidate != backend_job_id) {
             return self
                 .fail_rack_firmware(
-                    db,
                     &addresses,
                     "BMC aliases contain conflicting RMS firmware job IDs".to_string(),
                 )
@@ -491,7 +480,6 @@ impl PreingestionManagerStatic {
         let Some(job_id) = backend_job_id.as_deref() else {
             return self
                 .fail_rack_firmware(
-                    db,
                     &addresses,
                     "RMS firmware submission outcome is ambiguous because no job ID was persisted; reconcile the tray before retrying"
                         .to_string(),
@@ -502,7 +490,6 @@ impl PreingestionManagerStatic {
         let Some(dependencies) = self.rack_firmware.as_ref() else {
             return self
                 .fail_rack_firmware(
-                    db,
                     &addresses,
                     "RMS compute-tray firmware support is no longer configured".to_string(),
                 )
@@ -555,7 +542,7 @@ impl PreingestionManagerStatic {
                     "Rack firmware update completed; marking preingestion complete"
                 );
 
-                self.set_rack_firmware_state(db, &addresses, PreingestionState::Complete)
+                self.set_rack_firmware_state(&addresses, PreingestionState::Complete)
                     .await
             }
             FirmwareState::Failed | FirmwareState::Cancelled => {
@@ -563,7 +550,7 @@ impl PreingestionManagerStatic {
                     format!("RMS firmware job ended in state {:?}", status.state)
                 });
 
-                self.fail_rack_firmware(db, &addresses, reason).await
+                self.fail_rack_firmware(&addresses, reason).await
             }
         }
     }
@@ -610,11 +597,10 @@ impl PreingestionManagerStatic {
 
     async fn set_rack_firmware_state(
         &self,
-        db: &PgPool,
         addresses: &[IpAddr],
         state: PreingestionState,
     ) -> PreingestionManagerResult<()> {
-        db.with_txn(|txn| {
+        self.with_txn(|txn| {
             db::explored_endpoints::set_preingestion_for_addresses(addresses, state, txn.as_mut())
                 .boxed()
         })
@@ -625,12 +611,11 @@ impl PreingestionManagerStatic {
 
     async fn fail_rack_firmware(
         &self,
-        db: &PgPool,
         addresses: &[IpAddr],
         reason: String,
     ) -> PreingestionManagerResult<()> {
         tracing::error!(bmc_ip_addresses = ?addresses, %reason, "Rack firmware preingestion failed");
-        self.set_rack_firmware_state(db, addresses, PreingestionState::Failed { reason })
+        self.set_rack_firmware_state(addresses, PreingestionState::Failed { reason })
             .await
     }
 }

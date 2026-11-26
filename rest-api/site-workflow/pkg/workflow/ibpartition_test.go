@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"google.golang.org/protobuf/proto"
 )
 
 type InventoryIBPartitionTestSuite struct {
@@ -84,16 +85,16 @@ func (cipbv2ts *CreateIBPartitionV2TestSuite) Test_CreateIBPartitionV2_Success()
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
 	request := &corev1.IBPartitionCreationRequest{
-		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &corev1.IBPartitionConfig{
-			Name:                 "the_name",
-			TenantOrganizationId: "the_org",
-		},
+		Id:       &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config:   &corev1.IBPartitionConfig{TenantOrganizationId: "the_org"},
+		Metadata: &corev1.Metadata{Name: "the_name"},
 	}
 
 	// Mock CreateInfiniBandPartitionOnSite activity
 	cipbv2ts.env.RegisterActivity(IBPartitionManager.CreateInfiniBandPartitionOnSite)
-	cipbv2ts.env.OnActivity(IBPartitionManager.CreateInfiniBandPartitionOnSite, mock.Anything, mock.Anything).Return(nil)
+	cipbv2ts.env.OnActivity(IBPartitionManager.CreateInfiniBandPartitionOnSite, mock.Anything, mock.MatchedBy(func(got *corev1.IBPartitionCreationRequest) bool {
+		return proto.Equal(request, got)
+	})).Return(nil)
 
 	// Execute CreateIBPartitionV2 workflow
 	cipbv2ts.env.ExecuteWorkflow(CreateInfiniBandPartitionV2, request)
@@ -105,11 +106,9 @@ func (cipbv2ts *CreateIBPartitionV2TestSuite) Test_CreateIBPartitionV2_Failure()
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
 	request := &corev1.IBPartitionCreationRequest{
-		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &corev1.IBPartitionConfig{
-			Name:                 "the_name",
-			TenantOrganizationId: "the_org",
-		},
+		Id:       &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config:   &corev1.IBPartitionConfig{TenantOrganizationId: "the_org"},
+		Metadata: &corev1.Metadata{Name: "the_name"},
 	}
 
 	errMsg := "Site Controller communication error"
@@ -202,15 +201,15 @@ func (uibpv2ts *UpdateIBPartitionV2TestSuite) Test_UpdateIBPartitionV2_Success()
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
 	request := &corev1.IBPartitionUpdateRequest{
-		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &corev1.IBPartitionConfig{
-			Name:                 "the_name",
-			TenantOrganizationId: "the_org",
-		},
+		Id:       &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config:   &corev1.IBPartitionConfig{TenantOrganizationId: "the_org"},
+		Metadata: &corev1.Metadata{Name: "the_name"},
 	}
 
 	uibpv2ts.env.RegisterActivity(IBPartitionManager.UpdateInfiniBandPartitionOnSite)
-	uibpv2ts.env.OnActivity(IBPartitionManager.UpdateInfiniBandPartitionOnSite, mock.Anything, mock.Anything).Return(nil)
+	uibpv2ts.env.OnActivity(IBPartitionManager.UpdateInfiniBandPartitionOnSite, mock.Anything, mock.MatchedBy(func(got *corev1.IBPartitionUpdateRequest) bool {
+		return proto.Equal(request, got)
+	})).Return(nil)
 
 	uibpv2ts.env.ExecuteWorkflow(UpdateInfiniBandPartition, request)
 	uibpv2ts.True(uibpv2ts.env.IsWorkflowCompleted())
@@ -221,11 +220,9 @@ func (uibpv2ts *UpdateIBPartitionV2TestSuite) Test_UpdateIBPartitionV2_Failure()
 	var IBPartitionManager iActivity.ManageInfiniBandPartition
 
 	request := &corev1.IBPartitionUpdateRequest{
-		Id: &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
-		Config: &corev1.IBPartitionConfig{
-			Name:                 "the_name",
-			TenantOrganizationId: "the_org",
-		},
+		Id:       &corev1.IBPartitionId{Value: "b410867c-655a-11ef-bc4a-0393098e5d09"},
+		Config:   &corev1.IBPartitionConfig{TenantOrganizationId: "the_org"},
+		Metadata: &corev1.Metadata{Name: "the_name"},
 	}
 
 	errMsg := "Site Controller communication error"

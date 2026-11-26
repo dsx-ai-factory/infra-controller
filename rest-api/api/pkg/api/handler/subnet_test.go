@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -283,7 +286,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 	tests := []struct {
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		user               *cdbm.User
 		expectedErr        bool
 		expectedStatus     int
@@ -296,7 +299,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -304,7 +307,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -312,7 +315,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -320,7 +323,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -328,7 +331,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant doesnt exist for org",
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -336,7 +339,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant in request does not match that in org",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -344,7 +347,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc in request doesnt exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadVpcID),
+			reqBody:        errBodyBadVpcID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -352,7 +355,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc in request doesnt match tenant in org",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadVpcTenantMismatch),
+			reqBody:        errBodyBadVpcTenantMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -360,7 +363,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "REST Subnet creation rejects an FNN VPC",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadVpctype),
+			reqBody:        errBodyBadVpctype,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -368,7 +371,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "REST Subnet creation rejects ipv6BlockId",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPv6BlockID),
+			reqBody:        errBodyBadIPv6BlockID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -376,7 +379,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "REST Subnet creation requires ipv4BlockId",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNoIPv4),
+			reqBody:        errBodyNoIPv4,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -384,7 +387,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipv4 block in request doesnt exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPv4BlockID),
+			reqBody:        errBodyBadIPv4BlockID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -392,7 +395,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "Pending tenant IPv4 block is rejected before IPAM allocation",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyPendingIPv4Block),
+			reqBody:        errBodyPendingIPv4Block,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -401,7 +404,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "ipv4BlockId rejects an IPv6 IP block",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyIPv6AsIPv4Block),
+			reqBody:        errBodyIPv6AsIPv4Block,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -410,7 +413,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "Tenant SitePrefix cannot be the source IP Block for a Subnet",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyTenantSitePrefixID),
+			reqBody:        errBodyTenantSitePrefixID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -419,7 +422,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipv4 block in request is not derived for tenant",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPv4BlockIDTenantMismatch),
+			reqBody:        errBodyBadIPv4BlockIDTenantMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -427,7 +430,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when site is mismatched between ipblock and site",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPv4BlockIDSiteMismatch),
+			reqBody:        errBodyBadIPv4BlockIDSiteMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -435,7 +438,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipam creation for subnet fails",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyIpamFail),
+			reqBody:        errBodyIpamFail,
 			user:           tnu,
 			expectedErr:    true,
 			expectedErrMsg: "Could not create IPAM entry for Subnet. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
@@ -444,7 +447,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:            "success case",
 			reqOrgName:      tnOrg1,
-			reqBody:         string(okBody),
+			reqBody:         okBody,
 			user:            tnu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
@@ -454,7 +457,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:            "Ready legacy VPC without networkVirtualizationType remains compatible",
 			reqOrgName:      tnOrg1,
-			reqBody:         string(okBodyLegacyVpc),
+			reqBody:         okBodyLegacyVpc,
 			user:            tnu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
@@ -464,7 +467,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:               "success case with Full Grant",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBodyFG),
+			reqBody:            okBodyFG,
 			user:               tnu,
 			expectedErr:        false,
 			expectedStatus:     http.StatusCreated,
@@ -475,7 +478,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:            "success case with /30",
 			reqOrgName:      tnOrg1,
-			reqBody:         string(okBodySlash30),
+			reqBody:         okBodySlash30,
 			user:            tnu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
@@ -485,7 +488,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error case with /31",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodySlash31),
+			reqBody:        errBodySlash31,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -493,7 +496,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when subnet with same name already exists",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -501,7 +504,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:            "success when Subnet with same name exists, but for another Site",
 			reqOrgName:      tnOrg1,
-			reqBody:         string(okBodyNameClash),
+			reqBody:         okBodyNameClash,
 			user:            tnu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
@@ -511,7 +514,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc from subnet is not ready state",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errVpcNotReady),
+			reqBody:        errVpcNotReady,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -519,7 +522,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "error when site from vpc is not ready state",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errSiteNotReady),
+			reqBody:        errSiteNotReady,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -527,7 +530,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 		{
 			name:           "subnet creation fails, sync workflow timeout",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBodyTimeout),
+			reqBody:        okBodyTimeout,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -538,7 +541,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -612,10 +615,10 @@ func TestSubnetHandler_Create(t *testing.T) {
 	}
 }
 
-func testCreateSubnet(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APISubnet {
+func testCreateSubnet(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName string, reqBody []byte) *model.APISubnet {
 	ctx := context.Background()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -750,7 +753,7 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 		prefixLen := 24
 		subnetBody, err := json.Marshal(model.APISubnetCreateRequest{Name: fmt.Sprintf("subnet-%02d", i), Description: cutil.GetPtr(""), VpcID: vpcID.String(), IPv4BlockID: cutil.GetPtr(ipbID.String()), PrefixLength: prefixLen})
 		assert.Nil(t, err)
-		apiSubnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody))
+		apiSubnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody)
 		assert.NotNil(t, apiSubnet)
 
 		sid, _ := uuid.Parse(apiSubnet.ID)
@@ -1028,10 +1031,10 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 				q.Add("status", *tc.queryStatus)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1195,13 +1198,13 @@ func TestSubnetHandler_Get(t *testing.T) {
 	parentIpbBody, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(parentIpbBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, parentIpbBody)
 
 	ifaceSubnetBody, err := json.Marshal(model.APISubnetCreateRequest{
 		Name: "iface-subnet-usage", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(),
 		IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	require.NoError(t, err)
-	subnetWithIfaceWorkload := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceSubnetBody))
+	subnetWithIfaceWorkload := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ifaceSubnetBody)
 	var wantUsageAcquiredPrefixes0 uint64
 	wantUsageAcquiredPrefixes1 := uint64(0)
 
@@ -1511,9 +1514,9 @@ func TestSubnetHandler_Update(t *testing.T) {
 	subnetBody2, err := json.Marshal(model.APISubnetCreateRequest{Name: "test-subnet-2", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody)
 
-	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody2))
+	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody2)
 	assert.NotNil(t, subnet2)
 
 	errBody1, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("a")})
@@ -1535,7 +1538,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 	tests := []struct {
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		user               *cdbm.User
 		id                 string
 		expectedErr        bool
@@ -1547,7 +1550,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           nil,
 			id:             subnet.ID,
 			expectedErr:    true,
@@ -1556,7 +1559,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnu,
 			id:             subnet.ID,
 			expectedErr:    true,
@@ -1565,7 +1568,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "BadBody",
+			reqBody:        []byte("BadBody"),
 			user:           tnu,
 			id:             subnet.ID,
 			expectedErr:    true,
@@ -1574,7 +1577,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody validation fails",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           tnu,
 			id:             subnet.ID,
 			expectedErr:    true,
@@ -1615,7 +1618,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "error when name clashes",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu,
 			id:             subnet.ID,
 			expectedErr:    true,
@@ -1624,7 +1627,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "success when name is updated with non-clashing value",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnu,
 			id:             subnet.ID,
 			expectedErr:    false,
@@ -1635,7 +1638,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:               "success case when name and description are updated",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBody2),
+			reqBody:            okBody2,
 			user:               tnu,
 			id:                 subnet.ID,
 			expectedErr:        false,
@@ -1647,7 +1650,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 		{
 			name:           "success case when name is updated with the same value",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody3),
+			reqBody:        okBody3,
 			user:           tnu,
 			id:             subnet2.ID,
 			expectedErr:    false,
@@ -1660,7 +1663,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1680,6 +1683,12 @@ func TestSubnetHandler_Update(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewSubnetDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.id), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
@@ -1694,7 +1703,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 				if tc.expectedDesc != nil {
 					assert.Equal(t, *tc.expectedDesc, *rsp.Description)
 				}
-				assert.NotEqual(t, rsp.Updated.String(), subnet.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 				assert.Equal(t, cdbm.IPBlockRoutingTypeDatacenterOnly, *rsp.RoutingType)
 			}
 
@@ -1832,9 +1841,9 @@ func TestSubnetHandler_Delete(t *testing.T) {
 	okBodyFG, err := json.Marshal(model.APISubnetCreateRequest{Name: "okFG", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody))
-	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody2))
-	subnetFG := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBodyFG))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody)
+	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody2)
+	subnetFG := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBodyFG)
 	subnet2ID := uuid.MustParse(subnet2.ID)
 
 	it1 := testMachineBuildInstanceType(t, dbSession, ip, site, "testIT")
@@ -1850,7 +1859,7 @@ func TestSubnetHandler_Delete(t *testing.T) {
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}
 	okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 	assert.Nil(t, err)
-	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
+	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
 	_ = uuid.MustParse(aIT.ID)
 	_ = uuid.MustParse(aIT.AllocationConstraints[0].ID)
 	os1 := testAllocationBuildOperatingSystem(t, dbSession, "ubuntu")

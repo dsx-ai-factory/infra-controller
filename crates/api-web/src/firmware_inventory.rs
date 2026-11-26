@@ -74,7 +74,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn firmware_inventory_unavailable_states(pool: sqlx::PgPool) {
         let env = TestEnv::new(pool).await;
-        let mut txn = env.api().database_connection.begin().await.unwrap();
+        let mut txn = env.api().txn_begin().await.unwrap();
         db::explored_endpoints::insert(
             "192.0.2.10".parse().unwrap(),
             &Default::default(),

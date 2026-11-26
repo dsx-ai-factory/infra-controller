@@ -19,6 +19,7 @@ use carbide_machine_controller::write_ops::MachineWriteOp;
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use chrono::{DateTime, Duration};
+use db::TransactionVending as _;
 use model::machine::{
     CURRENT_STATE_MODEL_VERSION, MachineLastRebootRequested, MachineLastRebootRequestedMode,
     ManagedHostState,
@@ -37,7 +38,7 @@ async fn verification_writes_require_the_captured_reboot_record(
         [0xff; 32],
         MachineType::Host,
     );
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::create(
         txn.as_mut(),
         None,
@@ -110,7 +111,7 @@ async fn verification_writes_require_the_captured_reboot_record(
             .execute(&pool)
             .await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let result = Box::new(MachineWriteOp::UpdateRestartVerificationStatus {
             machine_id,
             current_reboot: case.captured,

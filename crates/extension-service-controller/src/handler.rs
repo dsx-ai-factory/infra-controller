@@ -24,7 +24,7 @@ use carbide_dpf::{
 };
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_uuid::extension_service::ExtensionServiceId;
-use db::DatabaseError;
+use db::{DatabaseError, TransactionVending as _};
 use futures::{StreamExt, stream};
 use model::extension_service::{
     DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartIdentity, DpfHelmChartServiceData, ExtensionService,
@@ -1021,10 +1021,10 @@ async fn load_desired_registration(
     db_pool: &sqlx::PgPool,
     service_vpc_slots: carbide_dpf::ServiceVpcSlots,
 ) -> Result<DesiredRegistration, LoadDesiredRegistrationError> {
-    let mut txn = db::Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
 
     // Re-read under lock because the state-controller snapshot predates this reconciliation call.
-    let service = db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+    let service = db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
         .await?
         .into_iter()
         .next()
@@ -1614,12 +1614,10 @@ async fn reconcile_delete(
 
     // Skip Kubernetes cleanup when no MAC was allocated because service-VPC parent creation
     // cannot precede that durable identity.
-    let has_interface_mac = {
-        let mut connection = ctx.services.db_pool.acquire().await?;
-        !db::extension_service::find_interface_macs(&mut connection, service_id)
+    let has_interface_mac =
+        !db::extension_service::find_interface_macs(&ctx.services.db_pool, service_id)
             .await?
-            .is_empty()
-    };
+            .is_empty();
     if !has_interface_mac {
         return Ok(StateHandlerOutcome::transition(
             ExtensionServiceLifecycleState::Deleted,
@@ -1668,9 +1666,9 @@ async fn reconcile_delete(
     }
 
     // Serialize the final reference check and MAC release with attachment writers.
-    let mut txn = db::Transaction::begin(&ctx.services.db_pool).await?;
+    let mut txn = ctx.services.db_pool.txn_begin().await?;
     let service_exists =
-        !db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+        !db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
             .await?
             .is_empty();
     if !service_exists {

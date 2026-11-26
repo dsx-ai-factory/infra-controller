@@ -42,7 +42,7 @@ pub fn where_pcr_pairs(query: &mut QueryBuilder<Postgres>, values: &[PcrRegister
         query.push("(");
         query.push_bind(value.pcr_register);
         query.push(",");
-        query.push_bind(value.sha_any.clone());
+        query.push_bind(&value.sha_any);
         query.push(")");
         if pair_index < values.len() - 1 {
             query.push(", ");
@@ -152,9 +152,9 @@ async fn insert_measurement_report_value_record(
 /// instances in the database. This leverages the generic get_all_objects
 /// function since its a simple/common pattern.
 pub async fn get_all_measurement_report_records(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<MeasurementReportRecord>, DatabaseError> {
-    common::get_all_objects(txn)
+    common::get_all_objects(conn)
         .await
         .map_err(|e| e.with_op_name("get_all_measurement_report_records"))
 }
@@ -164,10 +164,10 @@ pub async fn get_all_measurement_report_records(
 /// if it exists. This leverages the generic get_object_for_id
 /// function since its a simple/common pattern.
 pub async fn get_measurement_report_record_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     report_id: MeasurementReportId,
 ) -> Result<Option<MeasurementReportRecord>, DatabaseError> {
-    common::get_object_for_id(txn, report_id)
+    common::get_object_for_id(conn, report_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_report_record_by_id"))
 }
@@ -176,10 +176,10 @@ pub async fn get_measurement_report_record_by_id(
 /// records for a given machine ID, which is used by the `report list`
 /// CLI option.
 pub async fn get_measurement_report_records_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> Result<Vec<MeasurementReportRecord>, DatabaseError> {
-    common::get_objects_where_id(txn, machine_id)
+    common::get_objects_where_id(conn, machine_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_report_records_for_machine_id"))
 }
@@ -191,10 +191,10 @@ pub async fn get_measurement_report_records_for_machine_id(
 /// of multiple objects matching a given PgUuid, where
 /// the PgUuid is probably a reference/foreign key.
 pub async fn get_measurement_report_values_for_report_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     report_id: MeasurementReportId,
 ) -> Result<Vec<MeasurementReportValueRecord>, DatabaseError> {
-    common::get_objects_where_id(txn, report_id)
+    common::get_objects_where_id(conn, report_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_report_values_for_report_id"))
 }
@@ -257,9 +257,9 @@ pub(crate) async fn update_report_values_tstamp(
 /// MeasurementReportValueRecord instances in the database. This leverages
 /// the generic get_all_objects function since its a simple/common pattern.
 pub async fn get_all_measurement_report_value_records(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<MeasurementReportValueRecord>, DatabaseError> {
-    common::get_all_objects(txn)
+    common::get_all_objects(conn)
         .await
         .map_err(|e| e.with_op_name("get_all_measurement_report_value_records"))
 }

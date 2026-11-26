@@ -7,8 +7,10 @@
 //! as one alert listing the number and details of outstanding mismatches.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write;
 use std::net::IpAddr;
 
+use db::db_read::PgPoolReader;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport};
 use model::rack::Rack;
 use model::site_explorer::EndpointExplorationReport;
@@ -44,14 +46,14 @@ pub(super) async fn load_report(
     pool: &sqlx::PgPool,
     rack: &Rack,
 ) -> Result<Option<HealthReport>, StateHandlerError> {
-    let mut connection = pool.acquire().await?;
-    let machines = crate::get_machines_from_rack(rack, connection.as_mut()).await?;
+    let machines =
+        crate::get_machines_from_rack(rack, &mut PgPoolReader::from(pool.clone())).await?;
     let compute = machines
         .iter()
         .map(|machine| (machine.id.to_string(), machine.status.bmc_info.ip))
         .collect::<Vec<_>>();
     let switch_ids = db::switch::find_ids(
-        connection.as_mut(),
+        pool,
         model::switch::SwitchSearchFilter {
             rack_id: Some(rack.id.clone()),
             ..Default::default()
@@ -59,7 +61,7 @@ pub(super) async fn load_report(
     )
     .await?;
     let switches = db::switch::find_by(
-        connection.as_mut(),
+        pool,
         db::ObjectColumnFilter::List(db::switch::IdColumn, &switch_ids),
     )
     .await?;
@@ -73,7 +75,7 @@ pub(super) async fn load_report(
         })
         .collect::<Vec<_>>();
     let shelf_ids = db::power_shelf::find_ids(
-        connection.as_mut(),
+        pool,
         model::power_shelf::PowerShelfSearchFilter {
             rack_id: Some(rack.id.clone()),
             ..Default::default()
@@ -81,7 +83,7 @@ pub(super) async fn load_report(
     )
     .await?;
     let shelves = db::power_shelf::find_by(
-        connection.as_mut(),
+        pool,
         db::ObjectColumnFilter::List(db::power_shelf::IdColumn, &shelf_ids),
     )
     .await?;
@@ -98,7 +100,7 @@ pub(super) async fn load_report(
         .iter()
         .flat_map(|(_, devices)| devices.iter().filter_map(|(_, address)| *address))
         .collect();
-    let endpoints = db::explored_endpoints::find_by_ips(connection.as_mut(), addresses).await?;
+    let endpoints = db::explored_endpoints::find_by_ips(pool, addresses).await?;
     let reports = endpoints
         .into_iter()
         .filter(|endpoint| !endpoint.waiting_for_explorer_refresh)
@@ -186,14 +188,15 @@ fn compare(
                 }
             }
             if versions.len() > 1 {
-                let details = versions
-                    .into_iter()
-                    .map(|(version, mut devices)| {
-                        devices.sort();
-                        format!("{version}: [{}]", devices.join(", "))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
+                let mut details = String::new();
+                for (index, (version, mut devices)) in versions.into_iter().enumerate() {
+                    if index != 0 {
+                        details.push_str("; ");
+                    }
+                    devices.sort();
+                    write!(details, "{version}: [{}]", devices.join(", "))
+                        .expect("writing to a String cannot fail");
+                }
                 Some(HealthProbeAlert {
                     id: HealthProbeId::rack_firmware_mismatch(),
                     target: Some(format!("{prefix}{id}")),
@@ -298,6 +301,35 @@ mod tests {
                     .map(|alert| alert.target.unwrap())
                     .collect::<Vec<_>>()
             },
+        );
+    }
+
+    #[test]
+    fn mismatch_details_sort_versions_and_devices_within_each_group() {
+        let version_one = report(&[("BMC", Some("1"))]);
+        let version_two = report(&[("BMC", Some("2"))]);
+        let trays = [
+            TrayFirmware {
+                device_id: "z",
+                address: None,
+                report: Some(&version_two),
+            },
+            TrayFirmware {
+                device_id: "b",
+                address: Some("192.0.2.2".parse().unwrap()),
+                report: Some(&version_one),
+            },
+            TrayFirmware {
+                device_id: "a",
+                address: None,
+                report: Some(&version_two),
+            },
+        ];
+        let alerts = compare(TrayType::Compute, &trays, None);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].message,
+            "compute trays report different firmware for BMC: 1: [b (bmc ip: 192.0.2.2)]; 2: [a, z]"
         );
     }
 

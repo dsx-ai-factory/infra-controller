@@ -4,6 +4,7 @@
  */
 
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
+use db::TransactionVending as _;
 use model::rack_type::RackProfile;
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
@@ -181,7 +182,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     assert_eq!(stored.metadata.unwrap().name, "updated");
 
     let legacy_id = RackId::new("legacy-rack");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::expected_rack::create(
         &mut txn,
         &model::expected_rack::ExpectedRack {

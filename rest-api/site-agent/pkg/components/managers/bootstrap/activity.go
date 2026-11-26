@@ -65,7 +65,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	decryptedOtp := cutils.DecryptData(encryptedOtpBytes, ManagerAccess.Conf.EB.Temporal.ClusterID)
 
 	// Update the OTP in the bootstrap secret without base64 encoding
-	bootstrapSecret.Data["otp"] = []byte(decryptedOtp)
+	bootstrapSecret.Data["otp"] = decryptedOtp
 
 	// Recorded before the write, so the liveness check never takes this OTP for a re-pair.
 	ManagerAccess.Data.EB.Managers.Bootstrap.Registration.AddOTP(string(decryptedOtp))

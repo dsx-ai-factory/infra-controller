@@ -3,15 +3,7 @@
 
 {% block title %}Logs{% endblock %}
 
-{% block head %}
-<style>
-  /* Lock the Logs page to the viewport so only the log pane scrolls (no
-     page-level wiggle), and let that pane fill the leftover height. */
-  html, body { overflow: hidden; }
-  main { height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; }
-  main > .main-content { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
-</style>
-{% endblock %}
+{% block body_class %}page-fill-height{% endblock %}
 
 {% block content %}
 <h1>Live Logs</h1>
@@ -36,11 +28,11 @@
       <input type="search" id="log-text-filter" class="table-filter-input" placeholder="Filter by target, message, or fields…" aria-label="Filter log lines">
     </div>
     <label class="log-spans" title="Show span-completion summaries"><input type="checkbox" id="log-show-spans" checked> Spans</label>
-    <span id="log-status" class="bubble">Connecting…</span>
+    <span id="log-status" class="bubble log-status">Connecting…</span>
     <button type="button" class="btn-secondary" id="log-pause">Pause</button>
     <button type="button" class="btn-secondary" id="log-clear">Clear</button>
   </div>
-  <div id="log-output"></div>
+  <div id="log-output" class="log-console"></div>
 </section>
 {% endblock %}
 
@@ -224,7 +216,7 @@
   const es = new EventSource('/admin/logs/api/stream');
   function setStatus(text, kind) {
     statusEl.textContent = text;
-    statusEl.className = 'bubble' + (kind ? ' ' + kind : '');
+    statusEl.className = 'bubble log-status' + (kind ? ' ' + kind : '');
   }
   es.onopen = function () { setStatus('Streaming', 'success'); };
   es.onmessage = function (e) {

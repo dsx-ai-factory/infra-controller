@@ -4,6 +4,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -1051,7 +1052,7 @@ func TestInstanceSQLDAO_GetAllIDs(t *testing.T) {
 	}
 
 	siteInstanceIDs := []uuid.UUID{createInstance("instance-1", site, vpc), createInstance("instance-2", site, vpc)}
-	slices.SortFunc(siteInstanceIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	slices.SortFunc(siteInstanceIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 	createInstance("instance-3", site2, vpc2)
 	require.NoError(t, isd.Delete(ctx, nil, createInstance("instance-4", site, vpc)))
 
@@ -2843,6 +2844,12 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := isd.GetByID(ctx, nil, tc.id, nil, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := isd.Update(ctx, nil,
 				InstanceUpdateInput{
 					InstanceID: tc.id,
@@ -2951,9 +2958,7 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedTpmEkCertificate, *got.TpmEkCertificate)
 				}
 
-				if got.Updated.String() == tc.instance.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)

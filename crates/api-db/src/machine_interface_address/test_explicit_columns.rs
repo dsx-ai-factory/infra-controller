@@ -21,14 +21,14 @@ use model::dns::NewDomain;
 use sqlx::Connection;
 
 use super::*;
-use crate::{ObjectColumnFilter, dhcp_entry, dhcp_record};
+use crate::{ObjectColumnFilter, TransactionVending as _, dhcp_entry, dhcp_record};
 
 #[crate::sqlx_test]
 async fn interface_address_and_dhcp_entry_queries_survive_added_columns(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut api_connection = pool.acquire().await?;
-    let mut txn = api_connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut api_connection).await?;
     let machine_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x78; 32],
@@ -102,7 +102,7 @@ async fn interface_address_and_dhcp_entry_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the prepared readers alive while unrelated columns are added.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_interface_addresses ADD COLUMN test_added_column text;
@@ -120,10 +120,10 @@ async fn assert_address_and_dhcp_queries(
     connection: &mut PgConnection,
     expected: &DhcpRecord,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let address = find_ipv4_for_interface(connection, expected.machine_interface_id).await?;
+    let address = find_ipv4_for_interface(&mut *connection, expected.machine_interface_id).await?;
     assert_eq!(address.address, expected.address);
     let entries = dhcp_entry::find_by(
-        connection,
+        &mut *connection,
         ObjectColumnFilter::One(
             dhcp_entry::MachineInterfaceIdColumn,
             &expected.machine_interface_id,

@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+rule_files:
+- dpu-heartbeat.rules.yml
+evaluation_interval: 1m
+tests:
+- name: healthy zero
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 0+0x10
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+- name: brief failure does not fire
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 1+0x2 0+0x7
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+- name: sustained failure waits five minutes
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 1+0x10
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: DpuHeartbeatFailures
+    exp_alerts:
+    - exp_labels: &heartbeat_labels
+        probe_id: HeartbeatTimeout
+        probe_target: forge-dpu-agent
+        failure: 'HeartbeatTimeout [Target: forge-dpu-agent]'
+        job: core
+        instance: core-a:9009
+        site: qa-example
+  - eval_time: 10m
+    alertname: DpuHeartbeatFailures
+    exp_alerts:
+    - exp_labels: *heartbeat_labels
+- name: recovery to zero resolves
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 1+0x6 0+0x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: DpuHeartbeatFailures
+    exp_alerts:
+    - exp_labels: *heartbeat_labels
+  - eval_time: 7m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+- name: recovery removes the series
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 1+0x6 stale
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: DpuHeartbeatFailures
+    exp_alerts:
+    - exp_labels: *heartbeat_labels
+  - eval_time: 7m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+- name: missing series does not fire
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: DpuHeartbeatFailures
+    exp_alerts: []
+- name: selector and scrape labels isolate alerts
+  interval: 1m
+  input_series:
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 1+0x10
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-b:9009",site="another-site"}'
+    values: 0+0x4 1+0x5
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="OtherProbe",probe_target="forge-dpu-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 6+0x10
+  - series: 'carbide_dpu_health_check_failed_count{probe_id="HeartbeatTimeout",probe_target="other-agent",failure="HeartbeatTimeout [Target: forge-dpu-agent]",job="core",instance="core-a:9009",site="qa-example"}'
+    values: 6+0x10
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: DpuHeartbeatFailures
+    exp_alerts:
+    - exp_labels: *heartbeat_labels

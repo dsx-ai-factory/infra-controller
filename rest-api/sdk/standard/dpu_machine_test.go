@@ -18,6 +18,7 @@ func TestDpuMachineUnmarshalJSON(t *testing.T) {
 		"infrastructureProviderId": "provider-1",
 		"siteId": "site-1",
 		"hostMachineId": "host-1",
+		"lldpNeighbors": [],
 		"dmiData": {"productSerial": "dpu-serial-1"},
 		"health": {
 			"observedAt": "2026-01-01T00:00:00Z",

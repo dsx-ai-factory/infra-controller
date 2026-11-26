@@ -59,6 +59,7 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
     fn from(args: Args) -> Self {
         match args.target {
             DeviceTargetArgs::Switch(target) => Self {
+                credential_overrides: None,
                 target: Some(match target.into_selection() {
                     SwitchSelection::SwitchIds(list) => {
                         rpc::forge::get_component_firmware_status_request::Target::SwitchIds(list)
@@ -71,6 +72,7 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
                 }),
             },
             DeviceTargetArgs::PowerShelf(target) => Self {
+                credential_overrides: None,
                 target: Some(match target.into_selection() {
                     PowerShelfSelection::PowerShelfIds(list) => {
                         rpc::forge::get_component_firmware_status_request::Target::PowerShelfIds(
@@ -85,6 +87,7 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
                 }),
             },
             DeviceTargetArgs::ComputeTray(target) => Self {
+                credential_overrides: None,
                 target: Some(match target.into_selection() {
                     ComputeTraySelection::MachineIds(list) => {
                         rpc::forge::get_component_firmware_status_request::Target::MachineIds(list)
@@ -97,6 +100,7 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
                 }),
             },
             DeviceTargetArgs::Rack(target) => Self {
+                credential_overrides: None,
                 target: Some(
                     rpc::forge::get_component_firmware_status_request::Target::RackIds(
                         target.into(),

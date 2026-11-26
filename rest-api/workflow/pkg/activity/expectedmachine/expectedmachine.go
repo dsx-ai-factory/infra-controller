@@ -89,15 +89,38 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// Initialize ExpectedMachine DAO (used for reconciliation of expected instances)
 	emDAO := cdbm.NewExpectedMachineDAO(mei.dbSession)
 
-	// Fetch ALL existing expected machines for site
-	filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedMachines, _, err := emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Machines that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedMachineIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
+	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
+		siteExpectedMachineIDsAndUpdated, err = emDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachine IDs and Updated timestamps for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Machines by UUID (unique identifier)
+	// Look up only the Expected Machines this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Machine count.
+	pageExpectedMachineIDs := []uuid.UUID{}
+	for _, rem := range expectedMachineInventory.GetExpectedMachines() {
+		id, serr := uuid.Parse(rem.GetId().GetValue())
+		if serr == nil {
+			pageExpectedMachineIDs = append(pageExpectedMachineIDs, id)
+		}
+	}
+
+	existingExpectedMachines := []cdbm.ExpectedMachine{}
+	if len(pageExpectedMachineIDs) > 0 {
+		filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedMachineIDs: pageExpectedMachineIDs}
+		existingExpectedMachines, _, err = emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Machines by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedMachine{}
 	for _, em := range existingExpectedMachines {
 		existingByID[em.ID] = &em
@@ -226,6 +249,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					BmcMacAddress:            reported.BmcMacAddress,
 					ChassisSerialNumber:      reported.ChassisSerialNumber,
 					Interfaces:               reported.Interfaces,
+					DpuPolicy:                reported.DpuPolicy,
 					BmcIpAddress:             reported.BmcIpAddress,
 					RackID:                   reported.RackID,
 					Name:                     reported.Name,
@@ -242,12 +266,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return err
 			})
 			if cerr != nil {
-				// Retry errors include earlier failures; classify the last attempt.
-				lastErr := errors.Unwrap(cerr)
-				if lastErr == nil {
-					lastErr = cerr
-				}
-				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+				if errors.Is(cerr, cdb.ErrXactAdvisoryLockFailed) {
 					logger.Warn().Err(cerr).Str("ID", emID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
 					continue
 				}
@@ -284,6 +303,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
 			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
+			dpuPolicyChanged(cur, reported) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
 			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
@@ -347,6 +367,12 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					retainBmcCredentials = cutil.GetPtr(reported.RetainsBmcCredentials())
 				}
 
+				// A NULL policy already means Inherit, so write only a real change.
+				var dpuPolicy *cdbm.ExpectedMachineDpuPolicy
+				if dpuPolicyChanged(cur, reported) {
+					dpuPolicy = reported.DpuPolicy
+				}
+
 				var hostLifecycleProfile *cdbm.HostLifecycleProfile
 				if reported.HostLifecycleProfile.HasSetFields() {
 					hostLifecycleProfile = &reported.HostLifecycleProfile
@@ -364,6 +390,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
+					DpuPolicy:                dpuPolicy,
 					IsDpfEnabled:             reported.IsDpfEnabled,
 					RetainBmcCredentials:     retainBmcCredentials,
 					HostLifecycleProfile:     hostLifecycleProfile,
@@ -372,12 +399,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return uerr
 			})
 			if uerr != nil {
-				// Retry errors include earlier failures; classify the last attempt.
-				lastErr := errors.Unwrap(uerr)
-				if lastErr == nil {
-					lastErr = uerr
-				}
-				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+				if errors.Is(uerr, cdb.ErrXactAdvisoryLockFailed) {
 					logger.Warn().Err(uerr).Str("ExpectedMachineID", cur.ID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
 					continue
 				}
@@ -391,7 +413,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
-		for _, em := range existingExpectedMachines {
+		for _, em := range siteExpectedMachineIDsAndUpdated {
 			if _, keep := reportedIDs[em.ID]; keep {
 				continue
 			}
@@ -644,4 +666,10 @@ func (mei ManageExpectedMachine) reconcilePendingBatches(parentCtx context.Conte
 		}
 	}
 	return parentCtx.Err()
+}
+
+// dpuPolicyChanged compares effective policies. A nil reported policy is an
+// unknown Core value and never overwrites the stored one.
+func dpuPolicyChanged(cur, reported *cdbm.ExpectedMachine) bool {
+	return reported.DpuPolicy != nil && cur.EffectiveDpuPolicy() != *reported.DpuPolicy
 }

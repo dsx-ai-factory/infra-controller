@@ -687,27 +687,33 @@ fn admin_reserve_first(ctx: &Ctx) -> eyre::Result<u64> {
     let admin = match admins.iter().find(|t| has_prefix(t)) {
         Some(t) => Some(*t),
         None if admins.len() <= 1 => admins.first().copied(),
-        None => eyre::bail!(
-            "{}: {} admin tables in the TOML and none has prefix {planned}",
-            path.display(),
-            admins.len()
-        ),
+        None => {
+            eyre::bail!(
+                "{}: {} admin tables in the TOML and none has prefix {planned}",
+                path.display(),
+                admins.len()
+            );
+        }
     };
     // Core requires `reserve_first` in an admin network table (its `NetworkDefinition` has
     // no default), so an absent key is an error, as is a value Core would reject. Only a
     // TOML with no admin table at all leaves the default standing.
     let reserved = match admin.and_then(|admin| admin.get("reserve_first")) {
-        None if admin.is_some() => eyre::bail!(
-            "{}: the admin table for {planned} has no reserve_first, which nico-api requires",
-            path.display()
-        ),
+        None if admin.is_some() => {
+            eyre::bail!(
+                "{}: the admin table for {planned} has no reserve_first, which nico-api requires",
+                path.display()
+            );
+        }
         None => ADMIN_RESERVED,
         Some(v) => match v.as_integer() {
             Some(n) if n >= 0 => n as u64,
-            _ => eyre::bail!(
-                "{}: [networks.admin] reserve_first = {v} is not a non-negative integer",
-                path.display()
-            ),
+            _ => {
+                eyre::bail!(
+                    "{}: [networks.admin] reserve_first = {v} is not a non-negative integer",
+                    path.display()
+                );
+            }
         },
     };
     Ok(reserved)
@@ -879,7 +885,7 @@ mod admin_segment_tests {
              \x20     [networks.aaa_other]\n      type = \"admin\"\n      prefix = \"10.10.70.0/24\"\n      reserve_first = 5\n\
              \x20     [networks.admin]\n      type = \"admin\"\n      prefix = \"10.10.60.0/24\"\n      reserve_first = 130\n",
         )
-        .unwrap();
+            .unwrap();
         let site_def = dir.path().join("site-def.yaml");
         std::fs::write(&site_def, EXAMPLE).unwrap();
         let sd = crate::sitedef::load(&site_def).unwrap();
@@ -949,7 +955,7 @@ mod admin_segment_tests {
             values.join("nico-core.yaml"),
             "nico-api:\n  siteConfig:\n    nicoApiSiteConfig: |\n      [networks.admin]\n      type = \"admin\"\n      prefix = \"10.10.60.0/24\"\n",
         )
-        .unwrap();
+            .unwrap();
         let site_def = dir.path().join("site-def.yaml");
         std::fs::write(&site_def, EXAMPLE).unwrap();
         let sd = crate::sitedef::load(&site_def).unwrap();
@@ -977,7 +983,7 @@ mod admin_segment_tests {
             values.join("nico-core.yaml"),
             "nico-api:\n  siteConfig:\n    nicoApiSiteConfig: |\n      [networks.admin]\n      type = \"admin\"\n      reserve_first = \"200\"\n",
         )
-        .unwrap();
+            .unwrap();
         let site_def = dir.path().join("site-def.yaml");
         std::fs::write(&site_def, EXAMPLE).unwrap();
         let sd = crate::sitedef::load(&site_def).unwrap();

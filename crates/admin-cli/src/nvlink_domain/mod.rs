@@ -3,10 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::fmt::Write;
+
 use carbide_uuid::rack::RackGroupId;
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
-use model::rack_type::RackCapabilityType;
+use model::nvlink_domain::NvLinkDomainMemberType;
 use prettytable::{Table, row};
 use rpc::admin_cli::OutputFormat;
 use rpc::forge;
@@ -30,12 +32,18 @@ pub(crate) enum Cmd {
         long_about = "Create immutable domain membership without configuring hardware.\n\n\
         While a declaration exists, the racks field of its rack group cannot be changed and the group \
         cannot be deleted. Site-wide expected-rack-group replace-all and erase are also blocked. \
-        Delete the declarations with nvlink-domain delete before these operations."
+        These restrictions apply until the declarations have been removed."
     )]
     Create(Create),
     /// Show one declaration or list declarations in UUID order
     Show(Show),
-    /// Delete a declaration and release its members without changing hardware
+    /// Request deletion of a domain; its positions remain reserved until cleanup
+    ///
+    /// Legacy declarations without controller state are removed immediately. In Created or
+    /// Discovering, the controller removes the domain and releases its positions on reconciliation.
+    /// From Maintenance onward, the domain enters Deleting and retains its positions pending
+    /// hardware teardown (https://github.com/dsx-ai-factory/infra-controller/issues/7819).
+    /// Use nvlink-domain show <ID> to check for removal: NOT_FOUND means the declaration is gone.
     Delete(Delete),
 }
 
@@ -43,11 +51,7 @@ pub(crate) enum Cmd {
 #[command(after_long_help = "\
 EXAMPLES:
 
-Declare a compute tray and an NVSwitch tray in an existing rack group:
-    $ nico-admin-cli nvlink-domain create group-01 \
-    --member 0:0:Compute --member 0:0:Switch
-
-Give the declaration an operator-facing name:
+Declare a named domain with a compute tray and an NVSwitch tray in an existing rack group:
     $ nico-admin-cli nvlink-domain create group-01 --name mini-a \
     --member 0:0:Compute --member 0:0:Switch
 
@@ -156,7 +160,7 @@ impl Run for Show {
 #[command(after_long_help = "\
 EXAMPLES:
 
-Delete a declaration and release its tray membership claims:
+Request deletion of a domain:
     $ nico-admin-cli nvlink-domain delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
@@ -203,6 +207,20 @@ async fn render(
                 "Member Positions"
             ]);
             for domain in domains.domains {
+                let mut member_positions = String::new();
+                for (index, member) in domain.members.iter().enumerate() {
+                    if index != 0 {
+                        member_positions.push_str(", ");
+                    }
+                    if let Some(rack_index) = member.rack_index {
+                        write!(member_positions, "{rack_index}")?;
+                    }
+                    member_positions.push(':');
+                    if let Some(slot_index) = member.slot_index {
+                        write!(member_positions, "{slot_index}")?;
+                    }
+                    write!(member_positions, ":{}", member.component_type)?;
+                }
                 table.add_row(row![
                     domain.id.map(|id| id.value).unwrap_or_default(),
                     domain
@@ -210,17 +228,7 @@ async fn render(
                         .map(|id| id.to_string())
                         .unwrap_or_default(),
                     domain.name.unwrap_or_default(),
-                    domain
-                        .members
-                        .iter()
-                        .map(|m| format!(
-                            "{}:{}:{}",
-                            m.rack_index.map(|v| v.to_string()).unwrap_or_default(),
-                            m.slot_index.map(|v| v.to_string()).unwrap_or_default(),
-                            m.component_type,
-                        ))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    member_positions,
                 ]);
             }
             if ctx.config.format == OutputFormat::Csv {
@@ -242,11 +250,8 @@ fn parse_member(value: &str) -> Result<forge::NvLinkDomainMember, String> {
     let [rack, slot, kind] = parts.as_slice() else {
         return Err("expected RACK_INDEX:SLOT_INDEX:TYPE".into());
     };
-    let component_type: RackCapabilityType =
+    let component_type: NvLinkDomainMemberType =
         kind.parse().map_err(|_| "type must be Compute or Switch")?;
-    if component_type == RackCapabilityType::PowerShelf {
-        return Err("type must be Compute or Switch".into());
-    }
     Ok(forge::NvLinkDomainMember {
         rack_index: Some(rack.parse().map_err(|_| "rack index must be a uint32")?),
         slot_index: Some(slot.parse().map_err(|_| "slot index must be a uint32")?),

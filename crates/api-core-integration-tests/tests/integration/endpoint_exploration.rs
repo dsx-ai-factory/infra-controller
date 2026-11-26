@@ -128,12 +128,10 @@ async fn explored_endpoint(
     env: &TestHarness,
     bmc_ip: IpAddr,
 ) -> Result<ExploredEndpoint, Box<dyn std::error::Error>> {
-    let mut txn = env.db_txn().await;
-    let endpoint = db::explored_endpoints::find_all_by_ip(bmc_ip, txn.as_mut())
+    let endpoint = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.api().database_connection)
         .await?
         .into_iter()
         .next()
         .ok_or_else(|| format!("expected endpoint {bmc_ip} to exist"))?;
-    txn.commit().await?;
     Ok(endpoint)
 }

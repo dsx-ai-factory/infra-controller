@@ -49,7 +49,11 @@ pub(crate) async fn spawn(
     let host_key =
         russh::keys::PrivateKey::read_openssh_file(&config.host_key_path).map_err(|error| {
             ReadingHostKeyFile {
-                path: config.host_key_path.as_path().to_string_lossy().to_string(),
+                path: config
+                    .host_key_path
+                    .as_path()
+                    .to_string_lossy()
+                    .into_owned(),
                 error,
             }
         })?;
@@ -210,6 +214,14 @@ pub(crate) struct ServerMetrics {
 }
 
 impl ServerMetrics {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new(
+            &opentelemetry::global::meter("ssh-console-test"),
+            &Config::default(),
+        )
+    }
+
     fn new(meter: &Meter, config: &Config) -> ServerMetrics {
         Self {
             total_clients: meter

@@ -4,6 +4,7 @@
 //! Persist whole-host reservations for commands sent through Scout.
 
 use carbide_uuid::machine::MachineId;
+use db::TransactionVending as _;
 use model::hardware_dispatch::{HardwareDispatchOwner, MlxAdminCommand};
 use rpc::forge::{
     ScoutStreamApiBoundMessage, ScoutStreamScoutBoundMessage,
@@ -43,8 +44,8 @@ async fn database_attempt<T>(
 
 /// Set a server-side statement bound as well as the outer attempt deadline.
 /// A dropped SQLx future must not leave the server waiting indefinitely.
-async fn database_transaction(pool: &PgPool) -> CarbideResult<db::Transaction<'_>> {
-    let mut txn = db::Transaction::begin(pool).await?;
+async fn database_transaction(pool: &PgPool) -> CarbideResult<db::Transaction<'static>> {
+    let mut txn = pool.txn_begin().await?;
     let query = "SELECT set_config('statement_timeout', $1, true)";
     sqlx::query(query)
         .bind(format!("{}ms", DATABASE_TIMEOUT.as_millis()))
@@ -158,14 +159,14 @@ pub(in crate::handlers) async fn accept_reply(
         let mut txn = database_transaction(pool).await?;
         if let Some((host, dispatch)) = db::hardware_dispatch::find(&mut txn, token).await?
             && dispatch.is_pending()
-        {
-            let HardwareDispatchOwner::MlxAdmin {
+            && let HardwareDispatchOwner::MlxAdmin {
                 machine_id: owner,
                 command,
-            } = dispatch.owner;
-            if owner == machine_id && completed(command, response) {
-                db::hardware_dispatch::settle(&mut txn, host, token, &dispatch.owner).await?;
-            }
+            } = dispatch.owner
+            && owner == machine_id
+            && completed(command, response)
+        {
+            db::hardware_dispatch::settle(&mut txn, host, token, &dispatch.owner).await?;
         }
         txn.commit().await?;
         Ok(())

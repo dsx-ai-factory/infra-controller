@@ -19,6 +19,7 @@
 
 use carbide_instrument::{Event, LabelValue};
 use carbide_uuid::switch::SwitchId;
+use db::TransactionVending as _;
 use model::switch::{Switch, SwitchControllerState, ValidatingState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -139,7 +140,12 @@ pub async fn handle_fetch_info(
                                 },
                             );
                         }
-                        let mut update_txn = ctx.services.db_pool.begin().await?;
+                        let mut update_txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if let Err(e) = db::switch::update_slot_and_tray(
                             &mut update_txn,
                             switch_id,
@@ -154,9 +160,15 @@ pub async fn handle_fetch_info(
                                     switch_id: switch_id.to_string(),
                                 },
                             );
-                            update_txn.rollback().await?;
+                            update_txn
+                                .rollback()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                         } else {
-                            update_txn.commit().await?;
+                            update_txn
+                                .commit()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                         }
                     }
                 }

@@ -27,6 +27,7 @@ use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
 use carbide_utils::HostPortPair;
 use hyper::http::StatusCode;
+use itertools::Itertools;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
 use rpc::site_explorer::{
@@ -237,7 +238,7 @@ pub(super) async fn show_html_all(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())
@@ -245,7 +246,8 @@ pub(super) async fn show_html_all(
 
     let mut extra_query_params = String::new();
     if vendor_filter != "all" {
-        extra_query_params.push_str(&format!("&vendor-filter={vendor_filter}"));
+        extra_query_params.push_str("&vendor-filter=");
+        extra_query_params.push_str(&vendor_filter);
     }
     if is_errors_only {
         extra_query_params.push_str("&errors-only=true");
@@ -360,7 +362,7 @@ pub(super) async fn show_html_unpaired(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())
@@ -368,7 +370,8 @@ pub(super) async fn show_html_unpaired(
 
     let mut extra_query_params = String::new();
     if vendor_filter != "all" {
-        extra_query_params.push_str(&format!("&vendor-filter={vendor_filter}"));
+        extra_query_params.push_str("&vendor-filter=");
+        extra_query_params.push_str(&vendor_filter);
     }
     if is_errors_only {
         extra_query_params.push_str("&errors-only=true");
@@ -630,6 +633,10 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
 
 /// Fetch a single explored endpoint
 /// TODO: The API is rather inefficient since it loads all of them and filters client side
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn fetch_explored_endpoint(
     api: &Api,
     endpoint_ip: String,
@@ -1444,18 +1451,13 @@ fn machine_setup_status_to_string(status: Option<&MachineSetupStatus>) -> String
         None => "Unable to fetch Machine Setup Status".to_string(),
         Some(s) if s.is_done => "OK".to_string(),
         Some(s) => {
-            let diffs_string = s
-                .diffs
-                .iter()
-                .map(|diff| {
-                    format!(
-                        "{} is '{}' expected '{}'",
-                        diff.key, diff.actual, diff.expected
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Mismatch: {diffs_string}")
+            let diffs = s.diffs.iter().format_with(", ", |diff, formatter| {
+                formatter(&format_args!(
+                    "{} is '{}' expected '{}'",
+                    diff.key, diff.actual, diff.expected
+                ))
+            });
+            format!("Mismatch: {diffs}")
         }
     }
 }

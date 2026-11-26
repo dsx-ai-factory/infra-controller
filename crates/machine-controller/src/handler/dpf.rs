@@ -30,6 +30,8 @@ use carbide_dpf::{
 };
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
+use itertools::Itertools;
 use model::expected_machine::ExpectedMachine;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
@@ -1057,7 +1059,12 @@ async fn handle_dpf_reprovisioning(
         )?;
 
         let outcome = StateHandlerOutcome::transition(next);
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &state.host_snapshot.id)
             .await?;
         return Ok(outcome.with_txn(txn));
@@ -1111,9 +1118,9 @@ pub(super) async fn handle_dpf_state(
                 .dpu_snapshots
                 .iter()
                 .zip(&deployment_types)
-                .map(|(dpu, deployment_type)| format!("{}={deployment_type:?}", dpu.id))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(dpu, deployment_type), f| {
+                    f(&format_args!("{}={deployment_type:?}", dpu.id))
+                });
             let error = format!("{error}: {selections}");
 
             return Ok(dpf_deployment_selection_failed(state, error.as_str()));

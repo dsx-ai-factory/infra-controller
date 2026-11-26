@@ -35,14 +35,22 @@ pub(crate) async fn find_interfaces(
 ) -> Result<Response<rpc::InterfaceList>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
     let rpc::InterfaceSearchQuery { id, ip } = request.into_inner();
 
     let interfaces: Vec<rpc::MachineInterface> = match (id, ip) {
-        (Some(id), _) => vec![db::machine_interface::find_one(&mut txn, id).await?.into()],
+        (Some(id), _) => match db::machine_interface::find_one(api.pg_pool(), id).await {
+            Ok(interface) => vec![interface.into()],
+            Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => {
+                return Err(CarbideError::NotFoundError {
+                    kind: "Machine Interface",
+                    id: id.to_string(),
+                }
+                .into());
+            }
+            Err(err) => return Err(err.into()),
+        },
         (None, Some(ip)) => match IpAddr::from_str(ip.as_ref()) {
-            Ok(ip) => match db::machine_interface::find_by_ip(&mut txn, ip).await? {
+            Ok(ip) => match db::machine_interface::find_by_ip(api.pg_pool(), ip).await? {
                 Some(interface) => vec![interface.into()],
                 None => {
                     return Err(CarbideError::internal(format!(
@@ -58,7 +66,7 @@ pub(crate) async fn find_interfaces(
                 .into());
             }
         },
-        (None, None) => match db::machine_interface::find_all(&mut txn).await {
+        (None, None) => match db::machine_interface::find_all(api.pg_pool()).await {
             Ok(machine_interfaces) => machine_interfaces
                 .into_iter()
                 .map(|i| i.into())
@@ -66,8 +74,6 @@ pub(crate) async fn find_interfaces(
             Err(error) => return Err(error.into()),
         },
     };
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::InterfaceList { interfaces }))
 }

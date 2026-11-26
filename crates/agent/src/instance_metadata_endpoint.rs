@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::fmt::Write;
 use std::sync::Arc;
 
 use ::rpc::carbide_tls_client::CarbideClientConfig;
@@ -335,7 +336,7 @@ fn extract_metadata(
             },
             SITENAME_CATEGORY => (
                 StatusCode::OK,
-                metadata.sitename.clone().unwrap_or(String::new()),
+                metadata.sitename.clone().unwrap_or_default(),
             ),
             USER_DATA_CATEGORY => (StatusCode::OK, metadata.user_data.clone()),
             ASN_CATEGORY => (StatusCode::OK, network_config.asn.to_string()),
@@ -433,7 +434,8 @@ async fn get_devices(
     let mut response = String::new();
     if let Some(devices) = &metadata.ib_devices {
         for (index, device) in devices.iter().enumerate() {
-            response.push_str(&format!("{}={}\n", index, device.pf_guid));
+            writeln!(response, "{index}={}", device.pf_guid)
+                .expect("writing to a String cannot fail");
         }
 
         (StatusCode::OK, response)
@@ -468,7 +470,9 @@ async fn get_instances(
         let mut response = String::new();
         for (index, instance) in dev.instances.iter().enumerate() {
             match &instance.ib_guid {
-                Some(guid) => response.push_str(&format!("{index}={guid}\n")),
+                Some(guid) => {
+                    writeln!(response, "{index}={guid}").expect("writing to a String cannot fail");
+                }
                 None => continue,
             }
         }
@@ -515,10 +519,12 @@ async fn get_instance_attributes(
         let mut response = String::new();
 
         if let Some(_ib_guid) = &inst.ib_guid {
-            response += &(GUID.to_owned() + "\n")
+            response.push_str(GUID);
+            response.push('\n');
         }
         if let Some(_ib_partition_id) = &inst.ib_partition_id {
-            response += &(IB_PARTITION.to_owned() + "\n")
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 

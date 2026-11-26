@@ -92,6 +92,7 @@ mod test {
     use model::site_explorer::{ComponentIntegrityEntry, EndpointExplorationReport};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const CLASS: &str = "nvidia_dgx-gb300";
 
@@ -126,7 +127,7 @@ mod test {
     /// `first_seen` has to survive: it is what dates the drift.
     #[crate::sqlx_test]
     async fn a_second_set_is_recorded_beside_the_first(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let eight = attester_set((0..8).map(|n| entry(&format!("GPU_{n}"), "SPDM")).collect());
         let seven = attester_set((0..7).map(|n| entry(&format!("GPU_{n}"), "SPDM")).collect());
 
@@ -164,7 +165,7 @@ mod test {
     /// for the other.
     #[crate::sqlx_test]
     async fn counts_tally_the_attesters_and_endpoints_of_each_set(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let common = attester_set(
             (0..3)
                 .map(|n| entry(&format!("HGX_ERoT_GPU_{n}"), "SPDM"))
@@ -228,7 +229,7 @@ mod test {
     /// attesters, so the digest is keyed per class rather than on its own.
     #[crate::sqlx_test]
     async fn one_digest_can_belong_to_two_classes(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let shared = attester_set(vec![entry("ERoT_BMC_0", "SPDM")]);
 
         assert!(record(&mut txn, CLASS, &shared).await.unwrap());

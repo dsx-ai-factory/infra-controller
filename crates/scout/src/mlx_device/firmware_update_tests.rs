@@ -522,14 +522,16 @@ fn core_options_with_usable_identity(fixture: &Path) -> Options {
     options
 }
 
-/// The normal test prerequisite builds this cross-package binary beside `deps`.
+/// The normal test prerequisite builds this cross-package binary in the profile directory.
 fn supervisor_binary() -> PathBuf {
     let executable = std::env::current_exe().unwrap();
     let helper = executable
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("test executable has no fifth-level parent directory")
         .join("mlx-firmware-supervisor");
     assert!(
         helper.is_file(),

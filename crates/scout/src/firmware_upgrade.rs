@@ -16,6 +16,7 @@
  */
 
 use std::ffi::OsString;
+use std::fmt::Write;
 use std::time::Duration;
 
 use carbide_instrument::Instrumentation;
@@ -364,7 +365,13 @@ async fn run_firmware_upgrade(
                 ),
                 reason => reason.to_string(),
             };
-            let cleanup = cleanup_errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+            let mut cleanup = String::new();
+            for (index, error) in cleanup_errors.iter().enumerate() {
+                if index > 0 {
+                    cleanup.push_str("; ");
+                }
+                write!(cleanup, "{error}").expect("writing to a String cannot fail");
+            }
             let error = format!(
                 "{reason}; cleanup: {cleanup}; inputs retained at {}; hardware access remains blocked pending operator reconciliation; process termination does not establish that device-internal work stopped",
                 attempt.staging.work_dir().display(),
@@ -399,6 +406,7 @@ impl FirmwareUpgradeFixture {
     /// Use `LIBMLX_TEST_STATE_DIRECTORY` when scratch ancestors are shared.
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
 
         let root = match std::env::var_os("LIBMLX_TEST_STATE_DIRECTORY") {
             Some(parent) => tempfile::tempdir_in(parent),
@@ -410,9 +418,11 @@ impl FirmwareUpgradeFixture {
         let executable = std::env::current_exe().expect("locate Scout test executable");
         let helper = executable
             .parent()
-            .expect("test executable directory")
-            .parent()
-            .expect("Cargo target directory")
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has no fifth-level parent directory")
             .join("mlx-firmware-supervisor");
         assert!(
             helper.is_file(),

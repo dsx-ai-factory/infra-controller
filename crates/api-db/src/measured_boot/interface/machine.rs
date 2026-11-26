@@ -23,7 +23,6 @@
 use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use measured_boot::records::{MeasurementJournalRecord, MeasurementMachineState};
-use sqlx::PgConnection;
 
 use crate::DatabaseError;
 use crate::db_read::DbReader;
@@ -62,10 +61,10 @@ pub async fn get_latest_journal_for_id(
 
 /// get_candidate_machine_record_by_id returns a CandidateMachineRecord row.
 pub async fn get_candidate_machine_record_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> Result<Option<CandidateMachineRecord>, DatabaseError> {
-    common::get_object_for_id(txn, machine_id)
+    common::get_object_for_id(conn, machine_id)
         .await
         .map_err(|e| e.with_op_name("get_candidate_machine_record_by_id"))
 }

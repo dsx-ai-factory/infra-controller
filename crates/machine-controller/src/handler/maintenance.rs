@@ -25,7 +25,7 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
-use db::machine as db_machine;
+use db::{TransactionVending as _, machine as db_machine};
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -71,33 +71,42 @@ pub(super) async fn handle_maintenance(
         ));
     }
 
-    match operation {
-        MachineMaintenanceOperation::PowerOn => {
-            handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
-        }
-        MachineMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
-        }
-        MachineMaintenanceOperation::Reset { graceful } => {
-            handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
-        }
-        MachineMaintenanceOperation::Reboot => {
-            invoke_power_operation(
-                host_machine_id,
-                mh_snapshot,
-                request,
-                ctx,
-                PowerAction::GracefulRestart,
-            )
-            .await
-        }
-        MachineMaintenanceOperation::AcPowercycle { state } => {
-            handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
-        }
-        MachineMaintenanceOperation::ChassisReset { chassis_id } => {
-            handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                MachineMaintenanceOperation::PowerOn => {
+                    handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
+                }
+                MachineMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reset { graceful } => {
+                    handle_reset(host_machine_id, mh_snapshot, request, ctx, *graceful).await
+                }
+                MachineMaintenanceOperation::Reboot => {
+                    invoke_power_operation(
+                        host_machine_id,
+                        mh_snapshot,
+                        request,
+                        ctx,
+                        PowerAction::GracefulRestart,
+                    )
+                    .await
+                }
+                MachineMaintenanceOperation::AcPowercycle { state } => {
+                    handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
+                }
+                MachineMaintenanceOperation::ChassisReset { chassis_id } => {
+                    handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id)
+                        .await
+                }
+            }
+        },
+    )
+    .await
 }
 
 async fn handle_power_on(
@@ -424,7 +433,12 @@ async fn finish_maintenance(
         return Ok(StateHandlerOutcome::transition(next_state));
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     if let db::ConditionalWrite::NotApplied(reason) =
         db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id, request).await?
     {

@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use carbide_site_health_probe_api::metrics::{
     EXPECTED_RECORDS, GAUGES, Gauge, HOST_FIRMWARE_REQUESTS, HOST_PREDICATES_KNOWN, HOST_READ_MODE,
@@ -46,7 +46,9 @@ use prometheus::{GaugeVec, Opts};
 use tokio::time::Instant;
 
 use crate::readers::rest_inventory::{REST_RESOURCES, RestTotalsData, SiteMatchData};
-use crate::snapshot::{AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData};
+use crate::snapshot::{
+    AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData, unix_millis,
+};
 use crate::state::store::{ALL_FAMILIES, SnapshotStore};
 
 /// How long a vanished label set is published as 0 before it is dropped.
@@ -71,11 +73,11 @@ fn flag(value: bool) -> String {
     value.to_string()
 }
 
-/// Unix seconds as the collector publishes them.
+/// Unix seconds at millisecond precision, as the collector publishes them.
+/// VictoriaMetrics rounds finer values, and clients compare the stored value
+/// with the API value bit for bit (#9483).
 pub(crate) fn unix_seconds(at: SystemTime) -> f64 {
-    at.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
+    unix_millis(at) as f64 / 1000.0
 }
 
 pub(crate) fn units_of(snap: &dyn AnySnapshot) -> Option<&UnitsData> {
@@ -566,6 +568,7 @@ impl SnapshotSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use std::thread;
+    use std::time::UNIX_EPOCH;
 
     use carbide_site_health_probe_api::metrics::PREFIX;
     use carbide_site_health_probe_api::{

@@ -55,7 +55,9 @@ pub(super) async fn list(State(state): State<Arc<NvueState>>) -> Response {
         "state": { "up": {} },
     });
     if let Some(mac) = config.management_mac {
-        management["mac"] = json!(mac.to_string().to_ascii_lowercase());
+        let mut mac = mac.to_string();
+        mac.make_ascii_lowercase();
+        management["mac"] = json!(mac);
     }
     interfaces.insert(
         "eth0".to_string(),

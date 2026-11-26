@@ -80,6 +80,7 @@ func TestAddGeneratedBodyFormWithPrompter(t *testing.T) {
 		{name: "prompted JSON", run: testGeneratedBodyFormKeepsWholeJSONEscapeHatch},
 		{name: "required body modes", run: testGeneratedBodyFormRequiredBodyDoesNotOfferNone},
 		{name: "supplied body", run: testGeneratedBodyFormPreservesSuppliedBody},
+		{name: "firmware guided credentials", run: testGeneratedBodyFormFirmwareGuidedCredentials},
 	} {
 		t.Run(test.name, test.run)
 	}
@@ -93,6 +94,7 @@ func TestBuildGeneratedBodyFormObject(t *testing.T) {
 		{name: "Site before VPC selectors", run: testGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors},
 		{name: "nested tray Site selection", run: testGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite},
 		{name: "SKU fetch failure restores scope", run: testBuildGeneratedBodyFormObjectRestoresScopeAfterSKUFailure},
+		{name: "sensitive nested arrays and JSON", run: testGeneratedBodyFormSensitiveNestedArrays},
 	} {
 		t.Run(test.name, test.run)
 	}
@@ -792,4 +794,93 @@ func testBuildGeneratedBodyFormObjectRestoresScopeAfterSKUFailure(t *testing.T) 
 	assert.Equal(t, "machine-site", scopeAtFetch.SiteID)
 	assert.Empty(t, scopeAtFetch.SiteName)
 	assert.Equal(t, originalScope, session.Scope)
+}
+
+func TestPromptGeneratedJSONField(t *testing.T) {
+	info := requireGeneratedInfo(t, "tray firmware")
+	for _, alias := range []string{"downloadCredentials", "authenticationData"} {
+		t.Run(alias, func(t *testing.T) {
+			var field appcli.GeneratedCommandBodyFormField
+			for _, candidate := range info.BodyFormFields {
+				if candidate.JSONName == alias {
+					field = candidate
+					break
+				}
+			}
+			require.Equal(t, alias, field.JSONName)
+			prompter := &queuedGeneratedBodyPrompter{secrets: []string{`{"shared":"synthetic-secret"}`}}
+			got, included, err := promptGeneratedJSONField(field, alias, prompter)
+			require.NoError(t, err)
+			require.True(t, included)
+			require.Equal(t, map[string]interface{}{"shared": "synthetic-secret"}, got)
+			require.Empty(t, prompter.secrets)
+		})
+	}
+}
+
+func testGeneratedBodyFormFirmwareGuidedCredentials(t *testing.T) {
+	t.Helper()
+	info := generatedCommandInfoByName(t, "tray firmware-all")
+	for _, tc := range []struct {
+		name        string
+		authChoices []string
+		secrets     []string
+		wantAuth    map[string]interface{}
+	}{
+		{"shared", []string{"guided", "skip"}, []string{"shared-value"}, map[string]interface{}{"shared": "shared-value"}},
+		{"per-component", []string{"guided", "guided"}, []string{"", "switch-value", "", ""}, map[string]interface{}{"perComponent": map[string]interface{}{"nvswitch": "switch-value"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			choices := append([]string{"guided"}, tc.authChoices...)
+			choices = append(choices, "skip", "skip", "skip") // device overrides, preferred alias, filter
+			prompter := &queuedGeneratedBodyPrompter{
+				choices: choices, confirms: []bool{false, false, false},
+				secrets: append([]string(nil), tc.secrets...),
+				texts:   []string{"", "bundle-v1"}, // ruleId and version remain ordinary inputs
+			}
+			args, err := addGeneratedBodyFormWithPrompter(&Session{Scope: Scope{SiteID: "site-1"}}, info, nil, nil, prompter)
+			require.NoError(t, err)
+			require.Len(t, args, 2)
+			require.Equal(t, "--data", args[0])
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(args[1]), &body))
+			require.Equal(t, map[string]interface{}{"siteId": "site-1", "version": "bundle-v1", "authenticationData": tc.wantAuth}, body)
+			require.Empty(t, prompter.secrets)
+			require.Empty(t, prompter.texts)
+			require.Empty(t, prompter.choices)
+		})
+	}
+}
+
+func testGeneratedBodyFormSensitiveNestedArrays(t *testing.T) {
+	t.Helper()
+	info := appcli.GeneratedCommandInfo{
+		Name: "example create", BodyRootType: "object",
+		BodyFormFields: []appcli.GeneratedCommandBodyFormField{
+			{JSONName: "credentials", Type: "array", ItemType: "object", Properties: []appcli.GeneratedCommandBodyFormField{
+				{JSONName: "entries", Type: "array", ItemType: "object", Properties: []appcli.GeneratedCommandBodyFormField{
+					{JSONName: "details", Type: "object"},
+					{JSONName: "values", Type: "array", ItemType: "string"},
+				}},
+			}},
+			{JSONName: "name", Type: "string"},
+		},
+	}
+	prompter := &queuedGeneratedBodyPrompter{
+		choices: []string{"guided", "guided", "json"}, confirms: []bool{false, false},
+		secrets: []string{`{"value":"nested-value"}`, "first-value,second-value"},
+		texts:   []string{"visible-name"},
+	}
+	body, err := buildGeneratedBodyFormObject(nil, info, nil, prompter)
+	require.NoError(t, err)
+	require.Equal(t, map[string]interface{}{
+		"credentials": []map[string]interface{}{{"entries": []map[string]interface{}{{
+			"details": map[string]interface{}{"value": "nested-value"},
+			"values":  []interface{}{"first-value", "second-value"},
+		}}}},
+		"name": "visible-name",
+	}, body)
+	require.Empty(t, prompter.secrets)
+	require.Empty(t, prompter.texts)
+	require.Empty(t, prompter.choices)
 }

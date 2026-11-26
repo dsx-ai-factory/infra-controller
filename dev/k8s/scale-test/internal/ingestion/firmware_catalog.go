@@ -49,7 +49,11 @@ func firmwareCatalogRequest(c probeapi.ConfigResponse, vendor, model string, s F
 			current = target.Version == s.Firmware.TargetVersion
 		}
 	}
-	body := &corev1.UpsertHostFirmwareConfigRequest{Vendor: vendor, Model: model, ExplicitStartNeeded: new(true), Ordering: slices.Sorted(maps.Keys(ordering)), Components: []*corev1.UpsertHostFirmwareComponentConfig{{Type: kind, Firmware: []*corev1.HostFirmwareVersionConfig{{Version: s.Firmware.TargetVersion, Default: true, InstallOnlySpecified: true, Artifacts: []*corev1.HostFirmwareArtifact{{Url: s.Firmware.ArtifactURL, Sha256: new(s.Firmware.ArtifactSHA256)}}}}}}}
+	var refs []*corev1.HostFirmwareComponentRef
+	for _, component := range slices.Sorted(maps.Keys(ordering)) {
+		refs = append(refs, &corev1.HostFirmwareComponentRef{Type: component})
+	}
+	body := &corev1.UpsertHostFirmwareConfigRequest{Vendor: vendor, Model: model, ExplicitStartNeeded: new(true), ComponentOrdering: refs, Components: []*corev1.UpsertHostFirmwareComponentConfig{{Type: kind, Firmware: []*corev1.HostFirmwareVersionConfig{{Version: s.Firmware.TargetVersion, Default: true, InstallOnlySpecified: true, Artifacts: []*corev1.HostFirmwareArtifact{{Url: s.Firmware.ArtifactURL, Sha256: new(s.Firmware.ArtifactSHA256)}}}}}}}
 	return body, !current, nil
 }
 
@@ -155,7 +159,7 @@ func (f *firmwareRun) catalog(ctx context.Context, w *writer.Writer, end time.Ti
 		if attempt == 1 {
 			return instanceIssue("firmware catalog ordering rejected: model has runtime components the probe cannot see; set the runtime ordering manually")
 		}
-		body.Ordering = []corev1.HostFirmwareComponentType{body.Components[0].Type}
+		body.ComponentOrdering = []*corev1.HostFirmwareComponentRef{{Type: body.Components[0].Type}}
 		key += "-selected-order"
 	}
 	if receipt.Kind == writer.Failed {

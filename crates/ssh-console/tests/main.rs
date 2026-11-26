@@ -691,6 +691,40 @@ async fn test_ssh_console_log_rotation() -> eyre::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssh_listener_accepts_connections_before_the_first_api_reply() -> eyre::Result<()> {
+    // Every API reply arrives long after the deadline for the listener.
+    const API_REPLY_DELAY: Duration = Duration::from_secs(30);
+    const LISTENER_DEADLINE: Duration = Duration::from_secs(10);
+    if std::env::var("REPO_ROOT").is_err() {
+        tracing::info!("Skipping running ssh-console integration tests, as REPO_ROOT is not set");
+        return Ok(());
+    }
+    let mock_api_server = ssh_console_mock_api_server::MockApiServer {
+        mock_hosts: Arc::new(Vec::new()),
+        reply_delay: Some(API_REPLY_DELAY),
+    }
+    .spawn()
+    .await
+    .context("error spawning mock API server")?;
+
+    let (_handle, _session) = tokio::time::timeout(LISTENER_DEADLINE, async {
+        let handle = ssh_console_test_helper::spawn(mock_api_server.addr.port(), None).await?;
+        let session = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            handle.addr,
+            PermissiveSshClient,
+        )
+        .await
+        .context("error connecting to the SSH listener")?;
+        Ok::<_, eyre::Error>((handle, session))
+    })
+    .await
+    .context("the SSH listener accepted no connection while the first API reply was pending")??;
+
+    Ok(())
+}
+
 #[ctor::ctor(unsafe)]
 fn setup_test_logging() {
     api_test_helper::setup_logging()

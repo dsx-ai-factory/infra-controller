@@ -19,6 +19,7 @@
 
 use carbide_uuid::machine::HostMachineId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -31,7 +32,7 @@ use model::machine::{
     ManagedHostState, ManagedHostStateSnapshot, MeasuringState, ReadyBootConfigState,
     SpdmMeasuringState, ValidationState,
 };
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate::context::MachineStateHandlerContextObjects;
@@ -57,21 +58,22 @@ impl StateControllerIO for MachineStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "machine_state_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        db::managed_host::load_host_ids(txn).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        db::managed_host::load_host_ids(pool).await
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         machine_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let mut retstate = db::managed_host::load_snapshot(
-            txn,
+            db,
             machine_id,
             model::machine::LoadSnapshotOptions {
                 include_history: false,
@@ -87,7 +89,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 only_astra: false,
             };
             let dpa_snapshots =
-                db::dpa_interface::find_by_machine_id(&mut *txn, *machine_id, dpa_search_config)
+                db::dpa_interface::find_by_machine_id(&mut *db, *machine_id, dpa_search_config)
                     .await?;
             retstate.dpa_interface_snapshots = dpa_snapshots;
         };
@@ -97,7 +99,6 @@ impl StateControllerIO for MachineStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

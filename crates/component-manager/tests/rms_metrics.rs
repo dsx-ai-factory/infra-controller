@@ -29,6 +29,7 @@ use component_manager::rms::{RmsBackend, rms_rack_firmware_update_manager};
 use component_manager::{
     FirmwareExpectationError, RackFirmwareExpectationsRequest, RackFirmwareUpdateManager,
 };
+use db::TransactionVending as _;
 use librms::RackManagerError;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -46,7 +47,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let peer_mac = "AA:BB:CC:DD:EE:02".parse().unwrap();
     let profile_id = RackProfileId::new("rms-metrics");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::rack::create(
         &mut txn,
         &rack_id,
@@ -176,7 +177,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     for call in calls {
         let nodes = &call.nodes.as_ref().unwrap().nodes;
         assert_eq!(nodes.len(), 2);
-        assert!(nodes.iter().all(|node| node.rack_id == rack_id.to_string()));
+        assert!(nodes.iter().all(|node| node.rack_id == rack_id.as_str()));
         assert_eq!(
             nodes
                 .iter()

@@ -78,6 +78,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
         }),
         tenant_interfaces: vec![
             FlatInterfaceConfig {
+                vpc_peer_vnis: vec![200, 10],
                 // SLAAC leaves the host address empty even when an older
                 // sidecar contains one. The current entry must stay intact.
                 addresses: vec![InterfaceAddressConfig {
@@ -152,6 +153,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
             "IPv6-only SLAAC interface preserves empty current fields",
             tenants[0],
             &[
+                ("VPC Peer VNIs", "200, 10"),
                 ("IP", ""),
                 ("Gateway", ""),
                 ("Prefix", ""),
@@ -167,6 +169,7 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
             "legacy IPv6 sidecar",
             tenants[1],
             &[
+                ("VPC Peer VNIs", ""),
                 ("IPv6 IP", "2001:db8:3::10"),
                 ("IPv6 Interface Prefix", "2001:db8:3::10/128"),
                 ("IPv6 Prefix", ""),
@@ -208,6 +211,29 @@ async fn network_config_displays_ipv6_and_preserves_compatibility_fields() {
                 "{scenario}: missing row {label:?} = {value:?} in:\n{table}",
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn network_config_displays_pxe_service_url() {
+    for (url, expected) in [
+        (
+            Some("http://pxe.example.com:8080/"),
+            "http://pxe.example.com:8080/",
+        ),
+        (None, ""),
+    ] {
+        let output = network_config_output(ManagedHostNetworkConfigResponse {
+            nico_pxe_service_url: url.map(str::to_string),
+            ..Default::default()
+        })
+        .await;
+        let row = output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('|')?.strip_suffix('|'))
+            .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>())
+            .find(|row| row.first() == Some(&"PXE Service URL"));
+        assert_eq!(row, Some(vec!["PXE Service URL", expected]), "{output}");
     }
 }
 

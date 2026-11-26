@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -173,7 +174,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 			wantType:      cutil.GetPtr(cdbm.MachineCapabilityTypeMemory),
 		},
 		{
-			name: "success retrieving & filtering by Capability type and hasInstanceType set to true",
+			name: "success retrieving & filtering by Capability type and hasInstanceType set to false",
 			org:  ipOrg,
 			args: args{
 				siteID:          cutil.GetPtr(st1.ID),
@@ -262,7 +263,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 				q.Set("siteId", tt.args.siteID.String())
 			}
 			if tt.args.hasInstanceType != nil {
-				q.Set("hasInstanceType", fmt.Sprintf("%v", *tt.args.hasInstanceType))
+				q.Set("hasInstanceType", strconv.FormatBool(*tt.args.hasInstanceType))
 			}
 			if tt.args.capabilityType != nil {
 				q.Set("type", *tt.args.capabilityType)
@@ -280,7 +281,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 				q.Set("vendor", *tt.args.vendor)
 			}
 			if tt.args.count != nil {
-				q.Set("count", fmt.Sprintf("%v", *tt.args.count))
+				q.Set("count", strconv.Itoa(*tt.args.count))
 			}
 			if tt.args.deviceType != nil {
 				q.Set("devicetype", *tt.args.deviceType)
@@ -289,10 +290,10 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 				q["inactiveDevices"] = tt.args.inactiveDevices
 			}
 			if tt.args.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.args.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.args.pageNumber))
 			}
 			if tt.args.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.args.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.args.pageSize))
 			}
 			if tt.args.orderBy != nil {
 				q.Set("orderBy", *tt.args.orderBy)

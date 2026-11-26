@@ -28,19 +28,19 @@ use rpc::forge::forge_agent_control_response::LegacyAction;
 use rpc::forge_agent_control_response::Action;
 
 trait DbMachineCleanupExt {
-    async fn clear_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>);
+    async fn clear_cleanup_time(&self, txn: &mut db::Transaction<'_>);
 
-    async fn update_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>);
+    async fn update_cleanup_time(&self, txn: &mut db::Transaction<'_>);
 }
 
 impl DbMachineCleanupExt for model::machine::AnyMachine {
-    async fn clear_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>) {
+    async fn clear_cleanup_time(&self, txn: &mut db::Transaction<'_>) {
         db::machine::clear_cleanup_time(&self.id, txn.as_mut())
             .await
             .expect("machine cleanup time should be cleared");
     }
 
-    async fn update_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>) {
+    async fn update_cleanup_time(&self, txn: &mut db::Transaction<'_>) {
         db::machine::update_cleanup_time(self, txn.as_mut())
             .await
             .expect("machine cleanup time should be updated");
@@ -135,10 +135,8 @@ async fn assigned_discovery_boot_does_not_reset_without_cleanup_timestamp(pool: 
     host.clear_cleanup_time(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host.db_machine(&mut txn).await;
+    let host = mh.host.machine().await;
     assert!(host.status.last_cleanup_time.is_none());
-    txn.rollback().await.unwrap();
 
     mh.host.reboot_completed().await;
     let response = mh.host.forge_agent_control().await;
@@ -187,10 +185,8 @@ async fn waiting_for_scout_upgrade_returns_task_without_cleanup_timestamp(pool: 
     host.clear_cleanup_time(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host.db_machine(&mut txn).await;
+    let host = mh.host.machine().await;
     assert!(host.status.last_cleanup_time.is_none());
-    txn.rollback().await.unwrap();
 
     let response = mh.host.forge_agent_control().await;
     let Some(Action::FirmwareUpgrade(firmware_upgrade)) = response.action.as_ref() else {

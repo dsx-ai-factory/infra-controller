@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -397,8 +398,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 		desc string
 
 		input                      DomainUpdateInput
-		paramDomain                *Domain
 		expectedError              bool
+		wantTimestampChange        bool
 		expectedHostname           *string
 		expectedOrg                *string
 		expectedControllerDomainID *uuid.UUID
@@ -412,8 +413,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				DomainID: domain.ID,
 				Hostname: cutil.GetPtr("updated.com"),
 			},
-			paramDomain:                domain,
 			expectedError:              false,
+			wantTimestampChange:        true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                &domain.Org,
 			expectedControllerDomainID: domain.ControllerDomainID,
@@ -426,7 +427,6 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				DomainID: uuid.New(),
 				Hostname: cutil.GetPtr("updated.com"),
 			},
-			paramDomain:                domain,
 			expectedError:              true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                &domain.Org,
@@ -439,8 +439,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				DomainID: domain.ID,
 				Org:      cutil.GetPtr("updatedOrg"),
 			},
-			paramDomain:                domain,
 			expectedError:              false,
+			wantTimestampChange:        true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                cutil.GetPtr("updatedOrg"),
 			expectedControllerDomainID: domain.ControllerDomainID,
@@ -452,8 +452,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				DomainID:           domain.ID,
 				ControllerDomainID: &updatedControllerDomainID,
 			},
-			paramDomain:                domain,
 			expectedError:              false,
+			wantTimestampChange:        true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                cutil.GetPtr("updatedOrg"),
 			expectedControllerDomainID: &updatedControllerDomainID,
@@ -465,8 +465,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				DomainID: domain.ID,
 				Status:   cutil.GetPtr(DomainStatusReady),
 			},
-			paramDomain:                domain,
 			expectedError:              false,
+			wantTimestampChange:        true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                cutil.GetPtr("updatedOrg"),
 			expectedControllerDomainID: &updatedControllerDomainID,
@@ -481,8 +481,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 				ControllerDomainID: &updatedControllerDomainID,
 				Status:             cutil.GetPtr(DomainStatusReady),
 			},
-			paramDomain:                domain2,
 			expectedError:              false,
+			wantTimestampChange:        true,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                cutil.GetPtr("updatedOrg"),
 			expectedControllerDomainID: &updatedControllerDomainID,
@@ -494,8 +494,8 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 			input: DomainUpdateInput{
 				DomainID: domain2.ID,
 			},
-			paramDomain:                domain2,
 			expectedError:              false,
+			wantTimestampChange:        false,
 			expectedHostname:           cutil.GetPtr("updated.com"),
 			expectedOrg:                cutil.GetPtr("updatedOrg"),
 			expectedControllerDomainID: &updatedControllerDomainID,
@@ -504,6 +504,12 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := dsd.GetByID(ctx, tc.tx, tc.input.DomainID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := dsd.Update(ctx, tc.tx, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err == nil {
@@ -517,9 +523,7 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedControllerDomainID, *got.ControllerDomainID)
 				}
 
-				if got.Updated.String() == tc.paramDomain.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.Equal(t, tc.wantTimestampChange, !got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			}
 			if tc.tx != nil {

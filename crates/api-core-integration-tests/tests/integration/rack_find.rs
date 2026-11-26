@@ -18,6 +18,7 @@
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_uuid::rack::{RackId, RackProfileId};
+use db::TransactionVending as _;
 use rpc::forge::{AdminForceDeleteRackRequest, DeleteRackRequest, DeletedFilter};
 use tonic::Code;
 
@@ -159,7 +160,7 @@ async fn test_force_delete_rack_with_undecodable_health_reports_retains_history(
         .await
         .expect("seed unrelated maintenance token");
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::state_history::persist(
         &mut txn,
         db::state_history::StateHistoryTableId::Rack,
@@ -199,9 +200,8 @@ async fn test_force_delete_rack_with_undecodable_health_reports_retains_history(
 
     assert!(racks.is_empty(), "Rack should be hard-deleted");
 
-    let mut conn = pool.acquire().await?;
     let history = db::state_history::for_object(
-        &mut conn,
+        &pool,
         db::state_history::StateHistoryTableId::Rack,
         &rack_id,
     )

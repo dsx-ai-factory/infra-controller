@@ -17,6 +17,7 @@
 
 use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -121,6 +122,16 @@ pub struct Config {
         deserialize_with = "deserialize_duration"
     )]
     pub successful_connection_minimum_duration: Duration,
+    #[serde(default = "Defaults::max_bmc_connections")]
+    pub max_bmc_connections: NonZeroUsize,
+    #[serde(
+        default = "Defaults::on_demand_bmc_idle_timeout",
+        serialize_with = "serialize_duration",
+        deserialize_with = "deserialize_duration"
+    )]
+    pub on_demand_bmc_idle_timeout: Duration,
+    #[serde(default = "Defaults::max_concurrent_bmc_probes")]
+    pub max_concurrent_bmc_probes: NonZeroUsize,
     #[serde(default = "Defaults::log_rotate_max_size")]
     pub log_rotate_max_size: Size,
     #[serde(default = "Defaults::log_rotate_max_rotated_files")]
@@ -174,11 +185,11 @@ impl Default for KeyIdFormat {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let cfg = std::fs::read_to_string(path).map_err(|error| ConfigError::CouldNotRead {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })?;
         toml::from_str::<Self>(&cfg).map_err(|error| ConfigError::InvalidToml {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })
     }
@@ -236,6 +247,9 @@ impl Config {
             reconnect_interval_base,
             reconnect_interval_max,
             successful_connection_minimum_duration,
+            max_bmc_connections,
+            on_demand_bmc_idle_timeout,
+            max_concurrent_bmc_probes,
             log_rotate_max_size,
             log_rotate_max_rotated_files,
             openssh_certificate_authorization,
@@ -245,6 +259,7 @@ impl Config {
         let reconnect_interval_max = format!("{}s", reconnect_interval_max.as_secs());
         let successful_connection_minimum_duration =
             format!("{}s", successful_connection_minimum_duration.as_secs());
+        let on_demand_bmc_idle_timeout = format!("{}s", on_demand_bmc_idle_timeout.as_secs());
         let carbide_uri = carbide_uri.to_string();
         let listen_address = listen_address.to_string();
         let metrics_address = metrics_address.to_string();
@@ -379,6 +394,24 @@ reconnect_interval_max = {reconnect_interval_max:?}
 ## tests where we intentionally test failure scenarios and want to quickly retry.)
 successful_connection_minimum_duration = {successful_connection_minimum_duration:?}
 
+## Upper bound on BMC connections held open at once: the standing connections kept for console
+## logging plus the connections opened on demand for console sessions. Each holds a socket or PTY,
+## a console log file and at times a reachability probe, so the default keeps a full pool within
+## three quarters of a 65536 file-descriptor limit. A value above a quarter of the process's
+## open-file limit is lowered to that quarter at startup. Machines beyond the bound have no
+## standing connection and connect when a console session asks for them, replacing the pooled
+## connection that has been without a session the longest.
+max_bmc_connections = {max_bmc_connections}
+
+## How long a connection opened on demand stays open after its last console session ends. Standing
+## connections are not affected. Idle connections are closed at the next API poll.
+on_demand_bmc_idle_timeout = {on_demand_bmc_idle_timeout:?}
+
+## How many BMC reachability probes standing connections may have in flight at once. A standing
+## connection whose BMC is not listening waits for a probe slot instead of holding a pending
+## connection of its own. A connection opened on demand probes without waiting for a slot.
+max_concurrent_bmc_probes = {max_concurrent_bmc_probes}
+
 ## When rotating console logs, how big should we let it get before we rotate
 log_rotate_max_size = {log_rotate_max_size:?}
 
@@ -497,6 +530,9 @@ impl Default for Config {
             console_logging_enabled: Defaults::console_logging_enabled(),
             successful_connection_minimum_duration:
                 Defaults::successful_connection_minimum_duration(),
+            max_bmc_connections: Defaults::max_bmc_connections(),
+            on_demand_bmc_idle_timeout: Defaults::on_demand_bmc_idle_timeout(),
+            max_concurrent_bmc_probes: Defaults::max_concurrent_bmc_probes(),
             log_rotate_max_size: Defaults::log_rotate_max_size(),
             log_rotate_max_rotated_files: Defaults::log_rotate_max_rotated_files(),
             reconnect_interval_base: Defaults::reconnect_interval_base(),
@@ -620,6 +656,20 @@ impl Defaults {
         Duration::from_secs(60)
     }
 
+    /// 16384 connections at three file descriptors each fit within three quarters of the
+    /// 65536 descriptors the chart grants the process.
+    pub fn max_bmc_connections() -> NonZeroUsize {
+        NonZeroUsize::new(16384).expect("nonzero")
+    }
+
+    pub fn on_demand_bmc_idle_timeout() -> Duration {
+        Duration::from_secs(600)
+    }
+
+    pub fn max_concurrent_bmc_probes() -> NonZeroUsize {
+        NonZeroUsize::new(512).expect("nonzero")
+    }
+
     pub fn log_rotate_max_size() -> Size {
         Size::from_mebibytes(10)
     }
@@ -665,7 +715,7 @@ fn serialize_duration<S>(d: &std::time::Duration, serializer: S) -> Result<S::Ok
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}s", d.as_secs()))
+    serializer.collect_str(&format_args!("{}s", d.as_secs()))
 }
 
 fn serialize_openssh_certificate_ca_fingerprints<S>(
@@ -699,7 +749,7 @@ fn serialize_uri<S>(u: &http::Uri, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{u}"))
+    serializer.collect_str(u)
 }
 
 fn deserialize_uri<'de, D>(deserializer: D) -> Result<http::Uri, D::Error>
@@ -707,7 +757,7 @@ where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    http::Uri::from_str(&s).map_err(serde::de::Error::custom)
+    http::Uri::try_from(s).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
@@ -715,6 +765,18 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    #[test]
+    fn uri_deserialization_preserves_parser_results() {
+        use serde::de::value::{Error, StringDeserializer};
+
+        for input in ["https://api.example:1079", "https://bad host/"] {
+            let decoded = deserialize_uri(StringDeserializer::<Error>::new(input.to_string()))
+                .map_err(|error| error.to_string());
+            let parsed = http::Uri::from_str(input).map_err(|error| error.to_string());
+            assert_eq!(decoded, parsed, "{input}");
+        }
+    }
 
     #[test]
     fn test_default_file_is_actually_default() {
@@ -750,6 +812,25 @@ mod tests {
                 .expect("explicit opt-in config didn't parse");
 
         assert!(config.force_deactivate_conflicting_ipmi_sol_sessions);
+    }
+
+    #[test]
+    fn pool_bounds_reject_zero() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(
+            run = |toml_text: &str| toml::from_str::<Config>(toml_text)
+                .map(|config| (config.max_bmc_connections.get(), config.max_concurrent_bmc_probes.get()))
+                .map_err(drop);
+            "positive bounds parse" {
+                "max_bmc_connections = 1\nmax_concurrent_bmc_probes = 7" => Yields((1, 7)),
+            }
+            "zero is rejected" {
+                "max_bmc_connections = 0" => Fails,
+                "max_concurrent_bmc_probes = 0" => Fails,
+            }
+        );
     }
 
     #[test]

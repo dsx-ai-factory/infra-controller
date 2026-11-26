@@ -875,7 +875,8 @@ charts take an `extraEnv` map of names to values and render it into the containe
 workflow chart also takes `cloudWorker.extraEnv` and `siteWorker.extraEnv`, merged over the shared
 map with the worker's keys winning. `extraEnv` cannot override a variable the chart sets itself,
 which is `CONFIG_FILE_PATH` and, on the workers, `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE`.
-Rendering fails if it tries.
+Rendering fails if it tries. The one exception is the `GOMEMLIMIT` that the workflow chart derives
+from each worker's memory limit, which a `GOMEMLIMIT` key in `extraEnv` replaces.
 
 ```yaml
 nico-rest-api:

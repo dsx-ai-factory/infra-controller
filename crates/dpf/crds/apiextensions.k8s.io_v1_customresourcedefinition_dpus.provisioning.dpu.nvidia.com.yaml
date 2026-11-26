@@ -97,8 +97,9 @@ spec:
                     - message: Value is immutable
                       rule: self==oldSelf
                   namespace:
-                    description: Namespace is the tenants namespace name where the
-                      Kubernetes cluster will be deployed
+                    description: |-
+                      Namespace is the tenants namespace name where the Kubernetes cluster
+                      will be deployed
                     type: string
                     x-kubernetes-validations:
                     - message: Value is immutable
@@ -116,8 +117,9 @@ spec:
                       node.
                     type: object
                   selector:
-                    description: Selector defines the selector of the DPUClusters
-                      the produced DPUs should join
+                    description: |-
+                      Selector defines the selector of the DPUClusters the produced DPUs
+                      should join
                     properties:
                       matchExpressions:
                         description: matchExpressions is a list of label selector
@@ -172,8 +174,9 @@ spec:
                 - message: Value is immutable
                   rule: self == oldSelf
               dpuFlavor:
-                description: DPUFlavor is the name of the DPUFlavor that will be used
-                  to deploy the DPU.
+                description: |-
+                  DPUFlavor is the name of the DPUFlavor that will be used to
+                  deploy the DPU.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
@@ -192,15 +195,22 @@ spec:
                     default: false
                     description: |-
                       Apply node effect when labels change on the DPU object
-                      When set to true, label changes in Ready state will trigger node effect logic
+                      When set to true, label changes in Ready state will trigger node effect
+                      logic
                     type: boolean
                   customAction:
                     description: |-
-                      Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
-                      The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
-                      The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
-                      The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
-                      If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                      Name of a config map which contains a pod yaml definition to run which
+                      will apply the nodeEffect. The pod is expected to exit when node effect
+                      is done, if pod terminates with error then DPU would move to an error
+                      phase. The DPUNode's name will be exported as an environment variable,
+                      named as DPUNODE_NAME, to each container and init container in the pod.
+                      The labels and annotations of DPUNode will be exported in
+                      `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations`
+                      accordingly; the volume name `dpf-pod-info` is used to mount the labels
+                      and annotations. If any name confliction for env or volume, the
+                      controller will not export the name or labels/annotations of DPUNode
+                      accordingly.
                     type: string
                   customLabel:
                     additionalProperties:
@@ -213,20 +223,23 @@ spec:
                   force:
                     default: false
                     description: |-
-                      Force is the flag to indicate if the node effect should be applied immediately.
-                      If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                      Force is the flag to indicate if the node effect should be applied
+                      immediately. If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime
+                      and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when
+                      applying node effect for DPUNodeMaintenance CR
                     type: boolean
                   hold:
                     description: |-
-                      Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
-                      this is the default behavior in a non K8S environment
+                      Places annotation `wait-for-external-nodeeffect` and waits for it to be
+                      removed this is the default behavior in a non K8S environment
                     type: boolean
                   noEffect:
                     description: Do not do any action on the DPU node
                     type: boolean
                   nodeMaintenanceAdditionalRequestors:
-                    description: Additional requestors to be added to the NvidiaNodeMaintenance
-                      CR when Drain is selected
+                    description: |-
+                      Additional requestors to be added to the NvidiaNodeMaintenance CR when
+                      Drain is selected
                     items:
                       type: string
                     type: array
@@ -316,8 +329,9 @@ spec:
                   type: object
                 type: array
               agentLastStartupTime:
-                description: AgentLastStartupTime is the time when the DPU agent was
-                  last started. This is copied from agentStatus.lastStartupTime.
+                description: |-
+                  AgentLastStartupTime is the time when the DPU agent was last started.
+                  This is copied from agentStatus.lastStartupTime.
                 format: date-time
                 type: string
               agentStatus:
@@ -326,19 +340,21 @@ spec:
                 properties:
                   appliedFlavorGeneration:
                     description: |-
-                      AppliedFlavorGeneration is the metadata.generation of the DPUFlavor this Run() applied.
-                      Generation advances only with the spec, so it identifies the applied spec, not
-                      metadata-only writes. Debug only. It is not used to decide whether to start in-place reconfig.
-                      Zero means the agent has not reported an applied flavor yet.
+                      AppliedFlavorGeneration is the metadata.generation of the DPUFlavor this
+                      Run() applied. Generation advances only with the spec, so it identifies
+                      the applied spec, not metadata-only writes. Debug only. It is not used to
+                      decide whether to start in-place reconfig. Zero means the agent has not
+                      reported an applied flavor yet.
                     format: int64
                     minimum: 1
                     type: integer
                   clock:
                     description: |-
-                      Clock is the DPU clock compared against the host clock, recorded while the DPU agent was
-                      acquiring its identity. A DPU whose clock is skewed cannot verify the API server certificate,
-                      so it never obtains the identity it would need to report this itself. Set by the host agent,
-                      in trusted-host mode only.
+                      Clock is the DPU clock compared against the host clock, recorded while
+                      the DPU agent was acquiring its identity. A DPU whose clock is skewed
+                      cannot verify the API server certificate, so it never obtains the
+                      identity it would need to report this itself. Set by the host agent, in
+                      trusted-host mode only.
                     properties:
                       dpuTime:
                         description: dpuTime is the DPU clock as reported by the DPU
@@ -347,8 +363,8 @@ spec:
                         type: string
                       hostTime:
                         description: |-
-                          hostTime is the host clock when that report arrived. The host is the trusted side of the
-                          comparison, so a difference is attributed to the DPU.
+                          hostTime is the host clock when that report arrived. The host is the
+                          trusted side of the comparison, so a difference is attributed to the DPU.
                         format: date-time
                         type: string
                     required:
@@ -416,13 +432,15 @@ spec:
                     type: array
                   ewnicRuntimeConfig:
                     description: |-
-                      ewnicRuntimeConfig reports E/W NIC runtime configuration on this boot. The DPU agent
-                      sets it when NIC provisioning starts; when set, the controller waits for runtime
-                      configuration before leaving DPU Config. Unset means runtime configuration is not required.
+                      ewnicRuntimeConfig reports E/W NIC runtime configuration on this boot.
+                      The DPU agent sets it when NIC provisioning starts; when set, the
+                      controller waits for runtime configuration before leaving DPU Config.
+                      Unset means runtime configuration is not required.
                     properties:
                       configuredDevices:
-                        description: configuredDevices is the number of devices whose
-                          last runtime configuration apply succeeded.
+                        description: |-
+                          configuredDevices is the number of devices whose last runtime
+                          configuration apply succeeded.
                         format: int32
                         type: integer
                       discoveredDevices:
@@ -431,11 +449,13 @@ spec:
                         format: int32
                         type: integer
                       failedDevices:
-                        description: failedDevices lists devices whose last runtime
-                          configuration apply failed.
+                        description: |-
+                          failedDevices lists devices whose last runtime configuration
+                          apply failed.
                         items:
-                          description: EWNICDeviceFailure describes an E/W NIC device
-                            whose runtime configuration apply failed.
+                          description: |-
+                            EWNICDeviceFailure describes an E/W NIC device whose runtime
+                            configuration apply failed.
                           properties:
                             message:
                               description: message is the error returned for the device,
@@ -447,7 +467,8 @@ spec:
                                 (Domain:Bus:Device, e.g. 0000:03:00), shared by all ports of the device.
                               type: string
                             reason:
-                              description: reason is a CamelCase reason for the failure,
+                              description: |-
+                                reason is a CamelCase reason for the failure,
                                 e.g. NoCarrier or ApplyFailed.
                               type: string
                           required:
@@ -458,8 +479,9 @@ spec:
                     type: object
                   hostOSInit:
                     description: |-
-                      hostOSInit reports terminal host OS init release status from the DPU agent.
-                      Unset while the agent is polling or has not reached ReleaseHostOSInit.
+                      hostOSInit reports terminal host OS init release status from the DPU
+                      agent. Unset while the agent is polling or has not
+                      reached ReleaseHostOSInit.
                     properties:
                       skipped:
                         description: skipped indicates release was not required for
@@ -499,9 +521,9 @@ spec:
                     type: string
                   lastObservedPendingNvconfig:
                     description: |-
-                      LastObservedPendingNVConfig stores the last pending NVConfig parameters seen
-                      during reboot-method discovery on this boot. It is used on the next boot to
-                      ignore repeated parameters that remained unchanged across boots.
+                      LastObservedPendingNVConfig stores the last pending NVConfig parameters
+                      seen during reboot-method discovery on this boot. It is used on the next
+                      boot to ignore repeated parameters that remained unchanged across boots.
                     properties:
                       bootID:
                         type: string
@@ -520,9 +542,9 @@ spec:
                                   name:
                                     type: string
                                   next_boot:
-                                    description: NextBoot uses the "next_boot" so
-                                      this type can be reused for parsing mlxfwrest
-                                      output
+                                    description: |-
+                                      NextBoot uses the "next_boot" so this type can be reused for parsing
+                                      mlxfwrest output
                                     type: string
                                 type: object
                               type: array
@@ -537,17 +559,20 @@ spec:
                     format: date-time
                     type: string
                   preInstall:
-                    description: PreInstall holds agent-reported status for work done
-                      before OS install in the reprovisioning process.
+                    description: |-
+                      PreInstall holds agent-reported status for work done before OS install
+                      in the reprovisioning process.
                     properties:
                       agentReported:
-                        description: AgentReported is set with a timestamp when dpu-agent
-                          detects a new DPU CR is created for reprovisioning.
+                        description: |-
+                          AgentReported is set with a timestamp when dpu-agent detects a new DPU
+                          CR is created for reprovisioning.
                         format: date-time
                         type: string
                       conditions:
-                        description: Conditions contains pre-install conditions (e.g.
-                          NVConfigApplied for reprovisioning).
+                        description: |-
+                          Conditions contains pre-install conditions (e.g. NVConfigApplied for
+                          reprovisioning).
                         items:
                           description: Condition contains details for one aspect of
                             the current state of this API Resource.
@@ -612,9 +637,9 @@ spec:
                     description: |-
                       RebootMethod is the type of reset/reboot set by the DPU agent
                       See enum values in RebootMethodType.
-                      No default is set intentionally: nil means "check not run or not applicable"
-                      (e.g. legacy flow, or agent has not run the check yet);
-                      a non-nil value means the check ran and this is the result.
+                      No default is set intentionally: nil means "check not run or not
+                      applicable" (e.g. legacy flow, or agent has not run the check yet); a
+                      non-nil value means the check ran and this is the result.
                     enum:
                     - Unknown
                     - NoAction
@@ -626,28 +651,30 @@ spec:
                     type: string
                   rebootSequenceCount:
                     description: |-
-                      RebootSequenceCount is the length of the current non-NoAction RebootMethod sequence:
-                      it increments on each agent run that reports a RebootMethod other than NoAction and
-                      resets to 0 when the agent reports NoAction. Used with RebootMethod to bound host reboot loops.
+                      RebootSequenceCount is the length of the current non-NoAction
+                      RebootMethod sequence: it increments on each agent run that reports a
+                      RebootMethod other than NoAction and resets to 0 when the agent reports
+                      NoAction. Used with RebootMethod to bound host reboot loops.
                     format: int32
                     minimum: 0
                     type: integer
                   spiffe:
                     description: |-
-                      Spiffe contains the SPIFFE heartbeat status reported by the DPU Agent when running in
-                      SPIFFE identity mode.
+                      Spiffe contains the SPIFFE heartbeat status reported by the DPU Agent
+                      when running in SPIFFE identity mode.
                     properties:
                       lastProbeMessage:
                         description: |-
-                          LastProbeMessage is a structured one-line diagnostic for the most recent self-probe. Unset in
-                          the steady-state happy path. Bounded to 256 chars (truncated agent-side).
+                          LastProbeMessage is a structured one-line diagnostic for the most recent
+                          self-probe. Unset in the steady-state happy path. Bounded to 256 chars
+                          (truncated agent-side).
                         maxLength: 256
                         type: string
                       lastProbeTime:
                         description: |-
-                          LastProbeTime is the wall-clock timestamp the DPU Agent recorded on its most recent successful
-                          status report. It is informational and subject to DPU clock skew, so it is not a precise
-                          liveness signal on its own.
+                          LastProbeTime is the wall-clock timestamp the DPU Agent recorded on its
+                          most recent successful status report. It is informational and subject to
+                          DPU clock skew, so it is not a precise liveness signal on its own.
                         format: date-time
                         type: string
                     type: object
@@ -656,14 +683,16 @@ spec:
                       by the DPU agent.
                     type: string
                   trustBundleLastUpdateTime:
-                    description: TrustBundleLastUpdateTime is when the trust bundle
-                      was last updated by the DPU agent.
+                    description: |-
+                      TrustBundleLastUpdateTime is when the trust bundle was last updated by
+                      the DPU agent.
                     format: date-time
                     type: string
                   version:
                     description: |-
-                      Version is set by an agent that can GET the live DPUFlavor and start a second Run().
-                      Empty means an old agent; do not start in-place reconfig for this DPU.
+                      Version is set by an agent that can GET the live DPUFlavor and start a
+                      second Run(). Empty means an old agent; do not start in-place reconfig
+                      for this DPU.
                     minLength: 1
                     type: string
                 type: object
@@ -675,6 +704,15 @@ spec:
                 type: string
               bfbVersion:
                 description: bfb version of this DPU
+                type: string
+              bmcLastResetTimeBeforeRestart:
+                description: |-
+                  BMCLastResetTimeBeforeRestart is the Manager LastResetTime the BMC
+                  Force Restart phase read right before the BMC accepted the restart
+                  request. It is set only once the request is accepted, so a set value
+                  means the restart was requested. It is not kept up to date; the
+                  controller treats a different value reported by the BMC as the sign
+                  that the restart has completed.
                 type: string
               conditions:
                 description: Conditions represents the provisioning lifecycle conditions.
@@ -735,8 +773,8 @@ spec:
                 type: array
               deploymentMode:
                 description: |-
-                  DeploymentMode is copied from DPFOperatorConfig.spec.deploymentMode by the controller.
-                  This field is read-only for users.
+                  DeploymentMode is copied from DPFOperatorConfig.spec.deploymentMode by
+                  the controller. This field is read-only for users.
                 enum:
                 - zero-trust
                 - host-trusted
@@ -766,22 +804,24 @@ spec:
                 type: string
               dpuReconfig:
                 description: |-
-                  DPUReconfig is the in-place reconfig round state for this DPU. DPUSet writes it.
-                  The DPU controller reads inProgress and does not write these fields.
-                  Nil means no round has been assigned.
+                  DPUReconfig is the in-place reconfig round state for this DPU. DPUSet
+                  writes it. The DPU controller reads inProgress and does not write these
+                  fields. Nil means no round has been assigned.
                 properties:
                   completedRound:
                     description: |-
-                      CompletedRound is the last round that reached Ready. Zero means this DPU has not
-                      finished an in-place round. While it equals DPUSet status.dpuReconfig.round, this
-                      DPU is not started again for the same annotation.
+                      CompletedRound is the last round that reached Ready. Zero means this DPU
+                      has not finished an in-place round. While it equals DPUSet
+                      status.dpuReconfig.round, this DPU is not started again for the
+                      same annotation.
                     format: int32
                     minimum: 1
                     type: integer
                   inProgress:
                     description: |-
-                      InProgress permits the DPU controller to jump to Node Effect. It is cleared when
-                      this DPU is Ready again for this round. Do not set it together with Outdated.
+                      InProgress permits the DPU controller to jump to Node Effect. It is
+                      cleared when this DPU is Ready again for this round. Do not set it
+                      together with Outdated.
                     type: boolean
                   round:
                     description: |-
@@ -820,24 +860,27 @@ spec:
                 type: boolean
               identityMode:
                 description: |-
-                  IdentityMode records which authentication mechanism the DPU Agent uses to reach the
-                  management-cluster kube-apiserver. Stamped exactly once by the DPU controller during phase
-                  Initializing (nil guard); immutable thereafter. Pre-SPIFFE legacy DPUs have IdentityMode
-                  unset (nil) which consumers MUST treat semantically as bootstrap-token.
+                  IdentityMode records which authentication mechanism the DPU Agent uses to
+                  reach the management-cluster kube-apiserver. Stamped exactly once by
+                  the DPU controller during phase Initializing (nil guard); immutable
+                  thereafter. Pre-SPIFFE legacy DPUs have IdentityMode unset (nil) which
+                  consumers MUST treat semantically as bootstrap-token.
                 enum:
                 - spiffe
                 - bootstrap-token
                 type: string
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object
+                  the last time it was patched.
                 format: int64
                 type: integer
               operationalConditions:
                 description: |-
-                  OperationalConditions represents aggregated operational readiness conditions.
-                  These conditions reflect the runtime health and readiness of DPU services and node health,
-                  separate from the provisioning lifecycle represented by Conditions.
+                  OperationalConditions represents aggregated operational readiness
+                  conditions. These conditions reflect the runtime health and readiness of
+                  DPU services and node health, separate from the provisioning lifecycle
+                  represented by Conditions.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -915,8 +958,8 @@ spec:
                     type: string
                   timeStamp:
                     description: |-
-                      TimeStamp records when this drift was first observed for the current Reason.
-                      It is preserved across reconciles as long as Reason is unchanged.
+                      TimeStamp records when this drift was first observed for the current
+                      Reason. It is preserved across reconciles as long as Reason is unchanged.
                     format: date-time
                     type: string
                 required:
@@ -947,26 +990,29 @@ spec:
                 - Deleting
                 - Rebooting
                 - Perform ARM Force Restart
+                - BMC Force Restart
                 - Initialize Interface
                 - Node Effect Removal
                 - Checking Host Reboot Required
                 type: string
               postProvisioningDPUConfig:
                 description: |-
-                  PostProvisioningDPUConfig must be set before entering Node Effect for an in-place
-                  flavor reconfig, so Node Effect exits to DPU Config instead of Initialize Interface.
-                  The DPU controller owns this field. If both this and PostProvisioningNodeEffect would
-                  be set, only this one is set.
+                  PostProvisioningDPUConfig must be set before entering Node Effect for an
+                  in-place flavor reconfig, so Node Effect exits to DPU Config instead of
+                  Initialize Interface. The DPU controller owns this field. If both this
+                  and PostProvisioningNodeEffect would be set, only this one is set.
                 type: boolean
               postProvisioningNodeEffect:
-                description: Indicates that node effect was triggered by post-provisioning
-                  label changes
+                description: |-
+                  Indicates that node effect was triggered by
+                  post-provisioning label changes
                 type: boolean
               previousPhase:
                 description: |-
-                  PreviousPhase is the last non-empty Phase before the current Phase, set by the controller
-                  when Phase transitions. It may be unset during early initialization (empty Phase) or until
-                  the first transition from a non-empty Phase. Internal controller tracking only.
+                  PreviousPhase is the last non-empty Phase before the current Phase, set
+                  by the controller when Phase transitions. It may be unset during early
+                  initialization (empty Phase) or until the first transition from a
+                  non-empty Phase. Internal controller tracking only.
                 enum:
                 - Initializing
                 - Node Effect
@@ -984,6 +1030,7 @@ spec:
                 - Deleting
                 - Rebooting
                 - Perform ARM Force Restart
+                - BMC Force Restart
                 - Initialize Interface
                 - Node Effect Removal
                 - Checking Host Reboot Required
@@ -1037,8 +1084,9 @@ spec:
                 description: SecureBoot indicates the current UEFI Secure Boot state.
                 properties:
                   enabled:
-                    description: Enabled indicates whether UEFI Secure Boot is currently
-                      enabled on the DPU.
+                    description: |-
+                      Enabled indicates whether UEFI Secure Boot is currently enabled on
+                      the DPU.
                     type: boolean
                 type: object
             type: object

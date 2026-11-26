@@ -287,6 +287,8 @@ mod tests {
     use model::metadata::Metadata;
 
     use super::*;
+    use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     /// Minimal host expected machine carrying the given reservations. The child
     /// rows are written by `expected_machine::create`, which delegates to
@@ -343,12 +345,12 @@ mod tests {
             ],
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::expected_machine::create(&mut txn, machine).await?;
         txn.commit().await?;
 
         // A read hydrates every reservation, ordered by MAC.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let hydrated = find_for_machine(txn.as_mut(), mac.parse::<MacAddress>()?).await?;
         assert_eq!(
             hydrated
@@ -390,7 +392,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mac = "aa:bb:cc:dd:ee:01";
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::expected_machine::create(
             &mut txn,
             expected_machine(
@@ -439,7 +441,7 @@ mod tests {
         let mac_a = "aa:bb:cc:dd:ee:01";
         let mac_b = "aa:bb:cc:dd:ee:02";
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let host_a = crate::expected_machine::create(
             &mut txn,
             expected_machine(
@@ -507,7 +509,7 @@ mod tests {
             vec![reservation("02:00:00:00:00:04", Some("192.0.2.12"), None)],
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::expected_machine::create(&mut txn, first).await?;
         let error = crate::expected_machine::create(&mut txn, second)
             .await
@@ -532,7 +534,7 @@ mod tests {
             ],
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let error = crate::expected_machine::create(&mut txn, machine)
             .await
             .map(|_| ())
@@ -551,7 +553,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mac = "aa:bb:cc:dd:ee:01";
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         // A host row is required for the reservation's foreign key.
         crate::expected_machine::create(&mut txn, expected_machine(mac, vec![])).await?;
 
@@ -575,7 +577,7 @@ mod tests {
         txn.rollback().await?;
 
         // An IPv4 address in the IPv6 column violates family(loopback_ipv6) = 6.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::expected_machine::create(&mut txn, expected_machine(mac, vec![])).await?;
         let v4_in_v6 = sqlx::query(insert)
             .bind(mac.parse::<MacAddress>()?)
@@ -597,7 +599,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let host = "aa:bb:cc:dd:ee:01";
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::expected_machine::create(
             &mut txn,
             expected_machine(
@@ -643,7 +645,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let host = "aa:bb:cc:dd:ee:01";
         let mac: MacAddress = "02:00:00:00:00:01".parse()?;
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         crate::expected_machine::create(
             &mut setup,
             expected_machine(
@@ -655,7 +657,7 @@ mod tests {
         setup.commit().await?;
 
         for (replace_all, address) in [(false, "192.0.2.11"), (true, "192.0.2.12")] {
-            let mut writer = pool.begin().await?;
+            let mut writer = pool.txn_begin().await?;
             let query_fragment = if replace_all {
                 crate::expected_machine::find_all_for_replace(&mut writer).await?;
                 "LOCK TABLE expected_machines"
@@ -666,13 +668,14 @@ mod tests {
             let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(writer.as_mut())
                 .await?;
-            let mut creator = pool.begin().await?;
+            let mut creator = pool.txn_begin().await?;
             let lookup = find_by_dpu_oob_net0_mac_for_update(creator.as_mut(), mac);
             tokio::pin!(lookup);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 result = &mut lookup => panic!("creation did not wait for reservation writer: {result:?}"),
                 _ = crate::test_support::postgres::wait_for_blocked_query(
-                    &pool, blocker_pid, query_fragment,
+                    &mut reader, blocker_pid, query_fragment,
                 ) => {}
             }
             let next = reservation(&mac.to_string(), Some(address), None);

@@ -294,20 +294,17 @@ pub async fn set(
         })
 }
 
-pub async fn find<DB>(
+pub async fn find(
     org_id: &TenantOrganizationId,
-    db: &mut DB,
-) -> DatabaseResult<Option<TenantIdentityConfig>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+    conn: impl DbReader<'_>,
+) -> DatabaseResult<Option<TenantIdentityConfig>> {
     let query = format!(
         "SELECT {} FROM tenant_identity_config WHERE organization_id = $1",
         TenantIdentityConfig::db_table_columns(),
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
-        .fetch_optional(&mut *db)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY organization_id", e))
 }
@@ -551,8 +548,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
-    use crate::{DatabaseError, tenant};
+    use crate::{DatabaseError, TransactionVending as _, tenant};
 
     /// Synthetic P-256 SPKI public PEMs for tests (not secret). Prefer real PEM so validation stays
     /// aligned with `SigningKeyPublicV1` / JWKS expectations.
@@ -667,7 +665,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn machine_lookup_requires_enabled_config_for_active_instance_tenant(pool: sqlx::PgPool) {
         // The join must decode every selected column before reloading the
         // matching organization. Each exclusion changes one lookup condition.
-        let mut txn = pool.begin().await.expect("begin machine lookup test");
+        let mut txn = pool.txn_begin().await.expect("begin machine lookup test");
         let org_id = test_org_id();
         let other_org_id = "OtherIdentityConfigOrg".parse().unwrap();
         ensure_tenant(&mut txn, &org_id).await;
@@ -778,7 +776,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn config_update_preserves_concurrent_signing_key_rotation(pool: sqlx::PgPool) {
         let org_id = test_org_id();
-        let mut setup = pool.begin().await.expect("begin setup");
+        let mut setup = pool.txn_begin().await.expect("begin setup");
         ensure_tenant(&mut setup, &org_id).await;
         set(
             &org_id,
@@ -790,7 +788,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         .expect("create identity config");
         setup.commit().await.expect("commit setup");
 
-        let mut rotation = pool.begin().await.expect("begin rotation");
+        let mut rotation = pool.txn_begin().await.expect("begin rotation");
         let rotated = set(
             &org_id,
             &base_identity_config(true, Some(3600)),
@@ -812,7 +810,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             ..base_identity_config(false, None)
         };
         let update = async {
-            let mut txn = pool.begin().await.expect("begin config update");
+            let mut txn = pool.txn_begin().await.expect("begin config update");
             set(&org_id, &config, None, &mut txn)
                 .await
                 .expect("update config without rotating");
@@ -821,7 +819,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         let commit_rotation = async {
             // The update must reach the database while the old key is still
             // visible to an unlocked read.
-            wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "tenant_identity_config",
+            )
+            .await;
             rotation.commit().await.expect("commit rotation");
         };
         tokio::time::timeout(Duration::from_secs(60), async {
@@ -854,7 +857,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         for collection_time in [CollectionTime::DuringOverlap, CollectionTime::AtExpiry] {
             let org_id = format!("{collection_time:?}").parse().unwrap();
             let now = Utc::now();
-            let mut setup = pool.begin().await.expect("begin setup");
+            let mut setup = pool.txn_begin().await.expect("begin setup");
             ensure_tenant(&mut setup, &org_id).await;
             set(
                 &org_id,
@@ -887,7 +890,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             .expect("expire the first signing slot");
             setup.commit().await.expect("commit setup");
 
-            let mut rotation = pool.begin().await.expect("begin rotation");
+            let mut rotation = pool.txn_begin().await.expect("begin rotation");
             let rotated = set(
                 &org_id,
                 &base_identity_config(true, Some(3600)),
@@ -938,7 +941,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 .await
                 .expect("get rotation backend");
             let collect = async {
-                let mut txn = pool.begin().await.expect("begin garbage collection");
+                let mut txn = pool.txn_begin().await.expect("begin garbage collection");
                 gc_expired_non_active_signing_key_at(&org_id, &mut txn, collect_at)
                     .await
                     .expect("collect expired signing key");
@@ -947,7 +950,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             let commit_rotation = async {
                 // Before the rotation commits, slot 1 looks expired. After the
                 // wait, it is the active signer and slot 2 has a new deadline.
-                wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+                wait_for_blocked_query(
+                    &mut PgPoolReader::from(pool.clone()),
+                    blocker_pid,
+                    "tenant_identity_config",
+                )
+                .await;
                 rotation.commit().await.expect("commit rotation");
             };
             tokio::time::timeout(Duration::from_secs(60), async {
@@ -958,7 +966,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 panic!("{collection_time:?}: garbage collection and rotation must finish")
             });
 
-            let mut txn = pool.begin().await.expect("begin verification");
+            let mut txn = pool.txn_begin().await.expect("begin verification");
             let persisted = find(&org_id, txn.as_mut())
                 .await
                 .expect("reload identity config")
@@ -992,12 +1000,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     #[crate::sqlx_test]
     async fn concurrent_initial_creation_preserves_first_signing_key(pool: sqlx::PgPool) {
         let org_id = test_org_id();
-        let mut setup = pool.begin().await.expect("begin setup");
+        let mut setup = pool.txn_begin().await.expect("begin setup");
         ensure_tenant(&mut setup, &org_id).await;
         setup.commit().await.expect("commit tenant");
 
         let config = base_identity_config(false, None);
-        let mut first_txn = pool.begin().await.expect("begin first creation");
+        let mut first_txn = pool.txn_begin().await.expect("begin first creation");
         let first = set(
             &org_id,
             &config,
@@ -1019,7 +1027,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             ..test_signing_key_material_from_es256_public_pem(TEST_ES256_PUB_1)
         };
         let create = async {
-            let mut txn = pool.begin().await.expect("begin competing creation");
+            let mut txn = pool.txn_begin().await.expect("begin competing creation");
             let result = set(
                 &org_id,
                 &competing_config,
@@ -1033,7 +1041,12 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             result
         };
         let commit_first = async {
-            wait_for_blocked_query(&pool, blocker_pid, "INSERT INTO tenant_identity_config").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "INSERT INTO tenant_identity_config",
+            )
+            .await;
             first_txn.commit().await.expect("commit first creation");
         };
         let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {
@@ -1047,7 +1060,10 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
                 if id == org_id.as_str()
         ));
 
-        let mut txn = pool.begin().await.expect("begin stale preflight attempt");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin stale preflight attempt");
         // Key generation can also finish after the other creation commits,
         // before `set` performs its first read.
         let result = set(&org_id, &competing_config, Some(competing_key), &mut txn).await;
@@ -1074,7 +1090,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_tenant_identity_config_set_find_delete(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1125,7 +1141,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_token_delegation_set_get_delete(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let created_at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(txn.as_mut())
             .await
@@ -1196,7 +1212,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
 
     #[crate::sqlx_test]
     async fn test_tenant_identity_second_rotation_ok_while_overlap_active(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1249,7 +1265,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn test_tenant_identity_rotate_rejects_dual_public_without_overlap_deadline(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 
@@ -1308,7 +1324,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
     async fn test_tenant_identity_rotate_rejects_future_overlap_with_single_public(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let org_id = test_org_id();
         ensure_tenant(&mut txn, &org_id).await;
 

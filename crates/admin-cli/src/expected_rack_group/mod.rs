@@ -38,24 +38,23 @@ pub(crate) enum Cmd {
     /// Delete an expected rack group
     ///
     /// Deletion fails while NVLink domain declarations reference the group.
-    /// Delete its declarations with nvlink-domain delete first.
+    /// A pending domain deletion continues to block group deletion.
     Delete(delete::Args),
     /// Replace all fields of an existing expected rack group
     ///
     /// While the group has NVLink domain declarations, its racks field must remain
-    /// unchanged. Topology, protocol, and metadata updates are still allowed. Delete its
-    /// declarations with nvlink-domain delete before changing racks.
+    /// unchanged. Topology, protocol, and metadata updates are still allowed.
+    /// Pending domain deletions still block changes to racks.
     Update(update::Args),
     /// Replace all expected rack groups from a JSON file
     ///
-    /// This operation clears all existing groups before inserting replacements. Any expected
+    /// This operation clears all existing groups before inserting replacements. Any
     /// NVLink domain declaration blocks it, even if the replacement preserves the referenced
-    /// group. Delete all declarations with nvlink-domain delete first.
+    /// group or the declaration is pending deletion.
     ReplaceAll(replace_all::Args),
     /// Erase all expected rack groups
     ///
-    /// Erase fails while any NVLink domain declaration references a group. Delete all
-    /// declarations with nvlink-domain delete first; --confirm does not bypass this
-    /// restriction.
+    /// Erase fails while any NVLink domain declaration references a group, including declarations
+    /// pending deletion. This restriction also applies with --confirm.
     Erase(erase::Args),
 }

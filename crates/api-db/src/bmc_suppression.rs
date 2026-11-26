@@ -351,6 +351,7 @@ mod tests {
         acknowledge, acknowledge_unacknowledged, delete, delete_many, delete_many_for_source, find,
         find_all_by_subsystem, find_many, is_suppressed, upsert,
     };
+    use crate::TransactionVending as _;
 
     const SITE_EXPLORER: BmcSuppressionSubsystem = BmcSuppressionSubsystem::SiteExplorer;
     const DHCP: BmcSuppressionSubsystem = BmcSuppressionSubsystem::Dhcp;
@@ -384,7 +385,7 @@ mod tests {
             has_dhcp_history: bool,
         }
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let mut segments = Vec::new();
         for name in [
             "dhcp-wait-test",
@@ -562,7 +563,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn dhcp_wait_uses_decommissioning_acknowledgement(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for (scenario, last, subsystem, source, acknowledged, pending) in [
             (
                 "unacknowledged request",
@@ -610,7 +611,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn subsystems_are_independent(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(
             txn.as_mut(),
@@ -656,7 +657,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn sources_are_independent(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(
             txn.as_mut(),
@@ -702,7 +703,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn acknowledgements_are_scoped_to_subsystem(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         for (last, subsystem, other_subsystem) in
             [(1, SITE_EXPLORER, DHCP), (2, DHCP, SITE_EXPLORER)]
@@ -743,7 +744,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn acknowledge_unacknowledged_is_batched_and_idempotent(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         upsert(
             txn.as_mut(),
             &upsert_input(1, SITE_EXPLORER, "decommissioning"),
@@ -811,7 +812,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn repeated_requests_and_acknowledgements_are_idempotent(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         upsert(
             txn.as_mut(),
@@ -869,7 +870,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_many_returns_selected_rows(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for (last, subsystem) in [(1, SITE_EXPLORER), (2, SITE_EXPLORER), (3, DHCP)] {
             upsert(txn.as_mut(), &upsert_input(last, subsystem, "reason"))
                 .await
@@ -896,7 +897,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn delete_helpers_are_scoped_to_subsystem(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         for last in 1..=3 {
             for subsystem in [SITE_EXPLORER, DHCP] {
@@ -1020,7 +1021,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         upsert(
             txn.as_mut(),
             &NewBmcSuppression {

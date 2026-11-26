@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_secrets::credentials::{CredentialKey, CredentialWriter as _, Credentials};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -111,11 +111,12 @@ async fn stage_lagging_dpu_uefi(
             "target must advance from version 0"
         );
     }
-    // The controller resolves the site-wide UEFI credential through the Redfish
-    // pool's own store, so seed it there rather than in the API credential store.
-    env.redfish_sim
-        .seed_credential(&site_key(1), &uefi_creds("dpu-uefi-v1"))
-        .await;
+    // The controller resolves the site-wide UEFI credential through its own
+    // credential manager, so seed it there rather than in the API credential store.
+    env.credential_manager
+        .set_credentials(&site_key(1), &uefi_creds("dpu-uefi-v1"))
+        .await
+        .expect("seed site DPU UEFI credential");
     Ok(())
 }
 
@@ -160,8 +161,7 @@ async fn ready_dpu_converges_uefi_to_site_target(
 
     // The device lags the staged target before the controller runs.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -188,8 +188,7 @@ async fn ready_dpu_converges_uefi_to_site_target(
 
     // The DPU is recorded converged at the target version.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "DPU should be converged after rotation");
@@ -230,8 +229,7 @@ async fn feature_flag_off_suppresses_passive_dpu_uefi_rotation(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -296,8 +294,7 @@ async fn force_request_converges_quarantined_dpu_uefi_when_disabled(
     // The DPU converged despite its quarantine, and the one-shot request was
     // cleared so it does not re-enter.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "forced DPU should be converged");
@@ -355,8 +352,7 @@ async fn dpu_uefi_change_failure_quarantines_and_returns_to_ready(
     // The DPU did not converge; it is quarantined with a recorded, redacted error
     // and an incremented attempt count.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -427,8 +423,7 @@ async fn dpu_uefi_client_creation_failure_retries_without_quarantine(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -446,8 +441,7 @@ async fn dpu_uefi_client_creation_failure_retries_without_quarantine(
     env.redfish_sim.clear_create_client_error();
     run_until_ready(&mut env, &mh).await;
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+        let status = device_rotation_status(&pool, DPU_UEFI, dpu_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "the retried rotation should converge");

@@ -40,7 +40,7 @@ async fn prefix_queries_survive_added_columns(
     // separate migration connection adds columns to the populated tables.
     assert!(api_connection.cached_statements_size() > 0);
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE network_prefixes ADD COLUMN test_added_column uuid;
@@ -73,7 +73,7 @@ async fn exercise_prefix_queries(
         description: "cached prefix query".to_string(),
         labels: HashMap::from([("test".to_string(), "column addition".to_string())]),
     };
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     sqlx::query("INSERT INTO vpcs (id, name, version) VALUES ($1, 'prefix query test', $2)")
         .bind(vpc_id)
         .bind(version)
@@ -279,7 +279,7 @@ async fn exercise_prefix_queries(
     );
     txn.commit().await?;
 
-    let stored_child = network_prefix::find(connection, child.id).await?;
+    let stored_child = network_prefix::find(&mut *connection, child.id).await?;
     assert_eq!(
         serde_json::to_value(stored_child)?,
         serde_json::to_value(child)?

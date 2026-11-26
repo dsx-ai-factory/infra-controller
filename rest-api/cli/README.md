@@ -404,6 +404,7 @@ Install the binaries with `make nico-cli` and `make nico-mcp`, run from the `res
 | `--listen` | `NICO_MCP_LISTEN` | Listen address (default `:8080`) |
 | `--path` | `NICO_MCP_PATH` | HTTP path the MCP handler is mounted at (default `/mcp`) |
 | `--shutdown-timeout` | `NICO_MCP_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout (default `10s`) |
+| `--metrics-listen` | `NICO_MCP_METRICS_LISTEN` | Listen address for Prometheus metrics at `/metrics` (not served when empty) |
 
 `--base-url`, `--org`, `--api-name`, and `--token` are accepted directly by `nico-mcp`; each also reads its `NICO_*` environment variable. `--base-url` pins the trusted NICo REST destination, so a per-call `base_url` must match it when configured. Without `--base-url`, a tool call may select its destination and proceed without credentials or with an explicit per-call token; only inherited credentials from the inbound Authorization header or server default token are rejected rather than forwarded. The MCP server does **not** read `~/.nico/config.yaml` and starts cleanly with no config file present.
 

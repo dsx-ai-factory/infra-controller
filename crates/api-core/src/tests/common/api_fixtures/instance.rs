@@ -25,6 +25,8 @@ use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{DeviceLocator, InstanceServiceInterfaceConfig};
@@ -160,12 +162,13 @@ pub(in crate::tests) struct TestInstance<'a, 'b> {
     mh: &'b TestManagedHost,
 }
 
-type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
-
 impl<'a, 'b> TestInstance<'a, 'b> {
-    pub(in crate::tests) async fn db_instance(&self, txn: &mut Txn<'_>) -> Box<InstanceSnapshot> {
+    pub(in crate::tests) async fn db_instance(
+        &self,
+        db: impl DbReader<'_>,
+    ) -> Box<InstanceSnapshot> {
         Box::new(
-            db::instance::find_by_id(txn.as_mut(), self.id)
+            db::instance::find_by_id(db, self.id)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -192,6 +195,8 @@ impl<'a, 'b> TestInstance<'a, 'b> {
 }
 
 /// Persists a synthetic attachment and matching service interface for lifecycle guard tests.
+///
+/// Reuses an existing fixture tenant so callers can seed multiple service attachments.
 ///
 /// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
 /// satisfy attachment-to-service-interface validation, while one transaction and a committed
@@ -228,9 +233,12 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
     // Register the fixture tenant before creating the synthetic service to satisfy
     // the extension service's tenant foreign key.
     let tenant_config = default_tenant_config();
-    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
-        .await
-        .unwrap();
+    if let Err(error) =
+        create_fixture_tenant(env, tenant_config.tenant_organization_id.clone()).await
+    {
+        // Reuse an already registered tenant while rejecting other fixture setup failures.
+        assert_eq!(error.code(), tonic::Code::AlreadyExists, "{error}");
+    }
     persist_service_vpc_attachment(
         env,
         instance_id,
@@ -700,7 +708,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     env: &TestEnv,
     mh: &TestManagedHost,
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await
@@ -748,7 +756,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await
@@ -796,7 +804,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     machine_validation_result.validation_id = Some(validation_id.parse().unwrap());
     persist_machine_validation_result(env, machine_validation_result.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_machine_validation_time(&mh.host().id, &mut txn)
         .await
         .unwrap();
@@ -813,7 +821,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     )
     .await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let machine = mh.host().db_machine(&mut txn).await;
     db::machine::update_reboot_time(&machine, &mut txn)
         .await
@@ -832,12 +840,12 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
 pub(in crate::tests) async fn update_instance_network_status_observation(
     dpu_id: &MachineId,
     obs: &InstanceNetworkStatusObservation,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) {
     let query = "UPDATE machines SET network_status_observation = jsonb_set(network_status_observation, ARRAY['instance_network_observation'], $1) WHERE id=$2";
     let _query_result = sqlx::query(query)
         .bind(sqlx::types::Json(obs))
-        .bind(dpu_id.to_string())
+        .bind(dpu_id)
         .execute(txn.deref_mut())
         .await
         .unwrap();
@@ -856,14 +864,14 @@ pub(in crate::tests) async fn create_instance_with_nvlink_config<'a, 'b>(
 }
 
 pub(in crate::tests) async fn update_instance_nvlink_config(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     id: &InstanceId,
     config: &InstanceNvLinkConfig,
 ) {
     let query = "UPDATE instances SET nvlink_config=$1::json where id = $2::uuid returning id";
     let _query_result = sqlx::query(query)
         .bind(sqlx::types::Json(config))
-        .bind(id.to_string())
+        .bind(id)
         .execute(txn.deref_mut())
         .await
         .unwrap();

@@ -430,12 +430,12 @@ pub(crate) async fn start(
         .inspect(|trust_config| tracing::info!(?trust_config, "TrustConfig rendered from config",))
         .map(SpiffeContext::try_from)
         .transpose()?
-        .ok_or(CarbideError::InvalidConfiguration(
-            ConfigValidationError::InvalidValue(
+        .ok_or_else(|| {
+            CarbideError::InvalidConfiguration(ConfigValidationError::InvalidValue(
                 "could not parse trust config from auth config in carbide api config toml file"
                     .to_string(),
-            ),
-        ))?;
+            ))
+        })?;
 
     let cert_description_layer: CertDescriptionMiddleware<Authorization> = {
         let machine_certs_enabled = api_service.runtime_config.node_auth.mtls_enabled;

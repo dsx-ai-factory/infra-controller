@@ -10,7 +10,9 @@ import (
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
@@ -22,18 +24,20 @@ import (
 // truth: used in All() for worker registration and when scheduling via
 // workflow.ExecuteActivity.
 const (
-	NameInjectExpectation         = "InjectExpectation"
-	NamePowerControl              = "PowerControl"
-	NameGetPowerStatus            = "GetPowerStatus"
-	NameUpdateTaskStatus          = "UpdateTaskStatus"
-	NameUpdateTaskReport          = "UpdateTaskReport"
-	NameFirmwareControl           = "FirmwareControl"
-	NameGetFirmwareStatus         = "GetFirmwareStatus"
-	NameBringUpControl            = "BringUpControl"
-	NameGetBringUpStatus          = "GetBringUpStatus"
-	NameVerifyFirmwareConsistency = "VerifyFirmwareConsistency"
-	NameDecommissionControl       = "DecommissionControl"
-	NameGetDecommissionStatus     = "GetDecommissionStatus"
+	NameInjectExpectation                = "InjectExpectation"
+	NamePowerControl                     = "PowerControl"
+	NameGetPowerStatus                   = "GetPowerStatus"
+	NameUpdateTaskStatus                 = "UpdateTaskStatus"
+	NameUpdateTaskReport                 = "UpdateTaskReport"
+	NameFirmwareControl                  = "FirmwareControl"
+	NameFirmwareControlWithCredentials   = "FirmwareControlWithCredentials"
+	NameGetFirmwareStatus                = "GetFirmwareStatus"
+	NameGetFirmwareStatusWithCredentials = "GetFirmwareStatusWithCredentials"
+	NameBringUpControl                   = "BringUpControl"
+	NameGetBringUpStatus                 = "GetBringUpStatus"
+	NameVerifyFirmwareConsistency        = "VerifyFirmwareConsistency"
+	NameDecommissionControl              = "DecommissionControl"
+	NameGetDecommissionStatus            = "GetDecommissionStatus"
 )
 
 // InjectExpectation is a Temporal activity that registers expected component
@@ -43,6 +47,7 @@ func (a *Activities) InjectExpectation(
 	target common.Target,
 	info operations.InjectExpectationTaskInfo,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	if err := dispatchguard.Check(ctx); err != nil {
 		return err
@@ -63,6 +68,7 @@ func (a *Activities) PowerControl(
 	target common.Target,
 	info operations.PowerControlTaskInfo,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	if err := dispatchguard.Check(ctx); err != nil {
 		return err
@@ -82,6 +88,7 @@ func (a *Activities) GetPowerStatus(
 	ctx context.Context,
 	target common.Target,
 ) (map[string]operations.PowerStatus, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	reader, err := requirePowerStatusReader(a.registry, target)
 	if err != nil {
 		return nil, err
@@ -131,6 +138,7 @@ func (a *Activities) FirmwareControl(
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	if err := dispatchguard.Check(ctx); err != nil {
 		return err
@@ -150,6 +158,23 @@ func (a *Activities) FirmwareControl(
 		}
 	}
 
+	if info.DeviceCredentials != nil {
+		_, supportsCredentialStatus := controller.(componentmanager.FirmwareCredentialStatusReader)
+		if !supportsCredentialStatus {
+			return temporal.NewNonRetryableApplicationError("manager does not support device credential overrides", "UnsupportedFirmwareControlOptions", nil)
+		}
+		info.CredentialOverrides, err = firmwareauth.DecryptDeviceCredentials(a.dataCipher, info.DeviceCredentials)
+		if err != nil {
+			return err
+		}
+		validator, ok := controller.(componentmanager.FirmwareControlValidator)
+		if ok {
+			err = validator.ValidateFirmwareControl(info)
+			if err != nil {
+				return temporal.NewNonRetryableApplicationError(err.Error(), "UnsupportedFirmwareControlOptions", err)
+			}
+		}
+	}
 	info.AccessToken, err = firmwareauth.DecryptFor(
 		a.dataCipher,
 		info.AuthenticationData,
@@ -174,6 +199,7 @@ func (a *Activities) GetFirmwareStatus(
 	ctx context.Context,
 	target common.Target,
 ) (*GetFirmwareStatusResult, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	reader, err := requireFirmwareStatusReader(a.registry, target)
 	if err != nil {
 		return nil, err
@@ -195,6 +221,7 @@ func (a *Activities) BringUpControl(
 	target common.Target,
 	info operations.BringUpTaskInfo,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	if err := dispatchguard.Check(ctx); err != nil {
 		return err
@@ -219,6 +246,7 @@ func (a *Activities) GetBringUpStatus(
 	ctx context.Context,
 	target common.Target,
 ) (*GetBringUpStatusResult, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	reader, err := requireBringUpStatusReader(a.registry, target)
 	if err != nil {
 		return nil, err
@@ -240,6 +268,7 @@ func (a *Activities) DecommissionControl(
 	target common.Target,
 	info operations.DecommissionTaskInfo,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	if err := dispatchguard.Check(ctx); err != nil {
 		return err
@@ -274,6 +303,7 @@ func (a *Activities) GetDecommissionStatus(
 	ctx context.Context,
 	target common.Target,
 ) (*GetDecommissionStatusResult, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	reader, err := requireDecommissionStatusReader(a.registry, target)
 	if err != nil {
 		return nil, err
@@ -304,10 +334,34 @@ func (a *Activities) VerifyFirmwareConsistency(
 	ctx context.Context,
 	target common.Target,
 ) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	checker, err := requireFirmwareConsistencyChecker(a.registry, target)
 	if err != nil {
 		return err
 	}
 
 	return checker.VerifyFirmwareConsistency(ctx, target)
+}
+
+// GetFirmwareStatusWithCredentials opens the encrypted device credentials in the
+// activity process. Only ciphertext crosses the Temporal boundary.
+func (a *Activities) GetFirmwareStatusWithCredentials(ctx context.Context, target common.Target, encrypted *secret.EncryptedData) (*GetFirmwareStatusResult, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
+	reader, err := requireFirmwareStatusReader(a.registry, target)
+	if err != nil {
+		return nil, err
+	}
+	credentialReader, ok := reader.(componentmanager.FirmwareCredentialStatusReader)
+	if !ok {
+		return nil, temporal.NewNonRetryableApplicationError("manager does not support device credential overrides", "UnsupportedFirmwareControlOptions", nil)
+	}
+	credentials, err := firmwareauth.DecryptDeviceCredentials(a.dataCipher, encrypted)
+	if err != nil {
+		return nil, err
+	}
+	statuses, err := credentialReader.GetFirmwareStatusWithCredentials(ctx, target, credentials)
+	if err != nil {
+		return nil, err
+	}
+	return &GetFirmwareStatusResult{Statuses: statuses}, nil
 }

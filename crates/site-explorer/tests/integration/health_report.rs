@@ -23,6 +23,7 @@ use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer
 use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
 use carbide_test_harness::prelude::*;
 use carbide_uuid::machine::MachineId;
+use db::TransactionVending as _;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::site_explorer::EndpointExplorationError;
@@ -283,7 +284,7 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
             classifications: vec![health_report::HealthAlertClassification::prevent_allocations()],
         });
 
-    let mut txn = db::Transaction::begin(&pool).await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_site_explorer_health_report(
         txn.as_pgconn(),
         &created_host.host.id,
@@ -294,14 +295,12 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
 
     let bmc_ips = vec![host_bmc_ip, dpu_bmc_ip, unknown_bmc_ip];
     let mut existing_path_states = Vec::new();
-    let mut txn = db::Transaction::begin(&pool).await?;
     for bmc_ip in &bmc_ips {
-        let Some(machine_id) = db::machine::find_id_by_bmc_ip(txn.as_pgconn(), bmc_ip).await?
-        else {
+        let Some(machine_id) = db::machine::find_id_by_bmc_ip(&pool, bmc_ip).await? else {
             continue;
         };
         let machine = db::machine::find(
-            &mut txn,
+            &pool,
             db::ObjectFilter::One(machine_id),
             MachineSearchConfig {
                 include_dpus: true,
@@ -319,12 +318,9 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
             site_explorer_health_report: machine.site_explorer_health_report().cloned(),
         });
     }
-    txn.commit().await?;
 
-    let mut txn = db::Transaction::begin(&pool).await?;
     let mut bulk_lookup_states =
-        db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&mut txn, &bmc_ips).await?;
-    txn.commit().await?;
+        db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&pool, &bmc_ips).await?;
 
     existing_path_states.sort_by_key(|state| state.bmc_ip);
     bulk_lookup_states.sort_by_key(|state| state.bmc_ip);
@@ -359,7 +355,7 @@ async fn test_orphan_managed_host_alert_emitted(
         .expect("created host should have a serial number");
 
     // Orphan the host by deleting its expected_machines entry.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_machine::delete_by_mac(&mut txn, host_bmc_mac).await?;
     txn.commit().await?;
 
@@ -377,7 +373,7 @@ async fn test_orphan_managed_host_alert_emitted(
     );
 
     // Re-add the expected_machines entry. The alert should clear next iteration.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {

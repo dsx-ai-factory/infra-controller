@@ -190,6 +190,7 @@ Collector defaults from the example config:
 | NMX-C collector | `rpc_timeout` | `"10s"` | Timeout for NMX-C Hello, Subscribe, and initial Subscribe acknowledgement. |
 | NMX-T collector | `scrape_interval` | `"1m"` | Switch telemetry scrape cadence. |
 | NVUE REST collector | `poll_interval` | `"1m"` | NVUE REST polling cadence. |
+| Leak detector collector | `aggregate_detector_ids` | `["leakage_aggr"]` | Exact Redfish IDs of aggregate leak detectors. Aggregates are ignored when their chassis exposes individual detectors. If the chassis exposes only aggregates, all are reported. `[]` reports every detector. |
 | Leak processor | `minimum_alerts_per_report` | `1` | Leak alert threshold for health reports. |
 | Rack leak processor | `leaking_tray_threshold` | `2` | Rack-level leak threshold. |
 | Metrics | `endpoint` | `"0.0.0.0:9009"` | Explicit IPv4 listener override. The binary default is `[::]:9009` (dual-stack with IPv4 fallback when IPv6 socket setup is unavailable). [NICo Metrics](../observability/metrics.md#metrics-services-and-ipv6) describes configuration precedence. |
@@ -941,7 +942,7 @@ does not add high-cardinality series to the existing `/metrics` endpoint.
 enabled = true
 listen_address = "[::]:9091"
 # Defaults to all supported object types; also valid: "network_segment",
-# "vpc_prefix", "spdm_attestation", "ib_partition".
+# "vpc_prefix", "spdm_attestation", "ib_partition", "nvlink_domain".
 object_types = ["machine", "switch", "power_shelf", "rack"]
 ```
 
@@ -979,7 +980,7 @@ DPU metrics:
 
 | Metric | Use |
 |---|---|
-| `carbide_dpus_up_count` | DPUs with health reports newer than the DPU up threshold. |
+| `carbide_dpus_up_count` | DPUs with network status observations within the configured DPU up threshold. |
 | `carbide_dpus_healthy_count` | DPUs whose latest health report is healthy. |
 | `carbide_dpu_health_check_failed_count` | Failed DPU health checks by probe. |
 | `carbide_dpu_agent_version_count` | DPU-agent version distribution. |

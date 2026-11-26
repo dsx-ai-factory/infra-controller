@@ -21,98 +21,15 @@
 
 use std::collections::BTreeMap;
 
-use bmc_backend::platform_error;
-use bmc_platform::{
-    BiosSettings, DriverOutcome, ManagerSettings, OperationReference, OperationStatus,
-    PlatformError, PlatformIdentity, VendorJobId,
-};
-use bmc_runtime::ConnectedBmc;
+use bmc_backend::{idrac_outcome, platform_error};
+use bmc_platform::{BiosSettings, DriverOutcome, ManagerSettings, PlatformError, PlatformIdentity};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_redfish::nv_redfish::RedfishBmc;
-use carbide_uuid::machine::MachineIdSubtypeTrait;
-use libredfish::{BiosProfileVendor, JobState, Redfish, RedfishError};
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use libredfish::{BiosProfileVendor, Redfish, RedfishError};
 use serde_json::Value;
-use state_controller::state_handler::StateHandlerError;
 
-use super::{DpuSettings, idrac_job};
+use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
-use crate::context::MachineStateHandlerServices;
-
-/// A host's or DPU's BMC for its platform settings: the libredfish client the
-/// caller already holds, or the drivers.
-pub enum PlatformBmc<'a> {
-    Libredfish {
-        client: &'a dyn Redfish,
-        /// libredfish reports a host without a boot interface as an error,
-        /// which stands only when the host has DPUs to boot from.
-        expected_dpu_count: usize,
-    },
-    Drivers(Box<ConnectedBmc<RedfishBmc>>),
-}
-
-impl<'a> PlatformBmc<'a> {
-    /// The host's BMC through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish.
-    pub(crate) async fn connect(
-        services: &MachineStateHandlerServices,
-        mh_snapshot: &ManagedHostStateSnapshot,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        let host = &mh_snapshot.host_snapshot;
-        let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        Self::connect_machine(services, host, expected_dpu_count, redfish_client).await
-    }
-
-    /// The BMC of `dpu` through the site's `bmc_backend`, reusing
-    /// `redfish_client` under libredfish. The DPU's host has at least this
-    /// DPU.
-    pub(crate) async fn connect_dpu(
-        services: &MachineStateHandlerServices,
-        dpu: &Machine<impl MachineIdSubtypeTrait>,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Self::connect_machine(services, dpu, 1, redfish_client).await
-    }
-
-    async fn connect_machine(
-        services: &MachineStateHandlerServices,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-        expected_dpu_count: usize,
-        redfish_client: &'a dyn Redfish,
-    ) -> Result<Self, StateHandlerError> {
-        Ok(match services.connect_drivers(machine).await? {
-            Some(bmc) => Self::Drivers(bmc),
-            None => Self::Libredfish {
-                client: redfish_client,
-                expected_dpu_count,
-            },
-        })
-    }
-
-    /// See [`ConnectedBmc::operation_status`]. libredfish reads only the
-    /// iDRAC jobs its `machine_setup` starts.
-    pub(crate) async fn operation_status(
-        &self,
-        reference: &OperationReference,
-    ) -> Result<OperationStatus, PlatformError> {
-        match (self, reference) {
-            // Boxed so the state handler's future stays within the stack limit.
-            (Self::Drivers(bmc), reference) => Box::pin(bmc.operation_status(reference)).await,
-            (Self::Libredfish { client, .. }, OperationReference::VendorJob { job_id, .. }) => {
-                client
-                    .get_job_state(job_id.as_str())
-                    .await
-                    .map(job_status)
-                    .map_err(platform_error)
-            }
-            (Self::Libredfish { .. }, OperationReference::RedfishTask { .. }) => {
-                Err(PlatformError::Unsupported)
-            }
-        }
-    }
-}
 
 /// See [`super::apply`].
 pub(super) async fn apply(
@@ -226,15 +143,6 @@ fn handle_no_dpu_error(
     }
 }
 
-/// The iDRAC job a libredfish write started, by the id it returned.
-fn idrac_outcome(job_id: Option<String>) -> DriverOutcome {
-    job_id
-        .and_then(|job_id| VendorJobId::new(job_id).ok())
-        .map_or_else(DriverOutcome::complete, |job_id| {
-            DriverOutcome::accepted(idrac_job(job_id))
-        })
-}
-
 /// See [`super::in_effect`].
 pub(super) async fn in_effect(
     client: &dyn Redfish,
@@ -301,21 +209,6 @@ pub(super) fn profiles(
     )
 }
 
-/// An iDRAC job state libredfish does not recognize is still running.
-fn job_status(state: JobState) -> OperationStatus {
-    match state {
-        JobState::Scheduled => OperationStatus::AwaitingReset,
-        JobState::Running | JobState::Unknown => OperationStatus::Running,
-        JobState::Completed => OperationStatus::Completed,
-        JobState::ScheduledWithErrors | JobState::CompletedWithErrors | JobState::Failed => {
-            OperationStatus::Failed {
-                state: format!("{state:?}"),
-                message: None,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -324,7 +217,6 @@ mod tests {
     use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
-    use carbide_test_support::value_scenarios;
     use libredfish::BiosProfileType;
     use libredfish::model::service_root::RedfishVendor;
     use serde_json::json;
@@ -381,31 +273,6 @@ mod tests {
             assert_eq!(bios.attributes, expected, "{scenario}");
             assert_eq!(manager.attributes, expected, "{scenario}");
         }
-    }
-
-    #[test]
-    fn idrac_job_states_map_to_operation_statuses() {
-        let failed = |state: &str| OperationStatus::Failed {
-            state: state.to_string(),
-            message: None,
-        };
-        value_scenarios!(job_status:
-            "awaiting the host restart" {
-                JobState::Scheduled => OperationStatus::AwaitingReset,
-            }
-            "running, including states libredfish does not recognize" {
-                JobState::Running => OperationStatus::Running,
-                JobState::Unknown => OperationStatus::Running,
-            }
-            "completed" {
-                JobState::Completed => OperationStatus::Completed,
-            }
-            "ended without completing" {
-                JobState::ScheduledWithErrors => failed("ScheduledWithErrors"),
-                JobState::CompletedWithErrors => failed("CompletedWithErrors"),
-                JobState::Failed => failed("Failed"),
-            }
-        );
     }
 
     #[test]

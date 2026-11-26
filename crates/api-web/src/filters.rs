@@ -247,7 +247,7 @@ pub(super) fn health_alerts_fmt(
         }
 
         result += r#"<span class="bubble error">"#;
-        askama_escape::Html.write_escaped(&mut result, &alert.id.to_string())?;
+        askama_escape::Html.write_escaped(&mut result, alert.id.as_str())?;
         if include_target && let Some(target) = alert.target.as_ref() {
             result += " [Target: ";
             askama_escape::Html.write_escaped(&mut result, target)?;
@@ -277,7 +277,7 @@ fn health_alerts_compact_html(
     alerts: &[health_report::HealthProbeAlert],
 ) -> ::askama::Result<String> {
     if alerts.is_empty() {
-        return Ok(r#"<span class="bubble success">Healthy</span>"#.to_string());
+        return Ok(r#"<span class="health-alert-chip health-ok">Healthy</span>"#.to_string());
     }
 
     let mut result = String::new();
@@ -296,23 +296,49 @@ fn health_alerts_compact_html(
         result += "</span>";
         if let Some(target) = alert.target.as_ref() {
             result += r#"<span class="health-alert-target">"#;
-            match middle_cut(target) {
-                // Both forms are rendered; table_filter.js shows the full one
-                // when the table has room for it.
-                Some(short) => {
-                    result += r#"<span class="fit-short">"#;
-                    askama_escape::Html.write_escaped(&mut result, &short)?;
-                    result += r#"</span><span class="fit-full-only">"#;
-                    askama_escape::Html.write_escaped(&mut result, target)?;
-                    result += "</span>";
+            if is_object_id(target) {
+                // Shortened like every other object ID. Not a link: the whole
+                // cell already links to the Health tab.
+                result += &object_id_halves_html(target)?;
+            } else {
+                match middle_cut(target) {
+                    // Both forms are rendered; table_filter.js shows the full one
+                    // when the table has room for it.
+                    Some(short) => {
+                        result += r#"<span class="fit-short">"#;
+                        askama_escape::Html.write_escaped(&mut result, &short)?;
+                        result += r#"</span><span class="fit-full-only">"#;
+                        askama_escape::Html.write_escaped(&mut result, target)?;
+                        result += "</span>";
+                    }
+                    None => askama_escape::Html.write_escaped(&mut result, target)?,
                 }
-                None => askama_escape::Html.write_escaped(&mut result, target)?,
             }
             result += "</span>";
         }
         result += "</div>";
     }
     Ok(result)
+}
+
+/// Whether `text` is a machine, switch, or power shelf ID.
+fn is_object_id(text: &str) -> bool {
+    MachineId::from_str(text).is_ok()
+        || SwitchId::from_str(text).is_ok()
+        || PowerShelfId::from_str(text).is_ok()
+}
+
+/// An ID as the two `.machine_id` halves (all but the last six characters,
+/// then those six) without a link, so CSS can shorten it from the middle.
+fn object_id_halves_html(id: &str) -> ::askama::Result<String> {
+    let split = id.char_indices().rev().nth(5).map_or(0, |(index, _)| index);
+    let (head, tail) = id.split_at(split);
+    let mut html = r#"<div class="machine_id"><div>"#.to_string();
+    askama_escape::Html.write_escaped(&mut html, head)?;
+    html += "</div><div>";
+    askama_escape::Html.write_escaped(&mut html, tail)?;
+    html += "</div></div>";
+    Ok(html)
 }
 
 /// Shortens long text, such as a machine ID used as an alert target, to its
@@ -369,7 +395,7 @@ where
             result += "<br>";
         }
         result += r#"<div class="health_alert_classification">"#;
-        askama_escape::Html.write_escaped(&mut result, &classification.to_string())?;
+        askama_escape::Html.write_escaped(&mut result, classification.as_str())?;
         result += r#"</div>"#;
     }
 
@@ -679,7 +705,7 @@ mod tests {
                 Check {
                     scenario: "no alerts",
                     input: vec![],
-                    expect: r#"<span class="bubble success">Healthy</span>"#.to_string(),
+                    expect: r#"<span class="health-alert-chip health-ok">Healthy</span>"#.to_string(),
                 },
                 Check {
                     scenario: "alert with target",
@@ -693,7 +719,7 @@ mod tests {
                     .to_string(),
                 },
                 Check {
-                    scenario: "long target renders shortened and full forms",
+                    scenario: "machine ID target renders as a shortened ID",
                     input: vec![alert(Some(
                         "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg",
                     ))],
@@ -702,10 +728,22 @@ mod tests {
                         "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg]: ",
                         r#"Last seen over &#60;PT300S&#62; ago">"#,
                         r#"<span class="health-alert-chip">HeartbeatTimeout</span>"#,
-                        r#"<span class="health-alert-target"><span class="fit-short">fm100ds3…iemvtg</span>"#,
-                        r#"<span class="fit-full-only">"#,
-                        "fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2iemvtg",
-                        "</span></span></div>"
+                        r#"<span class="health-alert-target"><div class="machine_id">"#,
+                        "<div>fm100ds33vkic2i020dsma4nv9elgfuoq26foi7daf44tulvkt7r2</div>",
+                        "<div>iemvtg</div></div></span></div>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "other long target renders shortened and full forms",
+                    input: vec![alert(Some("rack-power-distribution-unit-07"))],
+                    expect: concat!(
+                        r#"<div class="health-alert-line" title="HeartbeatTimeout [Target: "#,
+                        "rack-power-distribution-unit-07]: ",
+                        r#"Last seen over &#60;PT300S&#62; ago">"#,
+                        r#"<span class="health-alert-chip">HeartbeatTimeout</span>"#,
+                        r#"<span class="health-alert-target"><span class="fit-short">rack-pow…nit-07</span>"#,
+                        r#"<span class="fit-full-only">rack-power-distribution-unit-07</span></span></div>"#
                     )
                     .to_string(),
                 },

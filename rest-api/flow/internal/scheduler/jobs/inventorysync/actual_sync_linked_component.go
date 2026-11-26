@@ -4,6 +4,7 @@
 package inventorysync
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -232,7 +233,7 @@ func applyComponentExternalIDUpdates(
 		return nil
 	}
 	sort.Slice(updates, func(i, j int) bool {
-		return updates[i].component.ID.String() < updates[j].component.ID.String()
+		return bytes.Compare(updates[i].component.ID[:], updates[j].component.ID[:]) < 0
 	})
 	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 		// Release every changing external ID before assigning replacements. The

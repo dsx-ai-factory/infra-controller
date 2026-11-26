@@ -5,9 +5,9 @@ package model
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"time"
 
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -131,7 +131,7 @@ func ValidateSpectrumXAttachmentsForMachine(capabilities []cdbm.MachineCapabilit
 		if !matched {
 			return validation.Errors{
 				"spectrumXAttachments": validation.Errors{
-					fmt.Sprint(i): errors.New("device and deviceInstance must select a SpectrumX interface in the Machine's capabilities"),
+					strconv.Itoa(i): errors.New("device and deviceInstance must select a SpectrumX interface in the Machine's capabilities"),
 				},
 			}
 		}

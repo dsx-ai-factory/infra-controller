@@ -131,9 +131,8 @@ async fn test_force_delete_power_shelf_success(
         "Power shelf should be hard-deleted"
     );
 
-    let mut conn = pool.acquire().await?;
     let history = db::state_history::for_object(
-        &mut conn,
+        &pool,
         db::state_history::StateHistoryTableId::PowerShelf,
         &power_shelf_id,
     )

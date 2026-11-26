@@ -155,15 +155,13 @@ pub(crate) async fn get_expected_rack(
     let req = request.into_inner();
     let rack_id = RackId::from_str(&req.rack_id)
         .map_err(|e| CarbideError::InvalidArgument(format!("invalid rack ID: {}", e)))?;
-    let mut txn = api.txn_begin().await?;
-    let expected_rack = db_expected_rack::find_by_rack_id(&mut txn, &rack_id)
+    let expected_rack = db_expected_rack::find_by_rack_id(api.pg_pool(), &rack_id)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_rack",
             id: rack_id.to_string(),
         })?;
-    txn.commit().await?;
     Ok(Response::new(rpc::ExpectedRack::from(expected_rack)))
 }
 
@@ -172,11 +170,9 @@ pub(crate) async fn get_all_expected_racks(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedRackList>, Status> {
-    let mut txn = api.txn_begin().await?;
-    let expected_racks = db_expected_rack::find_all(&mut txn)
+    let expected_racks = db_expected_rack::find_all(api.pg_pool())
         .await
         .map_err(CarbideError::from)?;
-    txn.commit().await?;
     let expected_racks: Vec<rpc::ExpectedRack> = expected_racks
         .into_iter()
         .map(rpc::ExpectedRack::from)

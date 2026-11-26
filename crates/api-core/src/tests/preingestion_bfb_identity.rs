@@ -26,6 +26,7 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::machine_interface::InterfaceType;
@@ -43,7 +44,7 @@ const DPU_MAC: &str = "02:00:00:00:84:76";
 const HOST_BMC_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200));
 
 async fn seed_pair(env: &TestEnv) -> IpAddr {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let segments = db::network_segment::admin(&mut txn).await.unwrap();
     let interface = db::machine_interface::create_with_type(
         &mut txn,
@@ -117,7 +118,7 @@ async fn bfb_recovery_validates_mac_before_enqueue(pool: sqlx::PgPool) {
         ("matching", Some(DPU_MAC), true, false),
         ("omitted", None, true, false),
     ] {
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         db::explored_endpoints::set_preingestion_complete(dpu_ip, &mut txn)
             .await
             .unwrap();
@@ -211,7 +212,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
         .await
         .unwrap()
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let segments = db::network_segment::admin(&mut txn).await.unwrap();
     let replacement_interface = db::machine_interface::create_with_type(
         &mut txn,
@@ -249,7 +250,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             .execute(&env.pool)
             .await
             .unwrap();
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         db::explored_endpoints::set_preingestion_complete(dpu_ip, &mut txn)
             .await
             .unwrap();
@@ -273,7 +274,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
         } else if boundary == "after-power-cycle" || boundary == "post-install" {
             // The DPU BMC answers the probe, so a changed identity must still
             // block both the follow-up copy and post-install completion.
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             db::explored_endpoints::set_preingestion_bfb_platform_powercycle(
                 dpu_ip,
                 HOST_BMC_IP,
@@ -286,7 +287,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             .unwrap();
             txn.commit().await.unwrap();
         } else if boundary == "restart" {
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             db::explored_endpoints::set_preingestion_bfb_copy_in_progress(
                 dpu_ip,
                 HOST_BMC_IP,
@@ -301,7 +302,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             assert!(matches!(state, PreingestionState::BfbRecoveryNeeded { .. }));
             assert_eq!(state.bfb_target_mac(), Some(original_mac));
         } else if boundary == "console" {
-            let mut txn = env.pool.begin().await.unwrap();
+            let mut txn = env.pool.txn_begin().await.unwrap();
             db::explored_endpoints::set_preingestion_bfb_installation_wait(
                 dpu_ip,
                 HOST_BMC_IP,

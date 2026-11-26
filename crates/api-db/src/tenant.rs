@@ -252,11 +252,14 @@ pub async fn find_tenant_organization_ids(
     Ok(tenant_organization_ids)
 }
 
-pub async fn validate_public_key(
+pub async fn validate_public_key<DB>(
     request: &TenantPublicKeyValidationRequest,
-    txn: &mut PgConnection,
-) -> Result<(), DatabaseError> {
-    let instance = crate::instance::find_by_id(&mut *txn, request.instance_id)
+    conn: &mut DB,
+) -> Result<(), DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let instance = crate::instance::find_by_id(&mut *conn, request.instance_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "instance",
@@ -267,7 +270,7 @@ pub async fn validate_public_key(
         Some(instance.config.tenant.tenant_organization_id.to_string()),
         ObjectFilter::List(&instance.config.tenant.tenant_keyset_ids),
         true,
-        txn,
+        conn,
     )
     .await?;
 
@@ -275,25 +278,25 @@ pub async fn validate_public_key(
 }
 
 pub async fn load_by_organization_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     organization_ids: &[String],
 ) -> Result<Vec<Tenant>, DatabaseError> {
     let query = "SELECT organization_id, organization_name, version, routing_profile_type
         from tenants WHERE organization_id = ANY($1)";
     sqlx::query_as(query)
         .bind(organization_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ops::DerefMut;
 
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn tenant_queries_survive_added_columns(
@@ -305,7 +308,7 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE tenants ADD COLUMN test_added_column text;",
@@ -321,7 +324,7 @@ mod tests {
     async fn exercise_tenant_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let metadata = Metadata {
             name: "projection tenant".to_string(),
             ..Default::default()
@@ -371,7 +374,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn test_null_organization_name(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let result = sqlx::query(
             r#"
             INSERT INTO tenants (organization_id, version, organization_name)
@@ -379,7 +382,7 @@ mod tests {
             ('zqrrhxea4ktv', 'V1-T1733777281821769', NULL)
             "#,
         )
-        .execute(txn.deref_mut())
+        .execute(txn.as_mut())
         .await;
         let Err(sqlx::Error::Database(e)) = result else {
             panic!("Inserting a NULL should have failed");

@@ -119,13 +119,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| {
             MacAddressRangesConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 32, 8)
         })?;
-    let inventory_id = format!(
-        "mat-{}",
-        hw_mac_address_ranges
-            .base()
-            .to_string()
-            .to_ascii_lowercase()
-    );
+    let mut inventory_id = format!("mat-{}", hw_mac_address_ranges.base());
+    inventory_id.make_ascii_lowercase();
 
     let mac_address_pool = MacAddressPool::new(MacAddressConfig {
         pool: Some(

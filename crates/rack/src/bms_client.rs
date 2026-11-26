@@ -24,7 +24,6 @@ use carbide_mqtt_common::hook::MqttPublisher;
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
-use db::db_read::PgPoolReader;
 use db::{ObjectColumnFilter, rack as db_rack};
 use health_report::HealthReport;
 use model::rack::Rack;
@@ -304,12 +303,7 @@ async fn seed_current_rack_state(
     db_pool: &sqlx::PgPool,
     handle: &BmsDsxExchangeHandle,
 ) -> eyre::Result<()> {
-    let mut reader: PgPoolReader = db_pool.clone().into();
-    let racks = db_rack::find_by(
-        reader.as_mut(),
-        ObjectColumnFilter::<db_rack::IdColumn>::All,
-    )
-    .await?;
+    let racks = db_rack::find_by(db_pool, ObjectColumnFilter::<db_rack::IdColumn>::All).await?;
 
     for rack in racks {
         if let Some(leaking) = rack_has_active_leak(&rack) {

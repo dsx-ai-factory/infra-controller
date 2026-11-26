@@ -373,8 +373,8 @@ impl From<MeasurementApprovedMachineRecord> for MeasurementApprovedMachineRecord
             approval_id: Some(val.approval_id),
             machine_id: val.machine_id.to_string(),
             approval_type: approval_type.into(),
-            pcr_registers: val.pcr_registers.unwrap_or("".to_string()),
-            comments: val.comments.unwrap_or("".to_string()),
+            pcr_registers: val.pcr_registers.unwrap_or_default(),
+            comments: val.comments.unwrap_or_default(),
             ts: Some(val.ts.into()),
         }
     }
@@ -419,8 +419,8 @@ impl From<MeasurementApprovedProfileRecord> for MeasurementApprovedProfileRecord
             approval_id: Some(val.approval_id),
             profile_id: Some(val.profile_id),
             approval_type: approval_type.into(),
-            pcr_registers: val.pcr_registers.unwrap_or("".to_string()),
-            comments: val.comments.unwrap_or("".to_string()),
+            pcr_registers: val.pcr_registers.unwrap_or_default(),
+            comments: val.comments.unwrap_or_default(),
             ts: Some(val.ts.into()),
         }
     }

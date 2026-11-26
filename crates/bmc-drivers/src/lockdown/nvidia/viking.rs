@@ -71,8 +71,13 @@ impl<B: Bmc> Lockdown<B> for VikingLockdown {
             return Err(PlatformError::Unsupported);
         }
         let enabled = desired == LockdownDesiredState::Enabled;
+        // Older firmware supports lockdown after an upgrade, so its refusal is
+        // an error to retry rather than a missing control to skip.
         if enabled && !cx.has_quirk(Quirk::VikingLockdownFirmware) {
-            return Err(PlatformError::Unsupported);
+            return Err(PlatformError::NotReady {
+                message: "lockdown needs HostBIOS_0 1.01.03 and HostBMC_0 23.11.09 or later"
+                    .to_string(),
+            });
         }
         let bios = cx.bios().await?;
         let mut attributes = BTreeMap::new();
@@ -143,12 +148,12 @@ mod tests {
             .await;
         let cx = bmc.cx().await;
 
-        assert_eq!(
+        assert!(matches!(
             VikingLockdown
                 .set(&cx, LockdownScope::All, LockdownDesiredState::Enabled)
                 .await,
-            Err(PlatformError::Unsupported)
-        );
+            Err(PlatformError::NotReady { .. })
+        ));
         assert!(bmc.writes().is_empty());
     }
 }

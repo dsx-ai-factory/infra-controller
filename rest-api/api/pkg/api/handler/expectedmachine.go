@@ -221,6 +221,7 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				DpuPolicy:                apiRequest.DpuPolicy,
 				RetainBmcCredentials:     apiRequest.RetainBmcCredentials,
 				Labels:                   apiRequest.Labels,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModel(),
@@ -517,7 +518,7 @@ func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
 	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
@@ -655,7 +656,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
@@ -757,6 +758,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				HostID:                   apiRequest.HostID,
 				Labels:                   apiRequest.Labels,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				DpuPolicy:                apiRequest.DpuPolicy,
 				RetainBmcCredentials:     apiRequest.RetainBmcCredentials,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModelPtr(),
 			},
@@ -861,7 +863,7 @@ func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
 	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
@@ -1116,6 +1118,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			HostID:                   machineReq.HostID,
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			DpuPolicy:                machineReq.DpuPolicy,
 			RetainBmcCredentials:     machineReq.RetainBmcCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModel(),
 			CreatedBy:                dbUser.ID,
@@ -1445,6 +1448,7 @@ type expectedMachineUpdateFieldSet struct {
 	trayIdx                  bool
 	hostID                   bool
 	isDpfEnabled             bool
+	dpuPolicy                bool
 	retainBmcCredentials     bool
 	labels                   bool
 	hostLifecycleProfile     bool
@@ -1473,6 +1477,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 		trayIdx:                  req.TrayIdx != nil,
 		hostID:                   req.HostID != nil,
 		isDpfEnabled:             req.IsDpfEnabled != nil,
+		dpuPolicy:                req.DpuPolicy != nil,
 		retainBmcCredentials:     req.RetainBmcCredentials != nil,
 		labels:                   req.Labels != nil,
 		hostLifecycleProfile:     req.HostLifecycleProfile.ToDBModelPtr() != nil,
@@ -1718,6 +1723,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			HostID:                   machineReq.HostID,
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			DpuPolicy:                machineReq.DpuPolicy,
 			RetainBmcCredentials:     machineReq.RetainBmcCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
 		})
@@ -1980,6 +1986,7 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
 			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
+			DpuPolicy:            machine.DpuPolicy,
 			RetainBmcCredentials: machine.RetainBmcCredentials, Labels: machine.Labels,
 			HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})

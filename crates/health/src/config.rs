@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -1509,6 +1509,14 @@ pub struct LeakDetectorCollectorConfig {
     /// Interval between thermal subsystem leak detector discovery refreshes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
+
+    /// Redfish `Id`s of aggregate leak detectors, which roll up the other
+    /// detectors on their chassis. Each entry must equal the last segment of
+    /// a detector's `@odata.id` exactly. Aggregates are ignored when their
+    /// chassis exposes individual detectors. If the chassis exposes only
+    /// aggregates, all are reported. Defaults to `["leakage_aggr"]`; `[]`
+    /// reports every detector.
+    pub aggregate_detector_ids: BTreeSet<String>,
 }
 
 impl Default for LeakDetectorCollectorConfig {
@@ -1516,6 +1524,7 @@ impl Default for LeakDetectorCollectorConfig {
         Self {
             poll_interval: Duration::from_secs(60),
             state_refresh_interval: Duration::from_secs(60 * 30),
+            aggregate_detector_ids: BTreeSet::from(["leakage_aggr".to_string()]),
         }
     }
 }
@@ -3489,6 +3498,10 @@ mod tests {
             assert_eq!(
                 leak_detector.state_refresh_interval,
                 Duration::from_secs(1800)
+            );
+            assert_eq!(
+                leak_detector.aggregate_detector_ids,
+                BTreeSet::from(["leakage_aggr".to_string()])
             );
         } else {
             panic!("leak detector collector is disabled")
@@ -6236,7 +6249,7 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.2.1"
@@ -6281,7 +6294,7 @@ power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1
                 .switch
                 .as_ref()
                 .and_then(|switch| switch.id.as_deref()),
-            Some("fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0")
+            Some("sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220")
         );
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[2]
@@ -6372,7 +6385,7 @@ static_credentials_file = "credentials.json"
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
 "#;
 
         let config: Config = Figment::new()
@@ -6404,7 +6417,7 @@ static_credentials_file = "credentials.json"
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:77"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
 "#;
 
         let config: Config = Figment::new()
@@ -6688,6 +6701,20 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
 
         config.validate().expect("example config should be valid");
 
+        for endpoint in config
+            .endpoint_sources
+            .static_bmc_endpoints
+            .iter()
+            .chain(&config.endpoint_sources.static_switch_host_endpoints)
+        {
+            if let Some(switch) = &endpoint.switch {
+                let id = switch.id.as_deref().expect("example switch ID");
+                let parsed: carbide_uuid::switch::SwitchId =
+                    id.parse().expect("example switch ID should be valid");
+                assert_eq!(parsed.to_string(), id);
+            }
+        }
+
         assert_eq!(config.endpoint_sources.static_bmc_endpoints.len(), 3);
         assert_eq!(
             config.endpoint_sources.static_switch_host_endpoints.len(),
@@ -6714,7 +6741,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                 .switch
                 .as_ref()
                 .and_then(|switch| switch.id.as_deref()),
-            Some("fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0")
+            Some("sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220")
         );
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[1]

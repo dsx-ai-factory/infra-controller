@@ -18,30 +18,29 @@
 use std::future::Future;
 
 use model::machine::{AnyMachine, ManagedHostState};
-use sqlx::PgTransaction;
 
 pub trait DbMachineExt {
     fn advance_state<'a, 'txn>(
         &'a self,
-        txn: &'a mut PgTransaction<'txn>,
+        txn: &'a mut db::Transaction<'txn>,
         state: ManagedHostState,
     ) -> impl Future<Output = ()> + 'a;
 
     fn update_state<'a, 'txn>(
         &'a self,
-        txn: &'a mut PgTransaction<'txn>,
+        txn: &'a mut db::Transaction<'txn>,
         state: ManagedHostState,
     ) -> impl Future<Output = ()> + 'a;
 }
 
 impl DbMachineExt for AnyMachine {
-    async fn advance_state<'txn>(&self, txn: &mut PgTransaction<'txn>, state: ManagedHostState) {
+    async fn advance_state<'txn>(&self, txn: &mut db::Transaction<'txn>, state: ManagedHostState) {
         db::machine::advance(self, txn.as_mut(), &state, None)
             .await
             .expect("machine state should be advanced");
     }
 
-    async fn update_state<'txn>(&self, txn: &mut PgTransaction<'txn>, state: ManagedHostState) {
+    async fn update_state<'txn>(&self, txn: &mut db::Transaction<'txn>, state: ManagedHostState) {
         let host_machine_id = self.id.try_into().expect("machine should be a host");
         db::machine::update_state(txn.as_mut(), &host_machine_id, &state)
             .await

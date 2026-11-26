@@ -39,3 +39,22 @@ app.kubernetes.io/name: nico-rest-workflow
         path: password
 {{- end }}
 {{- end }}
+
+{{/*
+GOMEMLIMIT value for a worker's resources: 85 percent of limits.memory, rounded
+down to whole MiB. Empty unless the limit is a whole number of Mi or Gi, of at
+most nine digits, and the result is at least 1 MiB.
+*/}}
+{{- define "nico-rest-workflow.goMemLimit" -}}
+{{- $limit := ((. | default dict).limits | default dict).memory | default "" | toString -}}
+{{- if regexMatch "^[0-9]{1,9}(Mi|Gi)$" $limit -}}
+{{- $mib := regexFind "^[0-9]+" $limit | atoi -}}
+{{- if hasSuffix "Gi" $limit -}}
+{{- $mib = mul $mib 1024 -}}
+{{- end -}}
+{{- $value := div (mul $mib 85) 100 -}}
+{{- if gt $value 0 -}}
+{{- printf "%dMiB" $value -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

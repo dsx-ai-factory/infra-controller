@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
@@ -26,12 +26,13 @@ use model::expected_power_shelf::{
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_power_shelves_bmc_mac_address_key";
 
 pub async fn find_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedPowerShelf>> {
     let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
@@ -40,13 +41,13 @@ pub async fn find_by_bmc_mac_address(
         FROM expected_power_shelves WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
 pub async fn find_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: Uuid,
 ) -> Result<Option<ExpectedPowerShelf>, DatabaseError> {
     let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
@@ -55,7 +56,7 @@ pub async fn find_by_id(
         FROM expected_power_shelves WHERE expected_power_shelf_id=$1";
     sqlx::query_as(sql)
         .bind(id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
@@ -77,7 +78,7 @@ pub async fn find_by_id_for_update(
 }
 
 pub async fn find_many_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedPowerShelf>> {
     let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
@@ -86,7 +87,7 @@ pub async fn find_many_by_bmc_mac_address(
         FROM expected_power_shelves WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedPowerShelf> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
 
@@ -110,20 +111,20 @@ pub async fn find_many_by_bmc_mac_address(
         .collect()
 }
 
-pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
+pub async fn find_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
     let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
         serial_number, bmc_ip_address, metadata_name, metadata_description,
         metadata_labels, rack_id, bmc_retain_credentials
         FROM expected_power_shelves";
     sqlx::query_as(sql)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
 /// find_all_by_rack_id returns all expected power shelves for a given rack_id.
 pub async fn find_all_by_rack_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
     let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
@@ -132,7 +133,7 @@ pub async fn find_all_by_rack_id(
         FROM expected_power_shelves WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
@@ -143,7 +144,7 @@ pub async fn find_all_by_rack_id(
 /// shelf always has `power_shelves.bmc_mac_address` recorded, so the stored MAC
 /// is never NULL.
 pub async fn find_all_linked(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<LinkedExpectedPowerShelf>> {
     let sql = r#"
  SELECT
@@ -161,7 +162,7 @@ FROM expected_power_shelves eps
  ORDER BY eps.bmc_mac_address
  "#;
     sqlx::query_as(sql)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
@@ -208,13 +209,13 @@ pub async fn create(
 /// find returns an expected power shelf by expected_power_shelf_id if
 /// provided, otherwise by bmc_mac_address.
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     req: &ExpectedPowerShelfRequest,
 ) -> DatabaseResult<Option<ExpectedPowerShelf>> {
     if let Some(id) = req.expected_power_shelf_id {
-        find_by_id(txn, id).await
+        find_by_id(conn, id).await
     } else if let Some(mac) = req.bmc_mac_address {
-        find_by_bmc_mac_address(txn, mac).await
+        find_by_bmc_mac_address(conn, mac).await
     } else {
         Err(DatabaseError::InvalidArgument(
             "either expected_power_shelf_id or bmc_mac_address must be provided".into(),
@@ -345,14 +346,14 @@ pub async fn create_missing_from(
     txn: &mut PgConnection,
     expected_power_shelves: &[ExpectedPowerShelf],
 ) -> DatabaseResult<()> {
-    let existing_power_shelves = find_all(txn).await?;
-    let existing_map: BTreeMap<String, ExpectedPowerShelf> = existing_power_shelves
+    let existing_power_shelves = find_all(&mut *txn).await?;
+    let existing_macs: HashSet<MacAddress> = existing_power_shelves
         .into_iter()
-        .map(|power_shelf| (power_shelf.bmc_mac_address.to_string(), power_shelf))
+        .map(|power_shelf| power_shelf.bmc_mac_address)
         .collect();
 
     for expected_power_shelf in expected_power_shelves {
-        if existing_map.contains_key(&expected_power_shelf.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_power_shelf.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_power_shelf.bmc_mac_address,
                 "Expected power shelf already exists; not overwriting",

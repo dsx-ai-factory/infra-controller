@@ -415,7 +415,7 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 		}
 		for _, siteID := range requestedSiteIDs {
 			if _, ok := sitesByID[siteID]; !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Failed to create Operating System, could not find Site with ID: %s", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Failed to create Operating System, could not find Site with ID: %s", siteID), nil)
 			}
 		}
 	}
@@ -448,11 +448,11 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 		site := sitesByID[siteID]
 		if site.Status != cdbm.SiteStatusRegistered {
 			logger.Warn().Str("siteId", siteID.String()).Msg("Unable to associate Operating System to Site; Site is not in Registered state")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create Operating System, Site: %s specified in request is not in Registered state", siteID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create Operating System, Site: %s specified in request is not in Registered state", siteID), nil)
 		}
 		if allowedByProvider {
 			if site.InfrastructureProviderID != ip.ID {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Site does not belong to provider", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Site does not belong to provider", siteID), nil)
 			}
 		} else {
 			// Validate the current tenant has access to this site
@@ -462,7 +462,7 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Operating System, DB error checking Site access", nil)
 			}
 			if !ok {
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Tenant does not have access to Site", siteID.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Tenant does not have access to Site", siteID), nil)
 			}
 
 			// Validate the Site has the ImageBasedOperatingSystem capability enabled for Image based Operating Systems
@@ -935,7 +935,7 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 		for _, typeVal := range typeQuery {
 			_, ok := cdbm.OperatingSystemsTypeMap[typeVal]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("Invalid type value in query: %v", typeVal))
+				logger.Warn().Msgf("Invalid type value in query: %v", typeVal)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid type value in query", nil)
 			}
 			filter.OsTypes = append(filter.OsTypes, typeVal)
@@ -955,7 +955,7 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 		for _, status := range statusQuery {
 			_, ok := cdbm.OperatingSystemStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
+				logger.Warn().Msgf("invalid value in status query: %v", status)
 				statusError := validation.Errors{
 					"status": errors.New(status),
 				}
@@ -1520,7 +1520,7 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 		// Verify if current tenant not associated Site
 		for _, dbosa := range dbossas {
 			if dbosa.Site.Status != cdbm.SiteStatusRegistered {
-				logger.Warn().Msg(fmt.Sprintf("unable to update Operating System. Site: %s. Site is not in Registered state", dbosa.Site.Name))
+				logger.Warn().Msgf("unable to update Operating System. Site: %s. Site is not in Registered state", dbosa.Site.Name)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to update Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
 			}
 
@@ -1987,7 +1987,7 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 			if os.Type == cdbm.OperatingSystemTypeImage {
 				for _, dbosa := range ossasToDelete {
 					if dbosa.Site.Status != cdbm.SiteStatusRegistered {
-						logger.Warn().Msg(fmt.Sprintf("unable to delete Operating System. Site: %s. is not in Registered state", dbosa.SiteID.String()))
+						logger.Warn().Msgf("unable to delete Operating System. Site: %s. is not in Registered state", dbosa.SiteID)
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to delete Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
 					}
 				}

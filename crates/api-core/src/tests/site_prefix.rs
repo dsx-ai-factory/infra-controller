@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use ipnetwork::IpNetwork;
 use model::metadata::Metadata;
 use model::site_prefix::{
@@ -73,7 +74,7 @@ async fn persist_tenant_site_prefix(
     value: NewTenantManagedSitePrefix,
     lifecycle_state: SitePrefixLifecycleState,
 ) -> SitePrefix {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let site_prefix = db::site_prefix::create_tenant_managed(
         value,
         env.config.max_site_prefixes_per_tenant,
@@ -102,7 +103,7 @@ async fn persist_configured_site_prefix(env: &TestEnv, prefix: &str) -> SitePref
     // `reconcile_configured` treats this one prefix as the complete configured
     // set, so this helper must be called at most once in a test.
     let prefix = prefix.parse().unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[prefix])
         .await
         .unwrap();
@@ -248,7 +249,7 @@ async fn dpu_isolation_includes_retained_tenant_roots_without_reactivating_opera
         persist_tenant_site_prefix(&env, tenant_managed_site_prefix(prefix, tenant), state).await;
     }
     let retired_operator = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes)
         .await
         .unwrap();
@@ -562,7 +563,7 @@ async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPo
     create_fixture_tenant(&env, "tenant-a").await.unwrap();
     create_fixture_tenant(&env, "tenant-b").await.unwrap();
 
-    let mut blocker = env.pool.begin().await.unwrap();
+    let mut blocker = env.pool.txn_begin().await.unwrap();
     db::tenant_prefix_overlap::lock_checks(&mut blocker)
         .await
         .unwrap();
@@ -808,14 +809,12 @@ async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_ver
         SitePrefixLifecycleState::Deleting,
     )
     .await;
-    let mut txn = env.pool.begin().await.unwrap();
     assert!(
-        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&env.pool, false)
             .await
             .unwrap()
             .is_empty()
     );
-    txn.commit().await.unwrap();
 
     // Version must still show the explicit override so operators can inspect it.
     assert!(runtime_config_null_routes(&env).await.is_empty());
@@ -1467,7 +1466,7 @@ async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
 
     // Reconstruct a retired root with exact legacy child lineage. Direct SQL
     // models the predecessor state after new admission for that root has closed.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root]).await?;
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root]).await?;
     let retiring_root_id: SitePrefixId =
@@ -1572,7 +1571,7 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
 
     // Reconstruct the operator root before creating the tenant resource
     // through the same public path used before its configuration retirement.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root, nested_root])
         .await?;
     // Direct admission needs live coverage, not a unique parent. A more specific
@@ -1619,7 +1618,7 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
 
     // Retire the root as startup reconciliation does after its removal from
     // configuration, then verify the direct prefix retains its blackhole.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root]).await?;
     let retiring_root_id: SitePrefixId =
         sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
@@ -1746,7 +1745,7 @@ async fn dpu_response_retains_containing_roots_for_unassigned_predecessor_prefix
 
     // Reconstruct v2.1-style nested roots and a child left unassigned by the
     // lineage migration, then remove the final target configuration root.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::site_prefix::reconcile_configured(&mut txn, &[broad_root, specific_root]).await?;
     db::site_prefix::reconcile_configured(&mut txn, &[]).await?;
     sqlx::query(

@@ -58,7 +58,6 @@ pub(crate) async fn list_os_image(
     api: &Api,
     request: Request<crate::api::rpc::ListOsImageRequest>,
 ) -> Result<Response<crate::api::rpc::ListOsImageResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
     let tenant: Option<TenantOrganizationId> = match request.into_inner().tenant_organization_id {
         Some(x) => Some(
             TenantOrganizationId::try_from(x)
@@ -66,15 +65,11 @@ pub(crate) async fn list_os_image(
         ),
         None => None,
     };
-    let os_images =
-        db::os_image::list(&mut txn, tenant)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: e.to_string(),
-            })?;
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: e.to_string(),
-    })?;
+    let os_images = db::os_image::list(api.pg_pool(), tenant)
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: e.to_string(),
+        })?;
 
     let mut images: Vec<crate::api::rpc::OsImage> = Vec::new();
     for os_image in os_images.iter() {
@@ -93,18 +88,13 @@ pub(crate) async fn get_os_image(
     api: &Api,
     request: Request<rpc::Uuid>,
 ) -> Result<Response<crate::api::rpc::OsImage>, Status> {
-    let mut txn = api.txn_begin().await?;
     let image_id: Uuid = Uuid::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
-    let image =
-        db::os_image::get(&mut txn, image_id)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: e.to_string(),
-            })?;
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: e.to_string(),
-    })?;
+    let image = db::os_image::get(api.pg_pool(), image_id)
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: e.to_string(),
+        })?;
 
     let resp: crate::api::rpc::OsImage =
         rpc::forge::OsImage::try_from(image).map_err(|e| CarbideError::Internal {

@@ -150,11 +150,11 @@ pub async fn create(
 }
 
 pub async fn find_by_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     name: &str,
 ) -> DatabaseResult<Option<PowerShelf>> {
     let mut power_shelves =
-        find_by(txn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
+        find_by(conn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
 
     if power_shelves.is_empty() {
         Ok(None)
@@ -175,10 +175,10 @@ pub async fn find_by_name(
 }
 
 pub async fn find_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: &PowerShelfId,
 ) -> DatabaseResult<Option<PowerShelf>> {
-    let mut power_shelves = find_by(txn, ObjectColumnFilter::One(IdColumn, id)).await?;
+    let mut power_shelves = find_by(conn, ObjectColumnFilter::One(IdColumn, id)).await?;
 
     if power_shelves.is_empty() {
         Ok(None)
@@ -198,11 +198,11 @@ pub async fn find_by_id(
 // the machine_interfaces table, but for now this is going to be like
 // this until I take care of the issue.
 pub async fn find_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: mac_address::MacAddress,
 ) -> DatabaseResult<Option<PowerShelf>> {
     let power_shelves = find_by(
-        txn,
+        conn,
         ObjectColumnFilter::One(BmcMacAddressColumn, &bmc_mac_address),
     )
     .await?;
@@ -245,7 +245,7 @@ pub async fn find_ids(
 
     if let Some(state) = &filter.controller_state {
         qb.push(" AND ps.controller_state->>'state' = ");
-        qb.push_bind(state.clone());
+        qb.push_bind(state);
     }
 
     if let Some(mac) = filter.bmc_mac {
@@ -269,7 +269,7 @@ const POWER_SHELVES_WITH_BMC_INFO: &str = r#"SELECT
     id, config, status, deleted, bmc_mac_address, bmc_info,
     bmc_credential_rotation_requested, decommission_requested,
     controller_state, controller_state_version, controller_state_outcome,
-    power_shelf_maintenance_requested, power_shelf_reprovisioning_requested,
+    power_shelf_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE power_shelf_id = power_shelves.id AND request_key = power_shelves.power_shelf_maintenance_requested->>'requested_at')) AS power_shelf_maintenance_requested, power_shelf_reprovisioning_requested,
     firmware_upgrade_status, nvlink_domain_uuid, name, description, labels,
     version, rack_id, health_reports
 FROM (
@@ -297,14 +297,14 @@ FROM (
 ) AS power_shelves"#;
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PowerShelf>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> DatabaseResult<Vec<PowerShelf>> {
     let mut query = FilterableQueryBuilder::new(POWER_SHELVES_WITH_BMC_INFO).filter(&filter);
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
@@ -312,8 +312,9 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PowerShelf>>(
 /// `try_update_controller_state` writes the power shelf state and `new_version`
 /// when the version matches `expected_version`.
 ///
-/// A missing shelf or changed version returns
-/// `NotApplied(ControllerStateNotCurrent)`.
+/// A missing shelf, changed version, or stale maintenance admission returns
+/// `NotApplied(ControllerStateNotCurrent)`. An already-admitted request can save
+/// its progress even when the pending request has been replaced or cleared.
 /// `Applied(())` leaves the write in the caller's transaction; database failures
 /// remain errors.
 pub async fn try_update_controller_state(
@@ -323,13 +324,18 @@ pub async fn try_update_controller_state(
     new_version: ConfigVersion,
     new_state: &PowerShelfControllerState,
 ) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
+    let maintenance_request = match new_state {
+        PowerShelfControllerState::Maintenance { request, .. } => request.as_ref(),
+        _ => None,
+    };
     let query_result = sqlx::query_as::<_, PowerShelfId>(
-            "UPDATE power_shelves SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 RETURNING id",
+            "UPDATE power_shelves SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 AND ($5::jsonb IS NULL OR power_shelf_maintenance_requested = $5::jsonb - 'action_id' OR (controller_state->>'state' = 'maintenance' AND controller_state->'request' = $5::jsonb)) RETURNING id",
         )
             .bind(sqlx::types::Json(new_state))
             .bind(new_version)
             .bind(power_shelf_id)
             .bind(expected_version)
+            .bind(maintenance_request.map(sqlx::types::Json))
             .fetch_optional(txn)
             .await
             .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
@@ -370,7 +376,7 @@ pub async fn find_maintenance_requests(
             sqlx::types::Json<PowerShelfMaintenanceRequest>,
         ),
     >(
-        "SELECT id, power_shelf_maintenance_requested FROM power_shelves
+        "SELECT id, power_shelf_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE power_shelf_id = power_shelves.id AND request_key = power_shelves.power_shelf_maintenance_requested->>'requested_at')) AS power_shelf_maintenance_requested FROM power_shelves
              WHERE id = ANY($1) AND power_shelf_maintenance_requested IS NOT NULL",
     )
     .bind(ids)
@@ -391,18 +397,17 @@ pub async fn set_power_shelf_maintenance_requested(
     operation: PowerShelfMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = PowerShelfMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, PowerShelfId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(power_shelf_id)
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_power_shelf_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(
+        txn,
+        crate::cm_action::Target::PowerShelf(&power_shelf_id),
+        &req,
+    )
+    .await
 }
 
 /// Records a request to start decommissioning when the power shelf is Ready.
@@ -443,17 +448,13 @@ pub async fn clear_power_shelf_maintenance_requested(
     power_shelf_id: PowerShelfId,
     request: &PowerShelfMaintenanceRequest,
 ) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = NULL WHERE id = $1 AND power_shelf_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, PowerShelfId>(query)
-        .bind(power_shelf_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_power_shelf_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => crate::ConditionalWrite::Applied(()),
-        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::PowerShelf(&power_shelf_id),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Record an operator force-converge request against a power shelf's BMC (PMC)
@@ -943,6 +944,7 @@ mod tests {
     use model::power_shelf::PowerShelfConfig;
 
     use super::*;
+    use crate::TransactionVending as _;
     use crate::test_support::power_shelf::{create_seeded, create_seeded_with_config, seeded_id};
 
     #[crate::sqlx_test]
@@ -952,7 +954,7 @@ mod tests {
         use model::rack::RackConfig;
 
         let rack_id = RackId::new("rack-nvlink-domain");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -1025,7 +1027,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let expected_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
         let other_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         for (rack, seed, stored_domain, deleted) in [
             ("rack-missing", 31, None, false),
@@ -1081,7 +1083,7 @@ mod tests {
         use carbide_uuid::network::NetworkSegmentId;
         use model::allocation_type::AllocationType;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let shelf = create_seeded(&mut txn, 10, "BMC info shelf").await?;
         let other = create_seeded(&mut txn, 11, "Data-only shelf").await?;
@@ -1165,7 +1167,7 @@ mod tests {
     async fn test_power_shelf_database_operations(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1206,7 +1208,7 @@ mod tests {
     async fn test_power_shelf_status_update(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let mut power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1241,7 +1243,7 @@ mod tests {
     async fn test_power_shelf_controller_state_transitions(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1334,7 +1336,7 @@ mod tests {
     async fn test_power_shelf_list_segment_ids(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let configs = [
             ("List Test Power Shelf 1", 5000, 240),
@@ -1382,7 +1384,7 @@ mod tests {
     async fn test_power_shelf_controller_state_outcome(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let power_shelf = create_seeded_with_config(
             &mut txn,
@@ -1428,7 +1430,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_power_on(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 1, "PowerOn shelf").await?;
         assert!(
             shelf.power_shelf_maintenance_requested.is_none(),
@@ -1461,7 +1463,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_power_off(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 2, "PowerOff shelf").await?;
 
         set_power_shelf_maintenance_requested(
@@ -1493,7 +1495,7 @@ mod tests {
     async fn test_set_power_shelf_maintenance_requested_overwrites(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 3, "Overwrite shelf").await?;
 
         set_power_shelf_maintenance_requested(
@@ -1528,7 +1530,7 @@ mod tests {
     async fn test_clear_power_shelf_maintenance_requested(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 4, "Clear shelf").await?;
 
         // Test clearing both flavors of operation.
@@ -1568,11 +1570,12 @@ mod tests {
     async fn test_clear_power_shelf_maintenance_requested_when_none(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 5, "Idempotent clear shelf").await?;
         assert!(shelf.power_shelf_maintenance_requested.is_none());
 
         let request = PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at: Utc::now(),
             initiator: "operator".to_owned(),
             operation: PowerShelfMaintenanceOperation::PowerOn,
@@ -1591,7 +1594,7 @@ mod tests {
     async fn test_set_decommission_requested(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let shelf = create_seeded(&mut txn, 6, "Decommission request shelf").await?;
 
         set_decommission_requested(&mut txn, shelf.id).await?;
@@ -1611,7 +1614,7 @@ mod tests {
     async fn find_all_bmc_mac_addresses_and_names_matches_single_lookup(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let live_mac: MacAddress = "02:00:00:00:0c:01".parse()?;
         let deleted_mac: MacAddress = "02:00:00:00:0c:02".parse()?;
         // `power_shelves.bmc_mac_address` references `expected_power_shelves`.
@@ -1689,7 +1692,7 @@ mod tests {
         use carbide_uuid::network::NetworkSegmentId;
         use model::allocation_type::AllocationType;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let mac_a: MacAddress = "02:00:00:00:0d:01".parse()?;
         let mac_b: MacAddress = "02:00:00:00:0d:02".parse()?;
@@ -1893,7 +1896,7 @@ mod tests {
     async fn endpoint_resolution_requires_the_shelf_to_own_the_interface(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let segment_1 = seed_underlay_segment(txn.as_mut(), "owned-interface-1").await?;
         let segment_2 = seed_underlay_segment(txn.as_mut(), "owned-interface-2").await?;

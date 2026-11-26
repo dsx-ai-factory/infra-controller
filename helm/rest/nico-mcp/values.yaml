@@ -37,6 +37,11 @@ config:
   # -- Enable debug logging (full HTTP request/response)
   debug: false
 
+metrics:
+  # -- Serve Prometheus metrics at /metrics on a separate port
+  enabled: true
+  port: 9360
+
 resources:
   requests:
     memory: "64Mi"

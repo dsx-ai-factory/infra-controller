@@ -487,7 +487,7 @@ func Test_BodyLimit(t *testing.T) {
 		},
 		{
 			name:       "accepts a small sized body",
-			body:       bytes.NewReader([]byte(`{"name":"test"}`)),
+			body:       strings.NewReader(`{"name":"test"}`),
 			wantStatus: http.StatusUnauthorized,
 		},
 		{

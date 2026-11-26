@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
@@ -24,6 +24,7 @@ use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest, LinkedExpect
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 mod nvos_interface;
@@ -52,14 +53,14 @@ const EXPECTED_SWITCH_COLUMNS: &str =
             WHERE i.bmc_mac_address = expected_switches.bmc_mac_address
         ), '[]'::jsonb) AS nvos_interfaces";
 pub async fn find_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
     let sql =
         format!("SELECT {EXPECTED_SWITCH_COLUMNS} FROM expected_switches WHERE bmc_mac_address=$1");
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(bmc_mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
@@ -68,16 +69,19 @@ pub async fn find_by_bmc_mac_address(
 /// `expected_switch_nvos_interfaces`, so we resolve the owning BMC MAC there and
 /// then load the switch. Returns at most one row because the discover hook
 /// expects a 1:1 lookup.
-pub async fn find_by_nvos_mac_address(
-    txn: &mut PgConnection,
+pub async fn find_by_nvos_mac_address<DB>(
+    conn: &mut DB,
     nvos_mac_address: MacAddress,
-) -> Result<Option<ExpectedSwitch>, DatabaseError> {
+) -> Result<Option<ExpectedSwitch>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let Some(bmc_mac_address) =
-        nvos_interface::find_switch_bmc_by_nvos_mac(&mut *txn, nvos_mac_address).await?
+        nvos_interface::find_switch_bmc_by_nvos_mac(&mut *conn, nvos_mac_address).await?
     else {
         return Ok(None);
     };
-    find_by_bmc_mac_address(txn, bmc_mac_address).await
+    find_by_bmc_mac_address(conn, bmc_mac_address).await
 }
 
 /// Serialize expected-switch writes on a transaction-scoped advisory lock so
@@ -109,20 +113,20 @@ async fn find_nvos_mac_claimed_elsewhere(
 }
 
 pub async fn find_by_serial_number(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     serial_number: &str,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
     let sql =
         format!("SELECT {EXPECTED_SWITCH_COLUMNS} FROM expected_switches WHERE serial_number=$1");
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(serial_number)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
 
 pub async fn find_by_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: Uuid,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
     let sql = format!(
@@ -130,25 +134,25 @@ pub async fn find_by_id(
     );
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
 
 pub async fn find_by_rack_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_id: String,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
     let sql = format!("SELECT {EXPECTED_SWITCH_COLUMNS} FROM expected_switches WHERE rack_id=$1");
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(rack_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
 
 pub async fn find_many_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedSwitch>> {
     let sql = format!(
@@ -156,7 +160,7 @@ pub async fn find_many_by_bmc_mac_address(
     );
     let v: Vec<ExpectedSwitch> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(bmc_mac_addresses)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))?;
 
@@ -180,28 +184,28 @@ pub async fn find_many_by_bmc_mac_address(
         .collect()
 }
 
-pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedSwitch>> {
+pub async fn find_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedSwitch>> {
     let sql = format!("SELECT {EXPECTED_SWITCH_COLUMNS} FROM expected_switches");
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
 
 /// find_all_by_rack_id returns all expected switches for a given rack_id.
 pub async fn find_all_by_rack_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedSwitch>> {
     let sql = format!("SELECT {EXPECTED_SWITCH_COLUMNS} FROM expected_switches WHERE rack_id=$1");
     sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(rack_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(&sql, err))
 }
 
-pub async fn find_all_linked(txn: &mut PgConnection) -> DatabaseResult<Vec<LinkedExpectedSwitch>> {
+pub async fn find_all_linked(conn: impl DbReader<'_>) -> DatabaseResult<Vec<LinkedExpectedSwitch>> {
     let sql = r#"
   SELECT
   es.serial_number,
@@ -218,13 +222,13 @@ pub async fn find_all_linked(txn: &mut PgConnection) -> DatabaseResult<Vec<Linke
   ORDER BY es.bmc_mac_address
   "#;
     sqlx::query_as(sql)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
 pub async fn find_one_linked(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<Option<LinkedExpectedSwitch>> {
     let sql = r#"
   SELECT
@@ -250,7 +254,7 @@ pub async fn find_one_linked(
  LIMIT 1
  "#;
     sqlx::query_as(sql)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
@@ -339,13 +343,13 @@ fn prepare_interfaces_for_persist(
 /// find returns an expected switch by expected_switch_id if provided,
 /// otherwise by bmc_mac_address.
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     req: &ExpectedSwitchRequest,
 ) -> DatabaseResult<Option<ExpectedSwitch>> {
     if let Some(id) = req.expected_switch_id {
-        find_by_id(txn, id).await
+        find_by_id(conn, id).await
     } else if let Some(mac) = req.bmc_mac_address {
-        find_by_bmc_mac_address(txn, mac).await
+        find_by_bmc_mac_address(conn, mac).await
     } else {
         Err(DatabaseError::InvalidArgument(
             "either expected_switch_id or bmc_mac_address must be provided".into(),
@@ -566,14 +570,14 @@ pub async fn create_missing_from(
     txn: &mut PgConnection,
     expected_switches: &[ExpectedSwitch],
 ) -> DatabaseResult<()> {
-    let existing_switches = find_all(txn).await?;
-    let existing_map: BTreeMap<String, ExpectedSwitch> = existing_switches
+    let existing_switches = find_all(&mut *txn).await?;
+    let existing_macs: HashSet<MacAddress> = existing_switches
         .into_iter()
-        .map(|switch| (switch.bmc_mac_address.to_string(), switch))
+        .map(|switch| switch.bmc_mac_address)
         .collect();
 
     for expected_switch in expected_switches {
-        if existing_map.contains_key(&expected_switch.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_switch.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_switch.bmc_mac_address,
                 "Expected switch already exists; not overwriting",

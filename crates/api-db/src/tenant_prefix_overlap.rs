@@ -22,7 +22,6 @@
 //! references use the underlying prefix indexes.
 
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use sqlx::PgTransaction;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
@@ -138,7 +137,7 @@ pub async fn find_overlapping_vpc_prefix_pairs(
 /// in the same transaction. Otherwise, two requests can each see no overlap or
 /// enough admission capacity and both commit. PostgreSQL releases the lock on commit
 /// or rollback.
-pub async fn lock_checks(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+pub async fn lock_checks(txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
     sqlx::query(query)
@@ -151,7 +150,7 @@ pub async fn lock_checks(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
 /// `lock_config` keeps routing writers out while configuration is checked and
 /// rendered, but allows unrelated DPU requests to run together. Take it before
 /// resource locks, just like [`lock_checks`]; never upgrade it to a writer lock.
-pub async fn lock_config(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+pub async fn lock_config(txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock_shared(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
     sqlx::query(query)
@@ -168,16 +167,17 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn config_readers_share_the_lock_and_exclude_writers(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut first = pool.begin().await?;
+        let mut first = pool.txn_begin().await?;
         lock_config(&mut first).await?;
-        let mut second = pool.begin().await?;
+        let mut second = pool.txn_begin().await?;
         tokio::time::timeout(Duration::from_secs(5), lock_config(&mut second)).await??;
-        let mut writer = pool.begin().await?;
+        let mut writer = pool.txn_begin().await?;
         let query = "SELECT pg_try_advisory_xact_lock(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";
         assert!(
@@ -202,13 +202,13 @@ mod tests {
     async fn rollback_releases_overlap_checks_lock(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         lock_checks(&mut holder).await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await?;
 
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *waiter)
             .await?;

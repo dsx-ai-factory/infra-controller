@@ -52,7 +52,7 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
         .id
         .unwrap();
     let retired = persist_configured_site_prefix(&env, "192.0.2.0/24").await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &split_prefixes)
         .await
         .unwrap();
@@ -153,7 +153,7 @@ async fn retired_operator_prefix_releases_direct_segment_to_ready_replacement(po
         .id
         .unwrap();
     let retired = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[left, right])
         .await
         .unwrap();
@@ -217,7 +217,7 @@ async fn retired_operator_prefix_releases_direct_segment_to_ready_replacement(po
 
     // Retiring the replacement cannot withdraw its coverage while the direct
     // segment remains, including during soft deletion and draining.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[left])
         .await
         .unwrap();
@@ -298,7 +298,7 @@ async fn retired_operator_roots_do_not_reopen_stale_config_admission(pool: sqlx:
         .into_inner()
         .id
         .unwrap();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &original)
         .await
         .unwrap();
@@ -377,7 +377,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
     )
     .await;
     let operator = persist_configured_site_prefix(&env, "203.0.113.0/24").await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[])
         .await
         .unwrap();
@@ -450,7 +450,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
                 .contains(&root.config.prefix)
         );
     }
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::vpc_prefix::final_delete(child_ids[0], &mut txn)
         .await
         .unwrap();
@@ -462,7 +462,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
     };
     assert!(reason.contains("1"));
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::vpc_prefix::final_delete(child_ids[1], &mut txn)
         .await
         .unwrap();
@@ -495,7 +495,7 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
             .unwrap()
             .is_empty()
     );
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[operator.config.prefix])
         .await
         .unwrap();
@@ -521,13 +521,13 @@ async fn retirement_waits_for_exact_children_and_preserves_other_roots(pool: sql
 async fn operator_restoration_invalidates_pending_retirement(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let root = persist_configured_site_prefix(&env, "203.0.113.0/24").await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::site_prefix::reconcile_configured(&mut txn, &[])
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
-    let mut restoration = env.pool.begin().await.unwrap();
+    let mut restoration = env.pool.txn_begin().await.unwrap();
     db::site_prefix::find_by_id_for_update(&mut restoration, root.id)
         .await
         .unwrap();
@@ -569,7 +569,7 @@ async fn retirement_retries_after_interrupted_parent_lock(pool: sqlx::PgPool) {
         SitePrefixLifecycleState::Deleting,
     )
     .await;
-    let mut blocker = env.pool.begin().await.unwrap();
+    let mut blocker = env.pool.txn_begin().await.unwrap();
     db::site_prefix::find_by_id_for_update(&mut blocker, root.id)
         .await
         .unwrap();
@@ -662,7 +662,7 @@ async fn child_creation_racing_physical_retirement_observes_missing_parent(pool:
         SitePrefixLifecycleState::Deleting,
     )
     .await;
-    let mut blocker = env.pool.begin().await.unwrap();
+    let mut blocker = env.pool.txn_begin().await.unwrap();
     db::site_prefix::find_by_id_for_update(&mut blocker, root.id)
         .await
         .unwrap();

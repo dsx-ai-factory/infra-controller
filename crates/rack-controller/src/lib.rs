@@ -18,12 +18,12 @@
 //! State Controller implementation for Racks.
 
 use carbide_uuid::rack::{RackId, RackProfileId};
+use db::db_read::DbReader;
 use db::machine;
 use model::machine::StableHostMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::Rack;
 use model::rack_type::{RackCapabilitiesSet, RackProfile};
-use sqlx::PgConnection;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use crate::context::RackStateHandlerContextObjects;
@@ -47,18 +47,21 @@ mod validating;
 pub mod write_ops;
 
 /// Loads all machines associated with the given rack via their `rack_id` FK.
-pub(crate) async fn get_machines_from_rack(
+pub(crate) async fn get_machines_from_rack<DB>(
     rack: &Rack,
-    txn: &mut PgConnection,
-) -> Result<Vec<StableHostMachine>, StateHandlerError> {
+    db: &mut DB,
+) -> Result<Vec<StableHostMachine>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let search_cfg = MachineSearchConfig {
         rack_id: Some(rack.id.clone()),
         ..Default::default()
     };
 
-    let machine_ids = machine::find_machine_ids(&mut *txn, search_cfg).await?;
+    let machine_ids = machine::find_machine_ids(&mut *db, search_cfg).await?;
     let machines = machine::find(
-        txn,
+        db,
         db::ObjectFilter::List(&machine_ids),
         MachineSearchConfig::default(),
     )

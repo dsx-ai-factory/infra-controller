@@ -248,7 +248,11 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
     );
     let cancel_token = CancellationToken::new();
     let controller = StateController::builder()
-        .database(pool.clone(), api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            api.work_lock_manager_handle(),
+            api.instrumentation(),
+        )
         .meter("carbide_racks", test_harness.test_meter.meter())
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(

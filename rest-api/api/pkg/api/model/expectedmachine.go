@@ -27,6 +27,15 @@ var (
 	expectedMachineInterfaceLogicalNameRegexp  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
+const validationErrorExpectedMachineDpuPolicy = "must be Inherit, Nic, or Ignore"
+
+// expectedMachineDpuPolicies lists the accepted dpuPolicy values for validation.
+var expectedMachineDpuPolicies = []any{
+	cdbm.ExpectedMachineDpuPolicyInherit,
+	cdbm.ExpectedMachineDpuPolicyNic,
+	cdbm.ExpectedMachineDpuPolicyIgnore,
+}
+
 const validationErrorExpectedMachineInterfaceMAC = "must be a MAC address of six colon- or hyphen-separated octets"
 
 // APIExpectedMachineInterfaceMacAddressIdentifier is a MAC address that
@@ -422,6 +431,8 @@ type APIExpectedMachineCreateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
+	DpuPolicy *cdbm.ExpectedMachineDpuPolicy `json:"dpuPolicy"`
 	// RetainBmcCredentials, when true, makes Site Explorer keep the BMC's
 	// factory-default credentials instead of rotating them. Omission or null
 	// stores false, the same as omitting --bmc-retain-credentials from nico-admin-cli.
@@ -450,9 +461,9 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.MAC),
 		validation.Field(&emcr.DefaultBmcUsername,
-			validation.RuneLength(0, 16).Error("BMC username must be 16 characters or less")),
+			validation.RuneLength(0, 255).Error("BMC username must be 255 characters or less")),
 		validation.Field(&emcr.DefaultBmcPassword,
-			validation.RuneLength(0, 20).Error("BMC password must be 20 characters or less")),
+			validation.RuneLength(0, 255).Error("BMC password must be 255 characters or less")),
 		validation.Field(&emcr.ChassisSerialNumber,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Chassis serial number consists only of whitespace"),
@@ -475,6 +486,9 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
 		validation.Field(&emcr.ServerName,
 			validation.NilOrNotEmpty.Error("ServerName cannot be empty")),
+		validation.Field(&emcr.DpuPolicy,
+			validation.NilOrNotEmpty.Error(validationErrorExpectedMachineDpuPolicy),
+			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),
 	)
 
 	if err != nil {
@@ -539,6 +553,8 @@ type APIExpectedMachineUpdateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
+	DpuPolicy *cdbm.ExpectedMachineDpuPolicy `json:"dpuPolicy"`
 	// RetainBmcCredentials, when non-nil, replaces whether Site Explorer keeps
 	// the BMC's factory-default credentials. Changing it does not rotate or
 	// restore stored credentials; a later BMC factory reset uses the new value.
@@ -582,12 +598,12 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("BMC Username cannot be empty"),
 			validation.When(emur.DefaultBmcUsername != nil && *emur.DefaultBmcUsername != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Username consists only of whitespace")),
-			validation.RuneLength(1, 16).Error("BMC Username must be 1-16 characters")),
+			validation.RuneLength(1, 255).Error("BMC Username must be 1-255 characters")),
 		validation.Field(&emur.DefaultBmcPassword,
 			validation.NilOrNotEmpty.Error("BMC Password cannot be empty"),
 			validation.When(emur.DefaultBmcPassword != nil && *emur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
-			validation.RuneLength(1, 20).Error("BMC Password must be 1-20 characters")),
+			validation.RuneLength(1, 255).Error("BMC Password must be 1-255 characters")),
 		validation.Field(&emur.ChassisSerialNumber,
 			validation.NilOrNotEmpty.Error("Chassis Serial Number cannot be empty"),
 			validation.When(emur.ChassisSerialNumber != nil && *emur.ChassisSerialNumber != "",
@@ -608,6 +624,9 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Model cannot be empty")),
 		validation.Field(&emur.Description,
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
+		validation.Field(&emur.DpuPolicy,
+			validation.NilOrNotEmpty.Error(validationErrorExpectedMachineDpuPolicy),
+			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),
 	)
 
 	if err != nil {
@@ -641,6 +660,9 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 	if emur.RetainBmcCredentials != nil {
 		resource.BmcRetainCredentials = emur.RetainBmcCredentials
 	}
+	if emur.DpuPolicy != nil {
+		resource.DpuMode = cutil.GetPtr(emur.DpuPolicy.ToProto())
+	}
 	if emur.Interfaces != nil {
 		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
 		resource.HostNics = make([]*corev1.ExpectedHostNic, 0, len(emur.Interfaces))
@@ -669,6 +691,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
+			util.ExpectedComponentUpdateField{Path: "dpu_mode", Present: emur.DpuPolicy != nil},
 			util.ExpectedComponentUpdateField{Path: "bmc_retain_credentials", Present: emur.RetainBmcCredentials != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
@@ -722,6 +745,8 @@ type APIExpectedMachine struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
+	// DpuPolicy is the effective DPU policy; an unset value shows as Inherit
+	DpuPolicy string `json:"dpuPolicy"`
 	// RetainBmcCredentials indicates whether Site Explorer keeps the BMC's factory-default credentials
 	RetainBmcCredentials bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
@@ -763,6 +788,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
+		DpuPolicy:                string(dibp.EffectiveDpuPolicy()),
 		RetainBmcCredentials:     dibp.RetainsBmcCredentials(),
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),

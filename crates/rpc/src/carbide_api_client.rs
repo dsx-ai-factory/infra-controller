@@ -74,9 +74,9 @@ pub enum ExpectedSwitchUpdateField {
     BmcRetainCredentials,
 }
 
-impl Display for ExpectedSwitchUpdateField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+impl ExpectedSwitchUpdateField {
+    fn as_str(&self) -> &'static str {
+        match self {
             Self::BmcUsername => "bmc_username",
             Self::BmcPassword => "bmc_password",
             Self::SwitchSerialNumber => "switch_serial_number",
@@ -90,7 +90,13 @@ impl Display for ExpectedSwitchUpdateField {
             Self::BmcIpAddress => "bmc_ip_address",
             Self::NvosIpAddress => "nvos_ip_address",
             Self::BmcRetainCredentials => "bmc_retain_credentials",
-        })
+        }
+    }
+}
+
+impl Display for ExpectedSwitchUpdateField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -229,13 +235,17 @@ impl CarbideApiClient {
         switch: crate::protos::forge::ExpectedSwitch,
         update_mask: &[ExpectedSwitchUpdateField],
     ) -> Result<(), Status> {
-        let update_mask = update_mask
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-            .parse()
-            .map_err(|error| Status::invalid_argument(format!("invalid update mask: {error}")))?;
+        let mut mask = String::new();
+        for (index, field) in update_mask.iter().enumerate() {
+            if index != 0 {
+                mask.push(',');
+            }
+            mask.push_str(field.as_str());
+        }
+        let update_mask = tonic::metadata::AsciiMetadataValue::try_from(hyper::body::Bytes::from(
+            mask,
+        ))
+        .map_err(|error| Status::invalid_argument(format!("invalid update mask: {error}")))?;
 
         let mut request = tonic::Request::new(switch);
         request

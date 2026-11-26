@@ -16,7 +16,6 @@
 #
 # tokio_unstable is required in order to enable tokio runtime metrics
 #
-# -A dependency-on-unit-never-type-fallback is here due to `!` falling back to `()`  is being removed and looks like sqlx hasn't updated yet
 # Compiler lints are configured here so they apply to every workspace package,
 # including packages that do not inherit the workspace lint table.
 [target.'cfg(all())']
@@ -27,8 +26,6 @@ rustflags = [
   "unreachable-pub",
   "--cfg",
   "tokio_unstable",
-  "-A",
-  "dependency-on-unit-never-type-fallback",
   "-A",
   "unknown_lints",                          # Needed so that prior cargo checks tolerate custom lints like txn_held_across_await
 ]

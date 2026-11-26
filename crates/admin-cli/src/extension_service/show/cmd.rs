@@ -16,7 +16,7 @@
  */
 
 use ::rpc::admin_cli::output::OutputFormat;
-use ::rpc::forge::{DpuExtensionService, DpuExtensionServiceType};
+use ::rpc::forge::{DpuExtensionService, DpuExtensionServiceType, ServiceVpcAddressFamily};
 use prettytable::{Table, row};
 
 use super::args::Args;
@@ -32,7 +32,9 @@ pub(super) async fn handle_show(
     let is_json = output_format == OutputFormat::Json;
 
     let services = if let Some(id) = args.id {
-        let service = api_client.get_extension_service_by_id(id).await?;
+        let service = api_client
+            .get_extension_service_by_id(id.to_string())
+            .await?;
         vec![service]
     } else {
         let service_list = api_client
@@ -72,6 +74,8 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
         "Lifecycle State",
         "Created",
         "Updated",
+        "Service VPC Interface Families",
+        "Lifecycle Reason",
     ]);
 
     for service in services {
@@ -90,6 +94,25 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
                     .or_else(|| (!status.state.is_empty()).then(|| status.state.clone()))
             })
             .unwrap_or_else(|| "Unknown".to_string());
+
+        let families = service
+            .service_vpc_interfaces
+            .iter()
+            .map(|requirement| {
+                match ServiceVpcAddressFamily::try_from(requirement.address_family) {
+                    Ok(ServiceVpcAddressFamily::Ipv4) => "ipv4",
+                    Ok(ServiceVpcAddressFamily::Ipv6) => "ipv6",
+                    _ => "unknown",
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lifecycle_reason = service
+            .lifecycle_status
+            .as_ref()
+            .and_then(|status| status.state_reason.as_ref())
+            .and_then(|reason| reason.outcome_msg.as_deref())
+            .unwrap_or_default();
 
         table.add_row(row![
             service.service_id,
@@ -111,6 +134,8 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
             lifecycle_state,
             service.created,
             service.updated,
+            families,
+            lifecycle_reason,
         ]);
     }
 

@@ -41,8 +41,9 @@ spec:
             type: object
           spec:
             description: |-
-              DPUFlavorTemplateSpec defines the content of a DPUFlavorTemplate. The template body is
-              rendered per-DPU against DPUDevice.spec.values to produce a concrete DPUFlavor.
+              DPUFlavorTemplateSpec defines the content of a DPUFlavorTemplate. The
+              template body is rendered per-DPU against DPUDevice.spec.values to produce a
+              concrete DPUFlavor.
             properties:
               dpuResources:
                 additionalProperties:
@@ -52,9 +53,9 @@ spec:
                   pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                   x-kubernetes-int-or-string: true
                 description: |-
-                  DPUResources is resource-fitting metadata mirrored from DPUFlavor. It is NOT
-                  templated: when set it is stamped onto every generated DPUFlavor and takes
-                  precedence over anything in the rendered body.
+                  DPUResources is resource-fitting metadata mirrored from DPUFlavor. It is
+                  NOT templated: when set it is stamped onto every generated DPUFlavor and
+                  takes precedence over anything in the rendered body.
                 type: object
               systemReservedResources:
                 additionalProperties:
@@ -64,20 +65,22 @@ spec:
                   pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                   x-kubernetes-int-or-string: true
                 description: |-
-                  SystemReservedResources is resource-fitting metadata mirrored from DPUFlavor. It is
-                  NOT templated: when set it is stamped onto every generated DPUFlavor and takes
-                  precedence over anything in the rendered body.
+                  SystemReservedResources is resource-fitting metadata mirrored from
+                  DPUFlavor. It is NOT templated: when set it is stamped onto every
+                  generated DPUFlavor and takes precedence over anything in the rendered
+                  body.
                 type: object
               template:
                 description: |-
-                  Template is the DPUFlavor body as a YAML/JSON string with Go template actions
-                  (delimited by double curly braces). It is rendered against DPUDevice.spec.values and the result is
-                  unmarshalled into a typed DPUFlavor and validated by DPUFlavor admission when
-                  the generated flavor is created. Referencing a key that is absent from the device
-                  values fails the render, and the "define", "block" and "template" actions are
-                  rejected. It should not contain dpuResources or systemReservedResources: the
-                  structured fields below take precedence and, when set, override anything the
-                  rendered body contains.
+                  Template is the DPUFlavor body as a YAML/JSON string with Go template
+                  actions (delimited by double curly braces). It is rendered against
+                  DPUDevice.spec.values and the result is unmarshalled into a typed
+                  DPUFlavor and validated by DPUFlavor admission when the generated
+                  flavor is created. Referencing a key that is absent from the device
+                  values fails the render, and the "define", "block" and "template"
+                  actions are rejected. It should not contain dpuResources or
+                  systemReservedResources: the structured fields below take precedence
+                  and, when set, override anything the rendered body contains.
                 maxLength: 1048576
                 minLength: 1
                 type: string

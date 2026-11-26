@@ -299,7 +299,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, sok := cdbm.TenantAccountStatusMap[statusQuery]
 		if !sok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = []string{statusQuery}
@@ -777,7 +777,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 	var ssds []cdbm.StatusDetail
 	// Handle database updates for both tenant account and status detail
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
-		lockKey := fmt.Sprintf("tenant-account-invite-%s", taID.String())
+		lockKey := fmt.Sprintf("tenant-account-invite-%s", taID)
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock for TenantAccount invite acceptance")
@@ -891,7 +891,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 
 	var newSiteIDs []uuid.UUID
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
-		lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
+		lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", *ta.TenantID, ta.InfrastructureProviderID)
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("unable to acquire advisory lock for TenantAccount siteCapabilities update")
@@ -993,7 +993,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 						return serr
 					}
 					if serr != nil || site.InfrastructureProviderID != ta.InfrastructureProviderID {
-						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
+						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID), nil)
 					}
 					if config.TargetedInstanceCreation == nil && config.CrossTenantInterfaceCreation == nil {
 						continue
@@ -1016,7 +1016,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
 			}
 			if ts.Site == nil || ts.Site.InfrastructureProviderID != ta.InfrastructureProviderID {
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID), nil)
 			}
 
 			previousTargetedInstanceCreation := ta.Config.TargetedInstanceCreation
@@ -1266,7 +1266,7 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 	err = cdb.WithTx(ctx, dtah.dbSession, func(tx *cdb.Tx) error {
 		if ta.TenantID != nil {
 			// Serialize cleanup with ensurePrivilegedTenantSites.
-			lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
+			lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", *ta.TenantID, ta.InfrastructureProviderID)
 			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 			if err != nil {
 				return err

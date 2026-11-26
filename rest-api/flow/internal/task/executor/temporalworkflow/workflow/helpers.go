@@ -158,6 +158,7 @@ func buildTargets(
 	for _, c := range info.Components {
 		target := mapOnType[c.Type]
 		target.Type = c.Type
+		target.TraceID = info.TraceID
 		if c.ComponentID == "" {
 			target.IdentifierType = common.IdentifierTypeMACAddress
 		} else if target.IdentifierType == common.IdentifierTypeLegacy {

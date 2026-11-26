@@ -267,16 +267,14 @@ async fn automatic_update_defers_incompatible_or_unavailable_dpf(pool: sqlx::PgP
             .unwrap(),
         HashSet::from([f.host.id.into()])
     );
-    let mut txn = f.env.db_txn().await;
     let request = f
         .host
         .dpu()
-        .db_machine(&mut txn)
+        .db_machine(&f.env.pool)
         .await
         .reprovision_requested
         .unwrap();
     assert!(request.started_at.is_none());
-    txn.commit().await.unwrap();
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 3);
 }
 
@@ -393,16 +391,14 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
     })
     .await
     .expect("the cancelled backend must exit while its table blocker remains held");
-    let mut txn = f.env.db_txn().await;
     assert!(
         f.host
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await.unwrap();
     blocker.commit().await.unwrap();
 
     // The public compatibility check must return an operator's statement timeout.
@@ -440,11 +436,10 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
     .expect("admission must recover after the inventory lock is released")
     .unwrap();
     assert_eq!(admitted.len(), 1);
-    let mut txn = f.env.db_txn().await;
     for host in [&f.host, &other_host] {
         assert_eq!(
             host.dpu()
-                .db_machine(&mut txn)
+                .db_machine(&f.env.pool)
                 .await
                 .reprovision_requested
                 .is_some(),
@@ -453,7 +448,6 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
             host.id
         );
     }
-    txn.commit().await.unwrap();
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 1);
     reader_pool.close().await;
 }
@@ -500,20 +494,17 @@ async fn automatic_update_skips_dpf_preflight_for_legacy_reprovision(pool: sqlx:
         HashSet::from([f.host.id.into()])
     );
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 0);
-    let mut txn = f.env.db_txn().await;
     assert!(
         f.host
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested
             .is_some_and(|request| request.started_at.is_none())
     );
-    txn.commit().await.unwrap();
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     let ManagedHostState::DPUReprovision { dpu_states } = host.state.value else {
         panic!("expected legacy reprovision, got {:?}", host.state.value);
     };
@@ -564,6 +555,7 @@ async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPo
         .database(
             f.env.pool.clone(),
             f.env.api.work_lock_manager_handle.clone(),
+            &f.env.api.instrumentation,
         )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(services))
@@ -582,9 +574,8 @@ async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPo
         .await
         .expect("legacy reprovision did not start after runtime DPF disable");
 
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     let ManagedHostState::DPUReprovision { dpu_states } = host.state.value else {
         panic!("expected legacy reprovision, got {:?}", host.state.value);
     };
@@ -671,11 +662,10 @@ async fn automatic_update_preserves_concurrent_manual_request(pool: sqlx::PgPool
         log.field("event_name"),
         Some("firmware_update_failed" | "firmware_update_progress")
     )));
-    let mut txn = f.env.db_txn().await;
     assert_eq!(
         f.host
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested,
         expected_request
@@ -716,11 +706,10 @@ async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(started.len(), 1);
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 2);
-    let mut txn = f.env.db_txn().await;
     for host in std::iter::once(&f.host).chain(&other_hosts) {
         assert_eq!(
             host.dpu()
-                .db_machine(&mut txn)
+                .db_machine(&f.env.pool)
                 .await
                 .reprovision_requested
                 .is_some(),
@@ -731,8 +720,25 @@ async fn incompatible_dpf_update_does_not_consume_capacity(pool: sqlx::PgPool) {
 
 /// A request admitted earlier must be checked again if labels or Kubernetes
 /// availability change before the `Ready` controller starts it.
-#[crate::sqlx_test]
-async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
+#[test]
+fn queued_dpf_update_rechecks_before_restart() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::queued_dpf_update_rechecks_before_restart"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = queued_dpf_update_rechecks_before_restart_body;
+    // Match Core's worker stack: this preflight path nests enough unoptimized
+    // state-machine frames to exceed libtest's default without changing
+    // production runtime settings.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("spawn queued DPF update recheck test")
+        .join()
+        .expect("queued DPF update recheck test panicked");
+}
+
+async fn queued_dpf_update_rechecks_before_restart_body(pool: sqlx::PgPool) {
     let f = fixture(pool).await;
     let work_lock = f
         .env
@@ -742,15 +748,13 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
         .await
         .expect("acquire update admission work lock");
     let timepoint = f.env.redfish_sim.timepoint();
-    let mut txn = f.env.db_txn().await;
     let reboot_before = f
         .host
         .dpu()
-        .db_machine(&mut txn)
+        .db_machine(&f.env.pool)
         .await
         .status
         .last_reboot_requested;
-    txn.commit().await.unwrap();
 
     for (observation, expected_reason) in [
         (
@@ -825,9 +829,8 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
         HashSet::from([f.host.id.into()])
     );
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     assert!(matches!(
         host.state.value,
         ManagedHostState::DPUReprovision { .. }
@@ -844,14 +847,12 @@ async fn queued_dpf_update_rechecks_before_restart(pool: sqlx::PgPool) {
             .any(|action| matches!(action, RedfishSimAction::Power(_)))
     );
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 6);
-    txn.commit().await.unwrap();
 
     // Admission cannot prevent selector drift after the request starts.
     // Execution must still reject the incompatible node before touching DPF.
     *f.labels.lock().unwrap() = LabelObservation::Stale;
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
     assert!(matches!(
         host.state.value,
         ManagedHostState::Failed { details, .. }
@@ -1035,14 +1036,12 @@ async fn queued_dpf_update_preserves_concurrent_allocation(pool: sqlx::PgPool) {
             .unwrap(),
         HashSet::from([f.host.id.into()])
     );
-    let mut txn = f.env.db_txn().await;
     let expected_request = f
         .host
         .dpu()
-        .db_machine(&mut txn)
+        .db_machine(&f.env.pool)
         .await
         .reprovision_requested;
-    txn.commit().await.unwrap();
 
     // Allocation owns the host row before inserting the instance. Hold only
     // that insert so the controller can observe Ready and finish preflight.
@@ -1088,8 +1087,10 @@ async fn queued_dpf_update_preserves_concurrent_allocation(pool: sqlx::PgPool) {
         .expect("allocation and controller did not finish after releasing the instance insert");
     let instance_id = allocation.unwrap().into_inner().id.unwrap();
 
-    let mut txn = f.env.db_txn().await;
-    let snapshot = f.host.snapshot(&mut txn).await;
+    let snapshot = f
+        .host
+        .snapshot(&mut db::db_read::PgPoolReader::from(f.env.pool.clone()))
+        .await;
     assert_eq!(snapshot.instance.as_ref().unwrap().id, instance_id);
     assert_eq!(snapshot.host_snapshot.state.value, ManagedHostState::Ready);
     assert_eq!(
@@ -1423,8 +1424,7 @@ async fn queued_dpf_update_rechecks_pending_work_before_claim(pool: sqlx::PgPool
     }
 
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
     assert_eq!(
         host.state.value,
         ManagedHostState::Decommissioning {
@@ -1435,7 +1435,7 @@ async fn queued_dpf_update_rechecks_pending_work_before_claim(pool: sqlx::PgPool
     assert!(
         f.host
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested
             .unwrap()
@@ -1463,9 +1463,8 @@ async fn manual_dpf_update_defers_and_recovers(pool: sqlx::PgPool) {
     *f.labels.lock().unwrap() = LabelObservation::Stale;
     let timepoint = f.env.redfish_sim.timepoint();
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     assert_eq!(host.state.value, ManagedHostState::Ready);
     assert!(
         matches!(host.controller_state_outcome, Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason.contains("reconcile expected hardware inventory and deployment selector labels before reprovisioning"))
@@ -1483,12 +1482,10 @@ async fn manual_dpf_update_defers_and_recovers(pool: sqlx::PgPool) {
             .iter()
             .all(|action| !matches!(action, RedfishSimAction::Power(_)))
     );
-    txn.commit().await.unwrap();
     *f.labels.lock().unwrap() = LabelObservation::Current;
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     assert!(matches!(
         host.state.value,
         ManagedHostState::DPUReprovision { .. }
@@ -1543,11 +1540,10 @@ async fn automatic_dpf_update_rolls_back_rejected_batch(pool: sqlx::PgPool) {
             .unwrap()
     );
     txn.commit().await.unwrap();
-    let mut txn = f.env.db_txn().await;
     assert!(
         f.host
             .dpu_n(0)
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested
             .is_none()
@@ -1555,7 +1551,7 @@ async fn automatic_dpf_update_rolls_back_rejected_batch(pool: sqlx::PgPool) {
     assert_eq!(
         f.host
             .dpu_n(1)
-            .db_machine(&mut txn)
+            .db_machine(&f.env.pool)
             .await
             .reprovision_requested,
         expected
@@ -1593,9 +1589,8 @@ async fn started_dpf_update_retry_preserves_start_time(pool: sqlx::PgPool) {
     );
     let failed_attempt = f.env.redfish_sim.timepoint();
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     assert_eq!(host.state.value, ManagedHostState::Ready);
     assert!(matches!(
         host.controller_state_outcome,
@@ -1612,7 +1607,6 @@ async fn started_dpf_update_retry_preserves_start_time(pool: sqlx::PgPool) {
         dpu.status.last_reboot_requested,
         dpu_before.status.last_reboot_requested
     );
-    txn.commit().await.unwrap();
     assert_eq!(
         f.env
             .redfish_sim
@@ -1627,9 +1621,8 @@ async fn started_dpf_update_retry_preserves_start_time(pool: sqlx::PgPool) {
     *f.labels.lock().unwrap() = LabelObservation::Stale;
     let timepoint = f.env.redfish_sim.timepoint();
     f.env.run_machine_state_controller_iteration().await;
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
-    let dpu = f.host.dpu().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
+    let dpu = f.host.dpu().db_machine(&f.env.pool).await;
     assert!(matches!(
         host.state.value,
         ManagedHostState::DPUReprovision { .. }
@@ -1766,8 +1759,7 @@ async fn dpf_update_compatibility_uses_expected_astra_inventory(pool: sqlx::PgPo
         *f.verified_deployments.lock().unwrap(),
         vec![DpuDeploymentType::Bf4Astra]
     );
-    let mut txn = f.env.db_txn().await;
-    let host = f.host.host().db_machine(&mut txn).await;
+    let host = f.host.host().db_machine(&f.env.pool).await;
     assert!(matches!(
         host.state.value,
         ManagedHostState::Failed { details, .. }

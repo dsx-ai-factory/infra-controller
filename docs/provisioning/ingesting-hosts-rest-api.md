@@ -73,6 +73,7 @@ them, so set the matching JSON fields in the body instead:
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
 | `--retain-bmc-credentials` | `true` to keep the factory-default BMC credentials instead of rotating them; defaults to `false` |
+| `--dpu-policy` | `Inherit`, `Nic`, or `Ignore`. Defaults to `Inherit`. Refer to [DPU Policy](#dpu-policy). |
 
 The same fields, plus JSON-only fields, go in the stdin JSON object. Keep the
 password on stdin rather than writing it into the command:
@@ -125,6 +126,31 @@ credentials, which leaves the BMC on its factory-default password. If NICo
 rotated the password before the value changed to `true`, NICo still holds the
 rotated password after the reset, so Site Explorer can no longer log in to the
 BMC and waits for an operator.
+
+#### DPU Policy
+
+`dpuPolicy` sets how NICo treats this host's DPU hardware. Single create,
+update, batch, and replace-all requests all accept it.
+
+- `Inherit`: use the site-wide DPU policy (refer to the
+  [DPU-policy contract](boot-interfaces-and-dpu-modes.md#dpu_policy)). On a site
+  set to manage DPUs, the host's DPUs are managed; on a site set to `nic` or
+  `ignore`, the host follows that setting.
+- `Nic`: installed DPUs operate as plain NICs, and the host boots on HostInband.
+- `Ignore`: NICo does not configure or attach DPU hardware, and the host boots
+  through a plain NIC on HostInband.
+
+For HostInband boot-interface selection, refer to
+[Expected Machine Interface Declarations](boot-interfaces-and-dpu-modes.md#expected-machine-interface-declarations).
+
+On create and replace-all, an omitted or `null` value stores `Inherit`. On
+update, omitting it or sending `null` keeps the stored value, and sending
+`Inherit` resets the host to the site-wide policy. An empty string is rejected.
+Responses always return the effective value, so a host with no stored policy
+shows `Inherit`.
+
+`dpuPolicy` is separate from `isDpfEnabled`, which only marks whether the host
+is eligible for DPF-based provisioning.
 
 ### Batch (Recommended for Full-Rack Onboarding)
 
@@ -220,6 +246,14 @@ Both flows assume hardware ingestion is complete -- which this page covers.
 
 ## Troubleshooting
 
+### Serial number mismatch
+
+For a `SerialNumberMismatch` health alert, compare the Expected Machine's
+`chassisSerialNumber` with the value selected by the first usable site rule.
+If no site rule yields a serial, check the primary system serial, primary system
+SKU, and built-in tray serial in the saved report. If no built-in rule finds
+a tray serial, check the chassis serials. See [Select the host inventory serial number](ingesting-hosts.md#select-the-host-inventory-serial-number).
+
 ### Inspecting Machine State
 
 When a machine is not being created or is stuck in a pre-`Ready` state, start with the Machine REST endpoint:
@@ -257,7 +291,7 @@ The following are the conditions in which Site Explorer cannot complete pairing 
 | `dpu_pf0_mac_missing` | DPU is in DPU mode but its pf0 MAC address is not retrievable | Install a fresh DPU OS |
 | `manual_power_cycle_required` | DPU mode was changed but the host vendor does not support automated power cycling | Manually power-cycle the host at the data center level |
 | `host_system_report_missing` | Host BMC Redfish returned no valid system report; likely a BMC firmware issue or transient error | Check `nico-api` logs for the host BMC IP |
-| `no_dpu_reported_by_host` | Host BMC reports no BlueField PCIe devices | Check DPU seating and host BMC firmware version |
+| `no_dpu_reported_by_host` | Under `manage`, pairing completeness passed, but no DPU is available for management. | Check host inventory, reported card modes, and the effective `dpu_policy`. Use [`nic` for NIC-only hosts](boot-interfaces-and-dpu-modes.md#33-dpu-in-nic-mode) or [`ignore` for zero-DPU hosts](boot-interfaces-and-dpu-modes.md#32-zero-dpu-host-no-dpu-hardware). For an expected DPU in NIC mode, check its [part-number rule and target mode](boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). If the card is missing from inventory, check seating and firmware. |
 | `boot_interface_mac_mismatch` | Host boot MAC does not match the pf0 MAC of any discovered DPU | Check exploration reports and `nico-api` logs for both host and DPU BMC IPs |
 | `viking_cpld_version_issue` | NVIDIA Viking (DGX): `CPLDMB_0` firmware below minimum required version (`0.2.1.9`) | Contact the data center team for a full DC power cycle |
 

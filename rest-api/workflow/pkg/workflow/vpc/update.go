@@ -4,8 +4,6 @@
 package vpc
 
 import (
-	"fmt"
-
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
@@ -28,7 +26,7 @@ func UpdateVpcInventory(ctx workflow.Context, siteID string, vpcInventory *corev
 
 	parsedSiteID, err := uuid.Parse(siteID)
 	if err != nil {
-		logger.Warn().Err(err).Msg(fmt.Sprintf("workflow triggered with invalid site ID: %s", siteID))
+		logger.Warn().Err(err).Msgf("workflow triggered with invalid site ID: %s", siteID)
 		return err
 	}
 

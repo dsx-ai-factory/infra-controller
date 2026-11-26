@@ -74,7 +74,9 @@ impl From<forgerpc::Vpc> for VpcRowDisplay {
             metadata: vpc.metadata.unwrap_or_default(),
             tenant_organization_id: config.tenant_organization_id,
             tenant_keyset_id: config.tenant_keyset_id.unwrap_or_default(),
-            routing_profile_type: config.routing_profile_type.unwrap_or("None".to_string()),
+            routing_profile_type: config
+                .routing_profile_type
+                .unwrap_or_else(|| "None".to_string()),
             vni,
         }
     }
@@ -149,10 +151,7 @@ async fn fetch_vpcs(api: Arc<Api>) -> Result<Vec<forgerpc::Vpc>, tonic::Status> 
             return ord;
         }
 
-        vpc1.id
-            .as_ref()
-            .map(|id| id.to_string())
-            .cmp(&vpc2.id.as_ref().map(|id| id.to_string()))
+        vpc1.id.cmp(&vpc2.id)
     });
     Ok(vpcs)
 }
@@ -198,7 +197,9 @@ impl From<forgerpc::Vpc> for VpcDetail {
             id: vpc.id.unwrap_or_default().to_string(),
             tenant_organization_id: config.tenant_organization_id,
             tenant_keyset_id: config.tenant_keyset_id.unwrap_or_default(),
-            routing_profile_type: config.routing_profile_type.unwrap_or("None".to_string()),
+            routing_profile_type: config
+                .routing_profile_type
+                .unwrap_or_else(|| "None".to_string()),
             vni,
             has_routing_profile_overrides: routing_profile_overrides.is_some(),
             routing_profile_overrides: routing_profile_overrides.unwrap_or_default(),

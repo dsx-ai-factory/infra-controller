@@ -33,7 +33,9 @@ use common::api_fixtures::{
     create_test_env,
 };
 use db::dhcp_entry::DhcpEntry;
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
@@ -93,7 +95,7 @@ async fn only_one_primary_interface_per_machine(
     let other_host_config = env.managed_host_config();
     let other_dpu = other_host_config.get_and_assert_single_dpu();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -112,13 +114,13 @@ async fn only_one_primary_interface_per_machine(
     .await?;
 
     let machine_id = from_hardware_info(&host_config.borrow().into()).unwrap();
-    let new_machine = db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface, None)
+    let new_machine = db::machine::get_or_create(&mut txn, None, &machine_id, &new_interface)
         .await
         .expect("Unable to create machine");
 
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let should_failed_machine_interface = db::machine_interface::create(
         &mut txn,
@@ -149,7 +151,7 @@ async fn many_non_primary_interfaces_per_machine(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
         .into_iter()
@@ -168,7 +170,7 @@ async fn many_non_primary_interfaces_per_machine(
     .expect("Unable to create machine interface");
 
     txn.commit().await.unwrap();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let should_be_ok_interface = db::machine_interface::create(
         &mut txn,
@@ -193,7 +195,7 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     // Start with a reconciled multi-DPU host and flip the primary flag in
     // the DB to simulate the persistence side of set-primary-dpu.
@@ -272,12 +274,10 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
 
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let new_primary = db::machine_interface::find_one(&mut *txn, secondary.id).await?;
-    let old_primary = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    let new_primary = db::machine_interface::find_one(&env.pool, secondary.id).await?;
+    let old_primary = db::machine_interface::find_one(&env.pool, primary.id).await?;
     assert_eq!(new_primary.addresses, vec![active_address]);
     assert!(old_primary.addresses.is_empty());
-    txn.commit().await?;
 
     Ok(())
 }
@@ -290,7 +290,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 1).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
     let interfaces = interface_map.remove(&mh.id).unwrap();
     let admin_interfaces: Vec<_> = interfaces
@@ -326,7 +326,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     );
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let error = db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id)
         .await
         .expect_err("Reserved segment must reject a fresh DHCP allocation");
@@ -336,7 +336,7 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     ));
     txn.rollback().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
     assert!(persisted.addresses.is_empty());
     assert!(
@@ -350,20 +350,19 @@ async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segm
     db::machine_interface_address::assign_static(&mut txn, primary.id, *active_address).await?;
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    let persisted = db::machine_interface::find_one(&env.pool, primary.id).await?;
     assert_eq!(persisted.addresses, vec![*active_address]);
-    let addresses = db::machine_interface_address::find_for_interface(&mut txn, primary.id).await?;
+    let addresses =
+        db::machine_interface_address::find_for_interface(&env.pool, primary.id).await?;
     let [address] = addresses.as_slice() else {
         panic!("reconciliation must preserve exactly one static address")
     };
     assert_eq!(address.address, *active_address);
     assert_eq!(address.allocation_type, AllocationType::Static);
-    txn.commit().await?;
 
     Ok(())
 }
@@ -441,6 +440,7 @@ async fn reconcile_admin_addresses_locks_segments_only_for_a_repair(
                 active_config_changed: true,
             },
         },
+        // This leaves the shared host without a primary, so keep it last.
         Case {
             change: HostChange::ClearPrimaryFlag,
             expect: ReconcileExpectation::Fails,
@@ -453,18 +453,18 @@ async fn reconcile_admin_addresses_locks_segments_only_for_a_repair(
         admin_subdomain.is_some(),
         "the domain checks need an admin segment with a subdomain"
     );
+    let mh = create_managed_host_multi_dpu(&env, 2).await;
     for Case { change, expect } in cases {
-        let mh = create_managed_host_multi_dpu(&env, 2).await;
         apply_host_change(&env, &mh, change).await?;
         let before = host_interface_state(&env, &mh).await?;
 
-        let mut gate = env.pool.begin().await?;
+        let mut gate = env.pool.txn_begin().await?;
         db::machine_interface::lock_all_admin_segments(&mut gate).await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *gate)
             .await?;
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let result = {
             let reconcile =
                 db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id);
@@ -593,11 +593,15 @@ async fn after_commit_reconcile_flags_a_transient_failure_and_repairs_on_the_nex
     let version_before = host_network_config_version(&env, &mh).await?;
     assert!(!host_exploration_requested(&env, &mh).await?);
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     hold_every_admin_address_lock(&env, &mut gate).await?;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await?;
     assert!(matches!(result, Err(DatabaseError::TryAgain)), "{result:?}");
@@ -614,7 +618,11 @@ async fn after_commit_reconcile_flags_a_transient_failure_and_repairs_on_the_nex
 
     let active_config_changed = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await??;
     assert!(active_config_changed);
@@ -658,17 +666,20 @@ async fn after_commit_reconcile_retries_once_a_transient_failure_clears(
     apply_host_change(&env, &mh, HostChange::PrimaryAddressesDeleted).await?;
     let version_before = host_network_config_version(&env, &mh).await?;
 
-    let mut address_gate = env.pool.begin().await?;
+    let mut address_gate = env.pool.txn_begin().await?;
     hold_every_admin_address_lock(&env, &mut address_gate).await?;
-    let mut segment_gate = env.pool.begin().await?;
+    let mut segment_gate = env.pool.txn_begin().await?;
     let segment_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *segment_gate)
         .await?;
     db::machine_interface::lock_all_admin_segments(&mut segment_gate).await?;
 
     // The first attempt waits for the admin segment.
-    let reconcile =
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id);
+    let reconcile = db::machine_interface::reconcile_admin_addresses_after_commit(
+        &env.pool,
+        &mh.id,
+        &env.api.instrumentation,
+    );
     tokio::pin!(reconcile);
     tokio::select! {
         result = &mut reconcile => {
@@ -681,7 +692,7 @@ async fn after_commit_reconcile_retries_once_a_transient_failure_clears(
     // locked, and fails. The segment taken again is granted once that attempt
     // has rolled back, so the second attempt waits for it in turn.
     segment_gate.rollback().await?;
-    let mut segment_gate = env.pool.begin().await?;
+    let mut segment_gate = env.pool.txn_begin().await?;
     let segment_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *segment_gate)
         .await?;
@@ -742,7 +753,11 @@ async fn after_commit_reconcile_rolls_back_when_the_config_bump_loses_every_swap
     move_version_under_every_swap(&env.pool).await?;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await?;
     let Err(DatabaseError::NetworkConfigVersionChanged {
@@ -780,10 +795,10 @@ async fn apply_host_change(
     mh: &common::api_fixtures::TestManagedHost,
     change: HostChange,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?;
     txn.commit().await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
     let interfaces = interface_map.remove(&mh.id).unwrap();
     let dpu_admin_interface = |primary: bool| {
@@ -852,13 +867,11 @@ async fn apply_host_change(
 async fn admin_segment_subdomain(
     env: &common::api_fixtures::TestEnv,
 ) -> Result<Option<carbide_uuid::domain::DomainId>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
-    let admin_segment = db::network_segment::admin(&mut txn)
+    let admin_segment = db::network_segment::admin(&env.pool)
         .await?
         .into_iter()
         .next()
         .expect("the test env should have an admin segment");
-    txn.commit().await?;
     Ok(admin_segment.config.subdomain_id)
 }
 
@@ -875,8 +888,7 @@ async fn host_interface_state(
     env: &common::api_fixtures::TestEnv,
     mh: &common::api_fixtures::TestManagedHost,
 ) -> Result<Vec<AdminLinkState>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
-    let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
+    let mut interface_map = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.id]).await?;
     let mut interfaces = interface_map.remove(&mh.id).unwrap_or_default();
     interfaces.sort_by_key(|interface| interface.id);
     Ok(interfaces
@@ -910,18 +922,16 @@ async fn host_exploration_requested(
     env: &common::api_fixtures::TestEnv,
     mh: &common::api_fixtures::TestManagedHost,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
     let bmc_ip = mh
         .host()
-        .bmc_ip(&mut txn)
+        .bmc_ip(&env.pool)
         .await
         .expect("the fixture host should have a BMC address");
-    let endpoint = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+    let endpoint = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool)
         .await?
         .into_iter()
         .next()
         .expect("the fixture host BMC should have an explored endpoint");
-    txn.commit().await?;
     Ok(endpoint.exploration_requested)
 }
 
@@ -930,15 +940,13 @@ async fn host_exploration_requested(
 /// taken and returns `TryAgain`. The segment lock itself stays free.
 async fn hold_every_admin_address_lock(
     env: &common::api_fixtures::TestEnv,
-    gate: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    gate: &mut db::Transaction<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
-    let segment = db::network_segment::admin(&mut txn)
+    let segment = db::network_segment::admin(&env.pool)
         .await?
         .into_iter()
         .next()
         .expect("the test env should have an admin segment");
-    txn.commit().await?;
     let keys = segment
         .prefixes
         .iter()
@@ -1000,7 +1008,7 @@ async fn reconcile_admin_addresses_allows_non_dpu_primary_admin_interface(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let admin_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -1073,7 +1081,7 @@ async fn reconcile_admin_addresses_errors_without_any_primary_admin_interface(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
     let interfaces = interface_map.remove(&mh.id).unwrap();
@@ -1105,7 +1113,7 @@ async fn reconcile_admin_addresses_allows_host_inband_primary_with_dormant_dpu_l
     let mh = create_managed_host_multi_dpu(&env, 2).await;
     create_host_inband_network_segment(&env.api, None).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let host_inband_gateway = FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip();
     let host_inband_segment = db::network_segment::for_segment_type_all(
@@ -1185,7 +1193,7 @@ async fn return_existing_machine_interface_on_rediscover(
     // there are tests in `machine_dhcp.rs`
     // This should also be migrated to use actual API calls
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let test_mac = "ff:ff:ff:ff:ff:ff".parse().unwrap();
 
@@ -1218,9 +1226,7 @@ async fn find_all_interfaces_test_cases(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await?;
-
-    let network_segment = db::network_segment::admin(&mut txn)
+    let network_segment = db::network_segment::admin(&env.pool)
         .await?
         .into_iter()
         .next()
@@ -1228,7 +1234,7 @@ async fn find_all_interfaces_test_cases(
 
     let mut interfaces: Vec<MachineInterfaceSnapshot> = Vec::new();
     for i in 0..2 {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interface = db::machine_interface::create(
             &mut txn,
             std::slice::from_ref(&network_segment),
@@ -1299,7 +1305,7 @@ async fn find_interfaces_test_cases(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let host_config = env.managed_host_config();
     let dpu = host_config.get_and_assert_single_dpu();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -1370,13 +1376,11 @@ async fn find_interfaces_test_cases(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 #[crate::sqlx_test]
 async fn create_parallel_mi(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
-    let network = db::network_segment::admin(&mut txn)
+    let network = db::network_segment::admin(&env.pool)
         .await?
         .into_iter()
         .next()
         .unwrap();
-    txn.commit().await.unwrap();
 
     let (tx, _rx1) = broadcast::channel(10);
     let max_interfaces = 250;
@@ -1389,7 +1393,7 @@ async fn create_parallel_mi(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         let h = tokio::spawn(async move {
             // Let's start all threads together.
             _ = rx.recv().await.unwrap();
-            let mut txn = db_pool.begin().await.unwrap();
+            let mut txn = db_pool.txn_begin().await.unwrap();
             db::machine_interface::create(
                 &mut txn,
                 std::slice::from_ref(&n),
@@ -1413,8 +1417,7 @@ async fn create_parallel_mi(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     for h in handles {
         _ = h.await;
     }
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_all(&mut txn).await.unwrap();
+    let interfaces = db::machine_interface::find_all(&env.pool).await.unwrap();
 
     assert_eq!(interfaces.len(), max_interfaces);
     let ips = interfaces
@@ -1431,7 +1434,7 @@ async fn create_parallel_mi(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
 #[crate::sqlx_test]
 async fn test_find_for_update_by_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -1504,14 +1507,11 @@ async fn test_delete_interface(pool: sqlx::PgPool) -> Result<(), Box<dyn std::er
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await?;
-    let found = db::machine_interface::find_one(txn.as_mut(), interface_id).await;
+    let found = db::machine_interface::find_one(&env.pool, interface_id).await;
     assert!(
         matches!(found, Err(DatabaseError::FindOneReturnedNoResultsError(_))),
         "the interface row should be gone once delete_interface succeeds"
     );
-
-    txn.commit().await?;
 
     // The next discover_dhcp should return an updated timestamp
     let dhcp_response = env
@@ -1547,13 +1547,11 @@ async fn test_delete_interface_with_machine(
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = pool.begin().await?;
-    let interface = db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_machine_id])
+    let interface = db::machine_interface::find_by_machine_ids(&pool, &[dpu_machine_id])
         .await
         .unwrap();
 
     let interface = &interface.get(&dpu_machine_id).unwrap()[0];
-    txn.commit().await.unwrap();
 
     let response = env
         .api
@@ -1591,9 +1589,7 @@ async fn test_delete_bmc_interface_with_machine(
     let host_config = env.managed_host_config();
     let _rpc_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = pool.begin().await?;
-    let interfaces = db::machine_interface::find_all(&mut txn).await.unwrap();
-    txn.commit().await.unwrap();
+    let interfaces = db::machine_interface::find_all(&pool).await.unwrap();
 
     let interfaces = interfaces
         .iter()
@@ -1647,7 +1643,7 @@ async fn machine_bmc_endpoint_uses_topology_selected_bmc_and_interfaces_exclude_
     let dpu_bmc_mac = host_config.get_and_assert_single_dpu().bmc_mac_address;
     let managed_host = create_managed_host_with_config(&env, host_config).await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let host_machine = managed_host.host().db_machine(&mut txn).await;
     let dpu_machine = managed_host.dpu().db_machine(&mut txn).await;
     let interfaces = db::machine_interface::find_all(&mut txn).await?;
@@ -1833,7 +1829,7 @@ async fn machine_bmc_endpoint_uses_topology_selected_bmc_and_interfaces_exclude_
 
     // If the selected interfaces stop belonging to these machines, snapshots
     // and direct lookup must not silently fall back to the older BMCs.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query(
         "UPDATE machine_interfaces
          SET machine_id = NULL, association_type = 'None'
@@ -1906,7 +1902,7 @@ async fn machine_bmc_endpoint_uses_topology_selected_bmc_and_interfaces_exclude_
 #[crate::sqlx_test]
 async fn test_hostname_equals_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -1947,7 +1943,7 @@ async fn test_max_one_interface_association(
     use model::switch::{NewSwitch, SwitchConfig};
 
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -2028,7 +2024,7 @@ async fn test_power_shelf_association(
     use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -2082,7 +2078,7 @@ async fn test_switch_association(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
     use model::switch::{NewSwitch, SwitchConfig};
 
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let network_segment = db::network_segment::admin(&mut txn)
         .await?
@@ -2141,7 +2137,7 @@ async fn test_static_create_returns_address_already_in_use(
     let existing_mac = MacAddress::from_str("aa:bb:cc:dd:ee:10").unwrap();
     let new_mac = MacAddress::from_str("aa:bb:cc:dd:ee:11").unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let existing_interface = db::machine_interface::validate_existing_mac_and_create(
         &mut txn,
         existing_mac,
@@ -2153,7 +2149,7 @@ async fn test_static_create_returns_address_already_in_use(
     let target_ip = existing_interface.addresses[0];
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segment = db::network_segment::for_relay(&mut txn, relay)
         .await?
         .expect("relay segment exists");
@@ -2172,8 +2168,7 @@ async fn test_static_create_returns_address_already_in_use(
     );
 
     // Existing interface is untouched.
-    let mut txn = env.pool.begin().await?;
-    let found = db::machine_interface::find_by_ip(&mut *txn, target_ip).await?;
+    let found = db::machine_interface::find_by_ip(&env.pool, target_ip).await?;
     let found = found.expect("existing interface should still own the IP");
     assert_eq!(found.id, existing_interface.id);
     assert_eq!(found.mac_address, existing_mac);
@@ -2192,7 +2187,7 @@ async fn test_static_create_is_noop_when_same_mac_already_owns_address(
     let static_ip: std::net::IpAddr = "192.0.2.231".parse().unwrap();
     let mac = MacAddress::from_str("aa:bb:cc:dd:ee:12").unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segment = db::network_segment::admin(&mut txn)
         .await?
         .into_iter()
@@ -2211,7 +2206,7 @@ async fn test_static_create_is_noop_when_same_mac_already_owns_address(
 
     // And now re-run the same create; should succeed and
     // return the same interface.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let again = db::machine_interface::create(
         &mut txn,
         std::slice::from_ref(&segment),
@@ -2269,19 +2264,17 @@ async fn test_delete_interface_by_mac_address(
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await?;
     assert!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), MacAddress::from_str(mac)?)
+        db::machine_interface::find_by_mac_address(&env.pool, MacAddress::from_str(mac)?)
             .await?
             .is_empty(),
         "the interface should be gone once delete by MAC succeeds"
     );
-    let found = db::machine_interface::find_one(txn.as_mut(), interface_id).await;
+    let found = db::machine_interface::find_one(&env.pool, interface_id).await;
     assert!(matches!(
         found,
         Err(DatabaseError::FindOneReturnedNoResultsError(_))
     ));
-    txn.commit().await?;
 
     Ok(())
 }
@@ -2337,7 +2330,7 @@ async fn test_delete_interface_clears_boot_override(
         .machine_interface_id
         .expect("discover_dhcp must return an interface id");
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_boot_override::create(
         txn.as_mut(),
         interface_id,
@@ -2355,14 +2348,12 @@ async fn test_delete_interface_clears_boot_override(
         .await
         .expect("a leftover boot override must not block deletion");
 
-    let mut txn = env.pool.begin().await?;
     assert!(
-        db::machine_boot_override::find_optional(txn.as_mut(), interface_id)
+        db::machine_boot_override::find_optional(&env.pool, interface_id)
             .await?
             .is_none(),
         "the boot override should be gone with its interface"
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -2379,7 +2370,7 @@ async fn test_delete_interface_by_mac_removes_every_segment(
 
     create_host_inband_network_segment(&env.api, None).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let admin_segment = db::network_segment::admin(&mut txn)
         .await?
         .into_iter()
@@ -2408,15 +2399,13 @@ async fn test_delete_interface_by_mac_removes_every_segment(
     }
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
     assert_eq!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mac)
+        db::machine_interface::find_by_mac_address(&env.pool, mac)
             .await?
             .len(),
         2,
         "the same MAC should exist on both segments"
     );
-    txn.commit().await?;
 
     env.api
         .delete_interface(tonic::Request::new(rpc::forge::InterfaceDeleteQuery {
@@ -2426,14 +2415,12 @@ async fn test_delete_interface_by_mac_removes_every_segment(
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await?;
     assert!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mac)
+        db::machine_interface::find_by_mac_address(&env.pool, mac)
             .await?
             .is_empty(),
         "every interface carrying the MAC should be deleted"
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -2452,7 +2439,7 @@ async fn test_delete_interface_by_mac_refuses_when_any_match_is_owned(
 
     create_host_inband_network_segment(&env.api, None).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let admin_segment = db::network_segment::admin(&mut txn)
         .await?
         .into_iter()
@@ -2524,21 +2511,19 @@ async fn test_delete_interface_by_mac_refuses_when_any_match_is_owned(
         .expect_err("a switch-owned match must refuse the whole request");
     assert_eq!(status.code(), Code::InvalidArgument);
 
-    let mut txn = env.pool.begin().await?;
     assert_eq!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mac)
+        db::machine_interface::find_by_mac_address(&env.pool, mac)
             .await?
             .len(),
         2,
         "nothing should be deleted when any match is refused"
     );
     assert!(
-        db::machine_interface::find_one(txn.as_mut(), free_interface.id)
+        db::machine_interface::find_one(&env.pool, free_interface.id)
             .await
             .is_ok(),
         "the eligible interface must survive an all-or-nothing refusal"
     );
-    txn.commit().await?;
 
     Ok(())
 }

@@ -39,7 +39,7 @@
 //! bookkeeping the other families use, keyed by each card's **NIC MAC**.
 
 use db::ConditionalWrite::{Applied, NotApplied};
-use db::ControllerStateNotCurrent;
+use db::{ControllerStateNotCurrent, TransactionVending as _};
 use eyre::eyre;
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState, DpaInterfaceType};
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
@@ -139,7 +139,12 @@ pub(crate) async fn handle_rotating_nic_lockdown(
         .host_snapshot
         .lockdown_ikm_credential_rotation_requested;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // The site-wide target row is seeded for every site by the backfill migration
     // (and by `set_initial_target_version` on the first `RotateCredential`), so a

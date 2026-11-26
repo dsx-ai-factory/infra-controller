@@ -5,67 +5,23 @@ package service
 
 import (
 	"context"
-	"encoding/base32"
-	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
-
-const (
-	// powerDetailsReadTimeout leaves ten seconds in the proxy's 40-second
-	// activity budget for transport and response encoding.
-	powerDetailsReadTimeout = 30 * time.Second
-	// powerDetailsResponseReserve leaves assembly time before a shorter caller
-	// deadline. The entry deadline applies to inventory and both data sources.
-	powerDetailsResponseReserve = time.Second
-	// powerDetailsResponseBytes bounds each power-details RPC's encoded result below
-	// Temporal's 2 MiB payload ceiling. It uses the numeric allowance from
-	// site-workflow/pkg/activity/inventory.go, applied here to the encoded proxy
-	// wrapper rather than inventory's batching calculation.
-	// The task count bound alone cannot limit recorded target arrays.
-	powerDetailsResponseBytes = 1945 * 1024
-	// Core's typed hardware IDs have a seven-byte prefix and a Base32Hex hash.
-	corePowerIDLength       = 59
-	corePowerIDPrefixLength = 7
-	corePowerHashBytes      = 32
-)
-
-// componentPowerReader borrows the provider's existing connection; power detail
-// requests neither create a Core client nor take ownership of its lifetime.
-type componentPowerReader interface {
-	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)
-}
-
-// powerReaderFromRegistry permits deployments without the NICo provider to keep
-// serving Flow task details. A configured provider lends its existing client.
-func powerReaderFromRegistry(registry *providerapi.ProviderRegistry) componentPowerReader {
-	provider, ok := registry.Get(nicoprovider.ProviderName).(*nicoprovider.Provider)
-	if !ok || provider == nil {
-		return nil
-	}
-	return provider.Client()
-}
 
 // GetTrayPowerDetails resolves public tray identity before independently reading
 // Core facts and Flow tasks. Neither failure cancels the other source; caller
@@ -74,7 +30,7 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 	ctx context.Context,
 	req *pb.GetTrayPowerDetailsRequest,
 ) (*pb.GetTrayPowerDetailsResponse, error) {
-	readCtx, cancel := powerDetailsReadContext(ctx)
+	readCtx, cancel := detailsReadContext(ctx)
 	defer cancel()
 
 	if ctx.Err() != nil {
@@ -104,7 +60,7 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 			return nil, status.Error(code, "tray inventory could not be read")
 		}
 	}
-	if !supportsPowerDetails(tray.Type) {
+	if !supportsComponentDetails(tray.Type) {
 		return nil, status.Error(codes.InvalidArgument, "component type does not support power details")
 	}
 
@@ -155,28 +111,6 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 	return response, nil
 }
 
-// supportsPowerDetails identifies inventory kinds that Core can read. A missing
-// RPC or reader is unavailable evidence for these kinds, not unsupported hardware.
-func supportsPowerDetails(kind devicetypes.ComponentType) bool {
-	switch kind {
-	case devicetypes.ComponentTypeCompute, devicetypes.ComponentTypeNVSwitch, devicetypes.ComponentTypePowerShelf:
-		return true
-	default:
-		return false
-	}
-}
-
-// powerDetailsReadContext leaves response assembly time inside the enclosing
-// proxy call while sharing one budget across inventory and dependency reads.
-func powerDetailsReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	deadline := time.Now().Add(powerDetailsReadTimeout)
-	callerDeadline, hasDeadline := ctx.Deadline()
-	if hasDeadline && callerDeadline.Add(-powerDetailsResponseReserve).Before(deadline) {
-		deadline = callerDeadline.Add(-powerDetailsResponseReserve)
-	}
-	return context.WithDeadline(ctx, deadline)
-}
-
 // readCorePowerDetails checks the single requested managed identity before using
 // any returned section. Missing sections remain failures instead of zero values.
 func (rs *FlowServerImpl) readCorePowerDetails(
@@ -201,7 +135,7 @@ func (rs *FlowServerImpl) readCorePowerDetails(
 		return unavailableCorePowerDetails(powerDetailsReadError(err))
 	}
 	entries := response.GetEntries()
-	if len(entries) != 1 || !sameCorePowerIdentity(tray.ComponentID, entries[0].GetComponentId()) {
+	if len(entries) != 1 || !sameCoreComponentIdentity(tray.ComponentID, entries[0].GetComponentId()) {
 		log.Warn().Str("component_id", tray.Info.ID.String()).
 			Int("entry_count", len(entries)).Msg("Power details Core response did not match the requested component")
 		return unavailableCorePowerDetails(pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE)
@@ -254,62 +188,6 @@ func corePowerDetailsSections(entry *corev1.ComponentPowerDetails) (*pb.PowerAct
 		actions.Result = &pb.PowerActionDetails_Value{Value: entry.Actions}
 	}
 	return actual, desired, actions
-}
-
-// sameCorePowerIdentity accepts Core's canonical lowercase hardware hash while
-// preserving its seven-byte typed prefix. Flow can store an uppercase hash from
-// ingestion; Core parses that Base32Hex suffix case-insensitively. Exact matches
-// also support identifiers outside this 59-byte representation.
-func sameCorePowerIdentity(expected, observed string) bool {
-	if expected == observed {
-		return true
-	}
-	if len(expected) != corePowerIDLength || len(observed) != corePowerIDLength || expected[:corePowerIDPrefixLength] != observed[:corePowerIDPrefixLength] {
-		return false
-	}
-	hash, valid := normalizeCorePowerHash(expected[corePowerIDPrefixLength:])
-	return valid && hash == strings.ToLower(observed[corePowerIDPrefixLength:])
-}
-
-// normalizeCorePowerHash checks Core's Base32Hex representation before folding
-// hash case. The round trip rejects unused trailing bits that Go discards.
-func normalizeCorePowerHash(hash string) (string, bool) {
-	hash = strings.ToUpper(hash)
-	encoding := base32.HexEncoding.WithPadding(base32.NoPadding)
-	decoded, err := encoding.DecodeString(hash)
-	if err != nil || len(decoded) != corePowerHashBytes || encoding.EncodeToString(decoded) != hash {
-		return "", false
-	}
-	return strings.ToLower(hash), true
-}
-
-// normalizeCorePowerTarget rejects IDs that Core's typed request decoder would
-// reject for this component kind. Flow ingestion accepts arbitrary strings, so
-// one invalid inventory link must not prevent healthy neighbors from being read.
-// Keep this aligned with crates/uuid's machine/host.rs, switch/mod.rs and
-// power_shelf/mod.rs FromStr implementations, including predicted hosts and
-// host-type power shelves.
-func normalizeCorePowerTarget(kind devicetypes.ComponentType, id string) (string, bool) {
-	if len(id) != corePowerIDLength || (id[6] != 't' && id[6] != 's') {
-		return "", false
-	}
-	validKind := false
-	switch kind {
-	case devicetypes.ComponentTypeCompute:
-		validKind = id[:5] == "fm100" && (id[5] == 'h' || id[5] == 'p')
-	case devicetypes.ComponentTypeNVSwitch:
-		validKind = id[:5] == "sw100" && id[5] == 'n'
-	case devicetypes.ComponentTypePowerShelf:
-		validKind = id[:5] == "ps100" && (id[5] == 'r' || id[5] == 'h')
-	}
-	if !validKind {
-		return "", false
-	}
-	hash, valid := normalizeCorePowerHash(id[corePowerIDPrefixLength:])
-	if !valid {
-		return "", false
-	}
-	return id[:corePowerIDPrefixLength] + hash, true
 }
 
 // unavailableCorePowerDetails initializes three failed section slots. A caller
@@ -406,6 +284,15 @@ func powerTaskDetailsToProto(task taskdef.PowerTaskDetails) (*pb.PowerTaskDetail
 
 // powerDetailsReadError exposes a bounded category instead of dependency text.
 func powerDetailsReadError(err error) pb.PowerDetailsReadError {
+	switch {
+	case errors.Is(err, errTaskIdentityNotLinked):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED
+	case errors.Is(err, errTaskIdentityInvalid):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_INVALID_RESPONSE
+	case errors.Is(err, errTaskIdentityLimit):
+		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED
+	}
+
 	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
 		return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED
 	}
@@ -422,7 +309,7 @@ func powerDetailsReadError(err error) pb.PowerDetailsReadError {
 // its HTML escaping can expand strings beyond protojson's size.
 func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
 	for attempt := range 4 {
-		fits, err := powerDetailsResponseFits(response)
+		fits, err := detailsResponseFits(response)
 		if err != nil || fits {
 			return err
 		}
@@ -461,18 +348,4 @@ func limitPowerTaskWaitingContexts(tasks []*pb.PowerTaskDetails) {
 		}
 		task.WaitingContext = &pb.PowerTaskWaitingContext{Error: &code}
 	}
-}
-
-// powerDetailsResponseFits measures the actual proxy wrapper, whose JSON
-// escaping can be larger than the embedded protobuf JSON alone.
-func powerDetailsResponseFits(response proto.Message) (bool, error) {
-	message, err := protojson.Marshal(response)
-	if err != nil {
-		return false, status.Error(codes.Internal, "power details could not be encoded")
-	}
-	encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
-	if err != nil {
-		return false, status.Error(codes.Internal, "power details could not be encoded")
-	}
-	return len(encoded) <= powerDetailsResponseBytes, nil
 }

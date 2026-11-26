@@ -6,6 +6,7 @@ package activity
 import (
 	"context"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/dispatchguard"
@@ -15,6 +16,7 @@ import (
 const NameNVOSResetCompleted = "NVOSResetCompleted"
 
 func (a *Activities) NVOSResetCompleted(ctx context.Context, target common.Target) (bool, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
 		return false, err
@@ -25,6 +27,7 @@ func (a *Activities) NVOSResetCompleted(ctx context.Context, target common.Targe
 const NameSDNResetCompleted = "SDNResetCompleted"
 
 func (a *Activities) SDNResetCompleted(ctx context.Context, target common.Target) (bool, error) {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
 		return false, err
@@ -36,6 +39,7 @@ const NamePrepareFactoryReset = "PrepareFactoryReset"
 const NameSubmitFactoryReset = "SubmitFactoryReset"
 
 func (a *Activities) PrepareFactoryReset(ctx context.Context, target common.Target) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	err := dispatchguard.Check(ctx)
 	if err != nil {
@@ -49,6 +53,7 @@ func (a *Activities) PrepareFactoryReset(ctx context.Context, target common.Targ
 }
 
 func (a *Activities) SubmitFactoryReset(ctx context.Context, target common.Target, scope string) error {
+	ctx = logcorrelation.Restore(ctx, target.TraceID)
 	ctx = a.dispatchContext(ctx)
 	err := dispatchguard.Check(ctx)
 	if err != nil {

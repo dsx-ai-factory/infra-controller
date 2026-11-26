@@ -1368,10 +1368,12 @@ async fn wait_for_network_status(
         Ok(status) => Ok(status),
         Err(error) => {
             let state = state.lock().await;
-            Err(error).wrap_err(format!(
-                "timed out waiting for expected DPU network status; last report: {:?}",
-                state.last_network_status
-            ))
+            Err(error).wrap_err_with(|| {
+                format!(
+                    "timed out waiting for expected DPU network status; last report: {:?}",
+                    state.last_network_status
+                )
+            })
         }
     }
 }
@@ -1412,7 +1414,7 @@ async fn test_nvue_generic(
             let mut f = fs::File::create(ERR_FILE).unwrap();
             f.write_all(startup_yaml.as_bytes()).unwrap();
         })
-        .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+        .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
     assert_eq!(yaml_obj.len(), 2); // 'header' and 'set'
 
     let r = compare_lines(startup_yaml.as_str(), expected, None);
@@ -2317,6 +2319,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         dhcp_servers: vec!["127.0.0.1".to_string()],
         ntp_servers: vec![],
         dhcpv6_server_preference: Some(255),
+        nico_pxe_service_url: None,
         vni_device: "".to_string(),
 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {

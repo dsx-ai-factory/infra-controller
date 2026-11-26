@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
@@ -143,6 +144,8 @@ func OperationRunTargetStatusFromTaskStatus(
 // Create ignores server-owned lifecycle and timestamp fields and always starts
 // the persisted run in pending/none state.
 type OperationRun struct {
+	// Metadata retains log correlation independently of dispatcher execution.
+	Metadata          *logcorrelation.Metadata
 	ID                uuid.UUID
 	Name              string
 	Description       string
@@ -288,6 +291,9 @@ func (r *OperationRun) DecodedOperation() (*Operation, error) {
 	}
 	if err := operation.Validate(); err != nil {
 		return nil, fmt.Errorf("validate operation run template: %w", err)
+	}
+	if r.Metadata != nil {
+		operation.TraceID = r.Metadata.TraceID
 	}
 
 	return &operation, nil

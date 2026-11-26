@@ -21,6 +21,7 @@ use sqlx::Connection;
 
 use super::*;
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn expected_power_shelf_queries_survive_added_columns(
@@ -31,7 +32,7 @@ async fn expected_power_shelf_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection applies DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_power_shelves ADD COLUMN test_added_column text;",
@@ -47,7 +48,7 @@ async fn expected_power_shelf_queries_survive_added_columns(
 async fn exercise_expected_power_shelf_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = Uuid::new_v4();
     let rack_id = RackId::new("projection-rack");
     let expected = ExpectedPowerShelf {
@@ -147,7 +148,7 @@ async fn create_expected_power_shelves(
 #[crate::sqlx_test]
 async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
     let shelves = create_expected_power_shelves(&mut txn).await;
@@ -179,7 +180,7 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
 async fn expected_power_shelf_lookup_rejects_non_host_prefix(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let shelf = create(
         &mut txn,
         ExpectedPowerShelf {
@@ -228,7 +229,7 @@ async fn expected_power_shelf_lookup_rejects_non_host_prefix(
 async fn test_create_preserves_bmc_ip_addresses(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let shelves = create_expected_power_shelves(&mut txn).await;
 
     // Shelves at indices 3 and 4 are created with IP addresses
@@ -248,7 +249,7 @@ async fn test_create_preserves_bmc_ip_addresses(
 #[crate::sqlx_test]
 async fn test_duplicate_fail_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
     let shelves = create_expected_power_shelves(&mut txn).await;
@@ -282,7 +283,7 @@ async fn test_duplicate_fail_create(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 #[crate::sqlx_test]
 async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
     let shelves = create_expected_power_shelves(&mut txn).await;
@@ -301,7 +302,7 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     txn.commit().await.expect("Failed to commit transaction");
 
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
 
@@ -319,7 +320,7 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 
 #[crate::sqlx_test]
 async fn test_delete(pool: sqlx::PgPool) -> () {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let shelves = create_expected_power_shelves(&mut txn).await;
     let mac = shelves[0].bmc_mac_address;
     txn.commit().await.expect("Failed to commit transaction");
@@ -345,7 +346,7 @@ async fn test_find_rms_identities_by_bmc_macs(
 
     use model::rack::RackConfig;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let bmc_expected_only = "02:00:00:00:0e:01";
     let bmc_live_rack = "02:00:00:00:0e:02";
@@ -359,9 +360,9 @@ async fn test_find_rms_identities_by_bmc_macs(
     // Both racks are declared in expected_racks; only rack_live also has a
     // live racks row (with a different profile) to prove COALESCE precedence.
     sqlx::query("INSERT INTO expected_racks (rack_id, rack_profile_id) VALUES ($1, $2), ($3, $4)")
-        .bind(rack_expected.to_string())
-        .bind(profile_expected.to_string())
-        .bind(rack_live.to_string())
+        .bind(rack_expected.as_str())
+        .bind(profile_expected.as_str())
+        .bind(rack_live.as_str())
         .bind("NVL72-EXPECTED-IGNORED")
         .execute(txn.as_mut())
         .await?;
@@ -383,9 +384,9 @@ async fn test_find_rms_identities_by_bmc_macs(
                 ('PS-NORACK', $5::macaddr, 'admin', 'pw', NULL)",
     )
     .bind(bmc_expected_only)
-    .bind(rack_expected.to_string())
+    .bind(rack_expected.as_str())
     .bind(bmc_live_rack)
-    .bind(rack_live.to_string())
+    .bind(rack_live.as_str())
     .bind(bmc_no_rack)
     .execute(txn.as_mut())
     .await?;

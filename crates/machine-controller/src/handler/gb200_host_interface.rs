@@ -18,14 +18,11 @@
 //! Checks and restores the BMC host interface that GB200 SBIOS uses for
 //! Redfish access.
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
-use carbide_redfish::libredfish::host_interface::{
-    HostInterfaceStaticIpv4Repair, ensure_gb200_host_interface_static_ipv4,
-    gb200_host_interface_static_ipv4_is_missing,
-};
-use libredfish::Redfish;
+use bmc_platform::{ManagerSettings, ManagerSettingsStatus, PlatformError};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use model::machine::ManagedHostStateSnapshot;
 use model::rack_type::RackProductFamily;
+use serde_json::Value;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use crate::context::MachineStateHandlerContextObjects;
@@ -40,44 +37,71 @@ pub(super) async fn gb200_host_interface_address_is_missing(
         return Ok(false);
     }
 
-    let redfish_client = ctx
-        .services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-    gb200_host_interface_static_ipv4_is_missing(redfish_client.as_ref())
-        .await
-        .map_err(|error| redfish_error("gb200_host_interface_static_ipv4_is_missing", error))
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    let status = async { bmc.bmc_control()?.settings_status().await };
+    Ok(address_is_missing(&status.await.map_err(
+        |error: PlatformError| platform_error("bmc_control.settings_status", error),
+    )?))
 }
 
 /// Restores the expected address only for hosts identified as GB200 by their
 /// persisted Site Explorer report.
 pub(super) async fn repair_gb200_host_interface_if_needed(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    redfish_client: &dyn Redfish,
     mh_snapshot: &ManagedHostStateSnapshot,
 ) -> Result<(), StateHandlerError> {
     if !is_reported_gb200(ctx, mh_snapshot).await? {
         return Ok(());
     }
 
-    match ensure_gb200_host_interface_static_ipv4(&ctx.services.instrumentation, redfish_client)
+    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+    let bmc_control = bmc
+        .bmc_control()
+        .map_err(|error| platform_error("bmc_control", error.into()))?;
+    let status = bmc_control
+        .settings_status()
         .await
-        .map_err(|error| redfish_error("ensure_gb200_host_interface_static_ipv4", error))?
-    {
-        HostInterfaceStaticIpv4Repair::AlreadyConfigured => {}
-        HostInterfaceStaticIpv4Repair::Patched => tracing::warn!(
-            machine_id = %mh_snapshot.host_snapshot.id,
-            "Restored the GB200 BMC hostusb0 static IPv4 address before host platform configuration"
-        ),
-        HostInterfaceStaticIpv4Repair::Conflicting => {
-            return Err(StateHandlerError::ManualInterventionRequired(format!(
-                "GB200 host {} has unexpected static IPv4 configuration on hostusb0; refusing to overwrite it",
-                mh_snapshot.host_snapshot.id,
-            )));
-        }
+        .map_err(|error| platform_error("bmc_control.settings_status", error))?;
+    if status.is_applied {
+        return Ok(());
     }
 
-    Ok(())
+    // Applying is a no-op for the expected address, which a status that
+    // cannot read address values does not report as applied.
+    match bmc_control
+        .apply_settings(&ManagerSettings::default(), &ctx.services.instrumentation)
+        .await
+    {
+        Ok(_) => {
+            if address_is_missing(&status) {
+                tracing::warn!(
+                    machine_id = %mh_snapshot.host_snapshot.id,
+                    "Restored the GB200 BMC hostusb0 static IPv4 address before host platform configuration"
+                );
+            }
+            Ok(())
+        }
+        Err(PlatformError::ManualInterventionRequired { .. }) => {
+            Err(StateHandlerError::ManualInterventionRequired(format!(
+                "GB200 host {} has unexpected static IPv4 configuration on hostusb0; refusing to overwrite it",
+                mh_snapshot.host_snapshot.id,
+            )))
+        }
+        Err(error) => Err(platform_error("bmc_control.apply_settings", error)),
+    }
+}
+
+/// `hostusb0` reports no static IPv4 address at all, as opposed to a
+/// different one: every difference's reported value is an empty list.
+fn address_is_missing(status: &ManagerSettingsStatus) -> bool {
+    !status.is_applied
+        && !status.differences.is_empty()
+        && status.differences.iter().all(|diff| {
+            diff.actual
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        })
 }
 
 /// Uses only the persisted Redfish report so stale or missing rack association
@@ -91,7 +115,7 @@ async fn is_reported_gb200(
     };
 
     let endpoints =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![host_bmc_ip]).await?;
+        db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![host_bmc_ip]).await?;
     let product_family = endpoints
         .first()
         .and_then(|endpoint| endpoint.report.model())
@@ -99,4 +123,42 @@ async fn is_reported_gb200(
         .and_then(RackProductFamily::from_hardware_model);
 
     Ok(product_family == Some(RackProductFamily::Gb200))
+}
+
+#[cfg(test)]
+mod tests {
+    use bmc_platform::ManagerSettingsDiff;
+    use carbide_test_support::value_scenarios;
+    use serde_json::json;
+
+    use super::*;
+
+    fn differing(actual: Option<Value>) -> ManagerSettingsStatus {
+        ManagerSettingsStatus {
+            is_applied: false,
+            differences: vec![ManagerSettingsDiff {
+                key: "hostusb0.IPv4StaticAddresses".to_string(),
+                expected: json!([{"Address": "10.0.1.1"}]),
+                actual,
+            }],
+        }
+    }
+
+    /// Only an empty address list rewinds discovery; a different or unread
+    /// address is left for the repair, which refuses to overwrite a
+    /// different one.
+    #[test]
+    fn only_an_empty_address_list_is_missing() {
+        value_scenarios!(run = |status: ManagerSettingsStatus| address_is_missing(&status);
+            "missing" {
+                differing(Some(json!([]))) => true,
+            }
+            "configured, different, or unread" {
+                ManagerSettingsStatus { is_applied: true, differences: vec![] } => false,
+                ManagerSettingsStatus { is_applied: false, differences: vec![] } => false,
+                differing(Some(json!([{"Address": "192.0.2.1"}]))) => false,
+                differing(None) => false,
+            }
+        );
+    }
 }

@@ -22,6 +22,28 @@ data:
     {{- with $sshConsole.adminCertificateRole | default "" -}}
     {{- $config = $config | replace "admin_certificate_role = \"\"" (printf "admin_certificate_role = %s" (quote .)) -}}
     {{- end -}}
+    {{- /* BMC connection pool. Each key is prepended only when set, so unset values keep the
+           binary defaults and the rendered file is unchanged. */ -}}
+    {{- $bmcPool := $sshConsole.bmcPool | default dict -}}
+    {{- $poolConfig := "" -}}
+    {{- if not (kindIs "invalid" $bmcPool.maxConnections) -}}
+    {{- if le (int $bmcPool.maxConnections) 0 -}}
+    {{- fail "sshConsole.bmcPool.maxConnections must be a positive integer" -}}
+    {{- end -}}
+    {{- $poolConfig = printf "%smax_bmc_connections = %d\n" $poolConfig (int $bmcPool.maxConnections) -}}
+    {{- end -}}
+    {{- with $bmcPool.onDemandIdleTimeout | default "" -}}
+    {{- $poolConfig = printf "%son_demand_bmc_idle_timeout = %s\n" $poolConfig (quote .) -}}
+    {{- end -}}
+    {{- if not (kindIs "invalid" $bmcPool.maxConcurrentProbes) -}}
+    {{- if le (int $bmcPool.maxConcurrentProbes) 0 -}}
+    {{- fail "sshConsole.bmcPool.maxConcurrentProbes must be a positive integer" -}}
+    {{- end -}}
+    {{- $poolConfig = printf "%smax_concurrent_bmc_probes = %d\n" $poolConfig (int $bmcPool.maxConcurrentProbes) -}}
+    {{- end -}}
+    {{- if $poolConfig -}}
+    {{- $config = printf "## BMC connection pool (sshConsole.bmcPool)\n%s\n%s" $poolConfig $config -}}
+    {{- end -}}
     {{- $config | nindent 4 }}
     {{- end }}
 ---

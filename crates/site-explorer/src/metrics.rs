@@ -348,6 +348,11 @@ const SITE_EXPLORER_DURATION_HISTOGRAM_BOUNDARIES_MS: &[f64] = &[
     3_600_000.0,
 ];
 
+const SITE_EXPLORER_CREATION_HISTOGRAM_BOUNDARIES_SECONDS: &[f64] = &[
+    0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0,
+    75.0, 100.0, 250.0, 500.0, 750.0, 1_000.0, 2_500.0, 5_000.0, 7_500.0, 10_000.0,
+];
+
 /// Configures histogram buckets for site explorer latency metrics.
 pub fn site_explorer_latency_histogram_view(
     name_filter: &'static str,
@@ -1290,12 +1295,14 @@ impl SiteExplorerInstruments {
             .f64_histogram("site_explorer_create_power_shelves_latency")
             .with_description("Duration of power shelf creation")
             .with_unit("s")
+            .with_boundaries(SITE_EXPLORER_CREATION_HISTOGRAM_BOUNDARIES_SECONDS.to_vec())
             .build();
 
         let site_explorer_create_switches_latency = meter
             .f64_histogram("site_explorer_create_switches_latency")
             .with_description("Duration of switch creation")
             .with_unit("s")
+            .with_boundaries(SITE_EXPLORER_CREATION_HISTOGRAM_BOUNDARIES_SECONDS.to_vec())
             .build();
 
         {
@@ -2179,7 +2186,7 @@ mod tests {
     }
 
     #[test]
-    fn site_explorer_creation_latencies_use_declared_units() {
+    fn site_explorer_creation_latencies_use_declared_units_and_buckets() {
         let test_meter = LatencyHistogramTestMeter::new("carbide_site_explorer_*_latency");
         let metric_holder = MetricHolder::new(
             test_meter.meter_provider.meter("site-explorer-test"),
@@ -2199,17 +2206,17 @@ mod tests {
                 Check {
                     scenario: "machine creation",
                     input: "carbide_site_explorer_create_machines_latency_milliseconds",
-                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 375.0),
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 375.0, 500.0),
                 },
                 Check {
                     scenario: "power-shelf creation",
                     input: "site_explorer_create_power_shelves_latency_seconds",
-                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 0.125),
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 0.125, 0.25),
                 },
                 Check {
                     scenario: "switch creation",
                     input: "site_explorer_create_switches_latency_seconds",
-                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 1.25),
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 1.25, 2.5),
                 },
             ],
             |name| {
@@ -2225,6 +2232,12 @@ mod tests {
                     family.get_field_type(),
                     histogram.get_sample_count(),
                     histogram.get_sample_sum(),
+                    histogram
+                        .get_bucket()
+                        .iter()
+                        .find(|bucket| bucket.cumulative_count() > 0)
+                        .expect("missing populated bucket")
+                        .upper_bound(),
                 )
             },
         );

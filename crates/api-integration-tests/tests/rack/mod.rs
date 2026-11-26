@@ -26,6 +26,7 @@ use bmc_mock::ListenerOrAddress;
 use bmc_mock::test_support::TEST_MAC_POOL;
 use carbide_utils::HostPortPair;
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
+use db::TransactionVending as _;
 use eyre::{ContextCompat, WrapErr};
 use machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use machine_a_tron::{
@@ -114,7 +115,7 @@ async fn run_machine_a_tron_racks_test(
 ) -> eyre::Result<()> {
     let gb200_rack_id = RackId::new("machine-a-tron-gb200-nvl72");
     let gb300_rack_id = RackId::new("machine-a-tron-gb300-nvl72");
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     for (rack_id, topology, compute_manufacturer, power_shelf_count) in [
         (&gb200_rack_id, "gb200_nvl72", "WiWynn", 8),
         (&gb300_rack_id, "gb300_nvl72", "Lenovo", 6),

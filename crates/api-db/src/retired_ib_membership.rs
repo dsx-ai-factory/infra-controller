@@ -141,6 +141,7 @@ mod tests {
     use model::ib_partition::PartitionKey;
 
     use super::{find_recorded_candidates, record, remove_for_reuse};
+    use crate::TransactionVending as _;
 
     fn membership(fabric: &str, pkey: u16, guid: &str) -> IbMembership {
         IbMembership {
@@ -195,7 +196,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn repeated_record_is_idempotent(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let membership = membership("fabric-a", 0x101, "guid-a");
 
         record(txn.as_mut(), &membership).await.unwrap();
@@ -222,7 +223,7 @@ mod tests {
             membership("fabric-b", 0x102, "guid-b"),
         ];
         let false_cross_product_match = membership("fabric-a", 0x102, "guid-b");
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for membership in candidates
             .iter()
             .chain(std::iter::once(&false_cross_product_match))
@@ -241,7 +242,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn record_remains_after_machine_and_instance_deletion(pool: sqlx::PgPool) {
         let membership = membership("fabric-a", 0x101, "guid-a");
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query(
             "INSERT INTO machines (id, dpf) \
              VALUES ('retired-membership-machine', '{}'::jsonb)",
@@ -256,7 +257,7 @@ mod tests {
         record(txn.as_mut(), &membership).await.unwrap();
         txn.commit().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("DELETE FROM instances WHERE machine_id = 'retired-membership-machine'")
             .execute(txn.as_mut())
             .await
@@ -283,7 +284,7 @@ mod tests {
             membership("fabric-a", 0x102, "guid-a"),
             membership("fabric-a", 0x101, "guid-b"),
         ];
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for candidate in std::iter::once(&exact).chain(&retained) {
             record(txn.as_mut(), candidate).await.unwrap();
         }

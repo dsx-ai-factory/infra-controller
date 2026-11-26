@@ -57,7 +57,7 @@ pub(crate) async fn trigger_host_reprovisioning(
     let snapshot =
         db::managed_host::load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
@@ -241,13 +241,13 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         deadline,
         delivered_at,
         task_json,
-        result: Some(ScoutUpgradeResult {
+        result: Some(Box::new(ScoutUpgradeResult {
             success: req.success,
             exit_code: req.exit_code,
             stdout: truncate(req.stdout, MAX_STORED_OUTPUT_SIZE),
             stderr: truncate(req.stderr, MAX_STORED_OUTPUT_SIZE),
             error: truncate(req.error, MAX_STORED_OUTPUT_SIZE),
-        }),
+        })),
     };
     let new_state = match context {
         HostReprovisionContext::Ready { retry_count } => ManagedHostState::HostReprovision {

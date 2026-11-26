@@ -155,12 +155,9 @@ pub(crate) async fn find_remediation_ids(
     request: Request<()>,
 ) -> Result<Response<rpc::RemediationIdList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
 
-    let remediation_ids = db::dpu_remediation::find_remediation_ids(&mut txn).await?;
+    let remediation_ids = db::dpu_remediation::find_remediation_ids(api.pg_pool()).await?;
     let response = rpc::RemediationIdList { remediation_ids };
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }
@@ -170,7 +167,6 @@ pub(crate) async fn find_remediations_by_ids(
     request: Request<rpc::RemediationIdList>,
 ) -> Result<Response<rpc::RemediationList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
 
     let remediation_ids = request.into_inner().remediation_ids;
 
@@ -187,7 +183,7 @@ pub(crate) async fn find_remediations_by_ids(
     }
 
     let db_remediations =
-        db::dpu_remediation::find_remediations_by_ids(&mut txn, &remediation_ids).await?;
+        db::dpu_remediation::find_remediations_by_ids(api.pg_pool(), &remediation_ids).await?;
 
     let response = Response::new(rpc::RemediationList {
         remediations: db_remediations
@@ -195,8 +191,6 @@ pub(crate) async fn find_remediations_by_ids(
             .map(rpc::Remediation::from)
             .collect::<Vec<_>>(),
     });
-
-    txn.commit().await?;
 
     Ok(response)
 }
@@ -206,7 +200,6 @@ pub(crate) async fn find_applied_remediation_ids(
     request: Request<rpc::FindAppliedRemediationIdsRequest>,
 ) -> Result<Response<rpc::AppliedRemediationIdList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
 
     let request = request.into_inner();
 
@@ -235,14 +228,12 @@ pub(crate) async fn find_applied_remediation_ids(
     }?;
 
     let (remediation_ids, dpu_machine_ids) =
-        db::dpu_remediation::find_applied_remediation_ids(&mut txn, id_query_args).await?;
+        db::dpu_remediation::find_applied_remediation_ids(api.pg_pool(), id_query_args).await?;
 
     let response = rpc::AppliedRemediationIdList {
         remediation_ids,
         dpu_machine_ids,
     };
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }
@@ -252,7 +243,6 @@ pub(crate) async fn find_applied_remediations(
     request: Request<rpc::FindAppliedRemediationsRequest>,
 ) -> Result<Response<rpc::AppliedRemediationList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
 
     let request = request.into_inner();
 
@@ -266,7 +256,7 @@ pub(crate) async fn find_applied_remediations(
 
     let applied_remediations =
         db::dpu_remediation::find_remediations_by_remediation_id_and_machine(
-            &mut txn,
+            api.pg_pool(),
             remediation_id,
             &machine_id,
         )
@@ -278,8 +268,6 @@ pub(crate) async fn find_applied_remediations(
     let response = rpc::AppliedRemediationList {
         applied_remediations,
     };
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }
@@ -296,9 +284,9 @@ pub(crate) async fn get_next_remediation_for_machine(
         .ok_or(CarbideError::MissingArgument("machine id"))?;
     crate::api::log_machine_id(&machine_id.into());
 
-    let mut txn = api.txn_begin().await?;
     let remediation_to_apply =
-        db::dpu_remediation::find_next_remediation_for_machine(&mut txn, machine_id).await?;
+        db::dpu_remediation::find_next_remediation_for_machine(&mut api.db_reader(), machine_id)
+            .await?;
 
     let remediation_id = remediation_to_apply.as_ref().map(|r| r.id);
     let remediation_script = remediation_to_apply.map(|r| r.script);
@@ -307,8 +295,6 @@ pub(crate) async fn get_next_remediation_for_machine(
         remediation_id,
         remediation_script,
     });
-
-    txn.commit().await?;
 
     Ok(response)
 }

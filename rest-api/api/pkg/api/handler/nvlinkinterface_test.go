@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -525,10 +526,10 @@ func TestGetAllNVLinkInterface_Handle(t *testing.T) {
 				q.Add("includeRelation", *tt.queryIncludeRelations2)
 			}
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)
@@ -574,25 +575,25 @@ func TestGetAllNVLinkInterface_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectedTotal, pr.Total)
 
 			if tt.queryIncludeRelations1 != nil || tt.queryIncludeRelations2 != nil {
-				if tt.expectedNVLinkLogicalPartitionID != nil && tt.expectedNVLinkLogicalPartitionID.String() != "" {
+				if tt.expectedNVLinkLogicalPartitionID != nil {
 					assert.Equal(t, tt.expectedNVLinkLogicalPartitionID.String(), rst[0].NVLinkLogicalPartition.ID)
 				}
-				if tt.expectedInstance != nil && tt.expectedInstance.ID.String() != "" {
+				if tt.expectedInstance != nil {
 					assert.Equal(t, tt.expectedInstance.ID.String(), rst[0].Instance.ID)
 					assert.Equal(t, tt.expectedInstance.Name, rst[0].Instance.Name)
 				}
 			} else {
 				if len(rst) > 0 {
-					if tt.expectedInstance != nil && tt.expectedInstance.ID.String() != "" {
+					if tt.expectedInstance != nil {
 						assert.Equal(t, tt.expectedInstance.ID.String(), rst[0].InstanceID)
 					}
-					if tt.expectedNVLinkLogicalPartitionID != nil && tt.expectedNVLinkLogicalPartitionID.String() != "" {
+					if tt.expectedNVLinkLogicalPartitionID != nil {
 						assert.Equal(t, tt.expectedNVLinkLogicalPartitionID.String(), rst[0].NVLinkLogicalPartitionID)
 					}
 					if tt.expectedDeviceInstance != nil {
 						assert.Equal(t, *tt.expectedDeviceInstance, rst[0].DeviceInstance)
 					}
-					if tt.expectedNVLinkDomainID != nil && tt.expectedNVLinkDomainID.String() != "" {
+					if tt.expectedNVLinkDomainID != nil {
 						assert.Equal(t, tt.expectedNVLinkDomainID.String(), *rst[0].NVLinkDomainID)
 					}
 				}
@@ -851,7 +852,7 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test NVLinkInterface getall by NVLinkLogicalPartition API endpoint success",
+			name: "test NVLinkInterface getall by Instance API endpoint success with paging on page 1",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -873,7 +874,7 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 			expectedNVLinkLogicalPartitionID: cutil.GetPtr(nvllps[0].ID),
 		},
 		{
-			name: "test NVLinkInterface getall by NVLinkLogicalPartition success with paging on page 2",
+			name: "test NVLinkInterface getall by Instance success with paging on page 2",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -997,13 +998,14 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 				reqUser:       tnu1,
 				respCode:      http.StatusOK,
 			},
-			queryIncludeRelations1: cutil.GetPtr(cdbm.NVLinkLogicalPartitionRelationName),
-			queryIncludeRelations2: cutil.GetPtr(cdbm.InstanceRelationName),
-			expectedCount:          20,
-			expectedTotal:          25,
-			orderBy:                cutil.GetPtr("CREATED_ASC"),
-			expectedInstanceID:     cutil.GetPtr(inst1.ID),
-			wantErr:                false,
+			queryIncludeRelations1:           cutil.GetPtr(cdbm.NVLinkLogicalPartitionRelationName),
+			queryIncludeRelations2:           cutil.GetPtr(cdbm.InstanceRelationName),
+			expectedCount:                    20,
+			expectedTotal:                    25,
+			orderBy:                          cutil.GetPtr("CREATED_ASC"),
+			expectedInstanceID:               cutil.GetPtr(inst1.ID),
+			expectedNVLinkLogicalPartitionID: cutil.GetPtr(nvllps[0].ID),
+			wantErr:                          false,
 		},
 		{
 			name: "test NVLinkInterface getall by NVLinkLogicalPartition InterfaceStatusProvisioning status success",
@@ -1070,10 +1072,10 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 				q.Add("includeRelation", *tt.queryIncludeRelations2)
 			}
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)
@@ -1126,6 +1128,24 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 			assert.NoError(t, err)
 
 			assert.Equal(t, tt.expectedTotal, pr.Total)
+
+			for _, relation := range []*string{tt.queryIncludeRelations1, tt.queryIncludeRelations2} {
+				if relation == nil {
+					continue
+				}
+				switch *relation {
+				case cdbm.NVLinkLogicalPartitionRelationName:
+					require.NotEmpty(t, rst)
+					require.NotNil(t, tt.expectedNVLinkLogicalPartitionID)
+					require.NotNil(t, rst[0].NVLinkLogicalPartition)
+					assert.Equal(t, tt.expectedNVLinkLogicalPartitionID.String(), rst[0].NVLinkLogicalPartition.ID)
+				case cdbm.InstanceRelationName:
+					require.NotEmpty(t, rst)
+					require.NotNil(t, tt.expectedInstanceID)
+					require.NotNil(t, rst[0].Instance)
+					assert.Equal(t, tt.expectedInstanceID.String(), rst[0].Instance.ID)
+				}
+			}
 
 			if len(rst) > 0 {
 				assert.Equal(t, rst[0].InstanceID, tt.args.reqInstance.ID.String())

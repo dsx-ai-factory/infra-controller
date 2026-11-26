@@ -71,6 +71,10 @@ where
         Ok(power_state_from_supplies(&states))
     }
 
+    fn may_use_ipmi_restart(&self, _cx: &OpCx<'_, B>, _reset_type: ResetType) -> bool {
+        false
+    }
+
     async fn set(
         &self,
         cx: &OpCx<'_, B>,
@@ -81,5 +85,27 @@ where
             ResetType::ForceOff | ResetType::GracefulShutdown => set_psus(cx, false).await,
             _ => Err(PlatformError::Unsupported),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{Fixture, power_with_restart_quirk};
+
+    #[tokio::test]
+    async fn restart_stays_unsupported_when_site_rules_add_the_ipmi_quirk() {
+        let bmc = Fixture::new("Delta", "PowerShelf", "shelf", "BMC")
+            .build()
+            .await;
+        let (drivers, quirks) = power_with_restart_quirk(crate::Driver::DeltaPowerShelfPower);
+        let power = drivers.power().unwrap();
+        let cx = bmc.lazy_cx().with_quirks(&quirks);
+        assert!(!power.may_use_ipmi_restart(&cx, ResetType::GracefulRestart));
+        assert_eq!(
+            power.set(&cx, ResetType::GracefulRestart).await,
+            Err(PlatformError::Unsupported)
+        );
+        assert!(bmc.writes().is_empty());
     }
 }

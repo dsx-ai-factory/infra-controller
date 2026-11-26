@@ -23,6 +23,7 @@ use common::api_fixtures::{TestEnvOverrides, create_test_env, create_test_env_wi
 use common::network_segment::{
     create_network_segment_with_api, get_segment_state, tenant_state_from_segment, text_history,
 };
+use db::TransactionVending as _;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
@@ -168,7 +169,7 @@ async fn test_network_segment_lifecycle_impl(
         format!("network segment not found: {}", segment.id.unwrap())
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let expected_history = ["provisioning", "ready", "drainallocatedips", "dbdelete"];
     let history = text_history(&mut txn, segment_id).await;
     for (i, state) in history.iter().enumerate() {
@@ -242,9 +243,8 @@ async fn test_network_segment_lifecycle_with_vpc_and_domain(
 #[crate::sqlx_test]
 async fn test_admin_network_exists(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let mut txn = env.pool.begin().await?;
 
-    let segments = db::network_segment::admin(&mut txn).await?;
+    let segments = db::network_segment::admin(&env.pool).await?;
 
     assert_eq!(segments[0].id, env.admin_segment());
 
@@ -291,8 +291,7 @@ async fn test_multiple_admin_network_segments_exist(
     assert!(segment_ids.contains(&second_admin_segment));
 
     // Verify the DB admin lookup returns both admin segments as candidates.
-    let mut txn = env.pool.begin().await?;
-    let admin_segments = db::network_segment::admin(&mut txn).await?;
+    let admin_segments = db::network_segment::admin(&env.pool).await?;
     let admin_segment_ids = admin_segments
         .iter()
         .map(|segment| segment.id)

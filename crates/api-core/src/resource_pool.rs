@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use ::rpc::forge as rpc;
+use carbide_ib_fabric::config::IbFabricDefinition;
 use carbide_resource_pool::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError};
 use carbide_resource_pool::remote::{RemoteResourcePool, start_cleanup_metrics};
 use carbide_resource_pool::value::ResourcePoolEligibility;
@@ -35,6 +36,7 @@ use futures::{Stream, StreamExt, stream};
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection,
 };
+use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
 use opentelemetry::metrics::Meter;
 use sqlx::{PgConnection, PgPool};
 use tokio::task::JoinSet;
@@ -63,6 +65,27 @@ pub(crate) struct ResourcePoolMonitor {
     /// Resolved connections, keyed by provider authority so observations keep
     /// working when a saved binding still names an old configuration alias.
     authority_clients: HashMap<String, GrpcResourcePoolBackend>,
+}
+
+/// `ib_fabric_pool_definitions` translates configured fabric ranges for first
+/// remote registration and additive growth. These are not ordinary seed inputs.
+pub(crate) fn ib_fabric_pool_definitions(
+    fabrics: &HashMap<String, IbFabricDefinition>,
+) -> HashMap<String, ResourcePoolDef> {
+    fabrics
+        .iter()
+        .map(|(fabric_id, fabric)| {
+            (
+                model::resource_pool::common::ib_pkey_pool_name(fabric_id),
+                ResourcePoolDef {
+                    pool_type: ResourcePoolType::Integer,
+                    ranges: fabric.pkeys.clone(),
+                    prefix: None,
+                    delegate_prefix_len: None,
+                },
+            )
+        })
+        .collect()
 }
 
 impl ResourcePoolMonitor {
@@ -97,6 +120,7 @@ impl ResourcePoolMonitor {
         txn: &mut PgConnection,
         configured: &HashMap<String, ResourcePoolSelection>,
         work_locks: &WorkLockManagerHandle,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> eyre::Result<ResourcePoolRegistry> {
         let mut remotes = HashMap::new();
         let bindings = db::resource_pool::binding::all(&mut *txn).await?;
@@ -137,6 +161,7 @@ impl ResourcePoolMonitor {
                 authority_id.clone(),
                 RemoteResourcePool::new(
                     self.database.clone(),
+                    instrumentation.clone(),
                     work_locks.clone(),
                     authority_id.clone(),
                     client.clone(),
@@ -159,14 +184,33 @@ impl ResourcePoolMonitor {
             .collect();
     }
 
+    /// `initialize_ib_pkey_pools` adds configured fabric ranges through bindings
+    /// already resolved at startup. Ordinary seeds stay unchanged. Cancelling
+    /// startup stops waiting; any saved remote Define remains available for replay.
+    pub(crate) async fn initialize_ib_pkey_pools(
+        &self,
+        registry: &ResourcePoolRegistry,
+        fabrics: &HashMap<String, IbFabricDefinition>,
+        cancel: &CancellationToken,
+    ) -> eyre::Result<()> {
+        let pools = ib_fabric_pool_definitions(fabrics);
+        cancel
+            .run_until_cancelled(registry.grow_resolved(&self.database, &pools))
+            .await
+            .ok_or_else(|| eyre::eyre!("PKey pool initialization cancelled"))??;
+        Ok(())
+    }
+
     /// `register_pools` finishes saved registrations before pool consumers start.
-    /// New registrations use the stored seed, so restarting with edited TOML
-    /// cannot grow a pool. Listen-only replicas require an accepted definition
+    /// New registrations prefer an ordinary stored seed. Without one, fabric
+    /// ranges from `initial_definitions` supply the first Define; its saved request
+    /// is reused on restart. Listen-only replicas require an accepted definition
     /// without submitting or acknowledging one. Statistics are not readiness.
     pub(crate) async fn register_pools(
         &self,
         registry: &ResourcePoolRegistry,
         source: PoolDefinitionSource,
+        initial_definitions: &HashMap<String, ResourcePoolDef>,
         cancel: &CancellationToken,
     ) -> eyre::Result<()> {
         for selected in registry.pools() {
@@ -178,6 +222,7 @@ impl ResourcePoolMonitor {
                     remote.provider(),
                     &selected.binding,
                     source,
+                    initial_definitions.get(&selected.binding.pool_name),
                 ))
                 .await
                 .unwrap_or_else(|| Err(eyre::eyre!("resource pool registration cancelled")));
@@ -192,12 +237,14 @@ impl ResourcePoolMonitor {
     }
 
     /// `register_pool` resumes the saved request, or defines a pool from its
-    /// original seed. Accepted revisions still need a current protocol check.
+    /// ordinary seed or initial fabric ranges. Accepted revisions still need a
+    /// current protocol check.
     async fn register_pool(
         &self,
         backend: &GrpcResourcePoolBackend,
         binding: &ResourcePoolBinding,
         source: PoolDefinitionSource,
+        initial_definition: Option<&ResourcePoolDef>,
     ) -> eyre::Result<()> {
         let latest = tokio::time::timeout(DEFINITION_READ_TIMEOUT, async {
             if matches!(source, PoolDefinitionSource::ListenOnly) {
@@ -219,6 +266,7 @@ impl ResourcePoolMonitor {
                 db::resource_pool::stored_def(&self.database, &binding.pool_name),
             )
             .await??
+            .or_else(|| initial_definition.cloned())
             .ok_or_else(|| {
                 eyre::eyre!(
                     "resource pool `{}` has no seed definition",

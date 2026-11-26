@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use db::DatabaseError;
+use db::db_read::DbReader;
 use db::resource_pool::binding::{self, BindingError};
 use model::resource_pool::ResourcePool;
 use model::resource_pool::binding::{
@@ -28,7 +29,10 @@ use model::resource_pool::binding::{
 use sqlx::PgConnection;
 
 use crate::remote::RemoteResourcePool;
-use crate::{IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolWithBackend};
+use crate::{
+    IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
+    ResourcePoolWithBackend,
+};
 
 // Integrated has no per-pool state. Sharing its adapter does not cache a binding.
 static INTEGRATED_BACKEND: ResourcePoolBackend =
@@ -137,24 +141,48 @@ impl ResourcePoolRegistry {
     /// `select` pairs a typed pool with its backend, checking SQL for pools added
     /// after startup as [`Self::get_or_load_backend`] does. Missing pools return
     /// `None`; invalid bindings and database errors are returned unchanged.
-    /// The result borrows the pool and backend, so it can outlive this transaction.
-    pub async fn select<'a, T>(
+    /// The result borrows the pool and backend, so it can outlive the reader.
+    pub async fn select<'a, T, DB>(
         &'a self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         pool: &'a ResourcePool<T>,
     ) -> Result<Option<ResourcePoolWithBackend<'a, T>>, ResourcePoolRegistryError>
     where
+        for<'db> &'db mut DB: DbReader<'db>,
         T: ToString + FromStr + Send + Sync + 'static,
         T::Err: std::error::Error,
     {
         Ok(self
-            .get_or_load_backend(txn, pool.name())
+            .get_or_load_backend(db, pool.name())
             .await?
             .map(|backend| ResourcePoolWithBackend { pool, backend }))
     }
 
+    /// `select_for_allocation` selects a backend for a required allocation.
+    /// Missing inventory defers to Integrated, whose allocator diagnoses the
+    /// automatic/manual range in the entity transaction. This preserves callers'
+    /// admission and allocation-error ordering. Invalid bindings still fail closed.
+    pub async fn select_for_allocation<'a, T, DB>(
+        &'a self,
+        db: &mut DB,
+        pool: &'a ResourcePool<T>,
+    ) -> Result<ResourcePoolWithBackend<'a, T>, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+        T: ToString + FromStr + Send + Sync + 'static,
+        T::Err: std::error::Error,
+    {
+        Ok(self
+            .select(db, pool)
+            .await?
+            .unwrap_or(ResourcePoolWithBackend {
+                pool,
+                backend: &INTEGRATED_BACKEND,
+            }))
+    }
+
     /// `get_or_load_backend` borrows a resolved backend or checks the database for
-    /// a pool added after startup, using the caller's transaction.
+    /// a pool added after startup.
     ///
     /// During a rolling upgrade, replicas that do not write pool bindings can
     /// still grow SQL pools. Existing rows let us use Integrated for those pools.
@@ -165,22 +193,25 @@ impl ResourcePoolRegistry {
     ///
     /// This does not change the registry or save a binding. `None` means the pool
     /// has neither a binding nor any stored values.
-    pub async fn get_or_load_backend<'a>(
+    pub async fn get_or_load_backend<'a, DB>(
         &'a self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         name: &str,
-    ) -> Result<Option<&'a ResourcePoolBackend>, ResourcePoolRegistryError> {
+    ) -> Result<Option<&'a ResourcePoolBackend>, ResourcePoolRegistryError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         if let Some(resolved) = self.get(name) {
             return Ok(Some(&resolved.backend));
         }
-        if let Some(stored) = binding::load(&mut *txn, name).await? {
+        if let Some(stored) = binding::load(&mut *db, name).await? {
             validate_integrated(
                 &stored.pool_name,
                 stored.backend_kind,
                 &stored.authority_id,
                 &stored.remote_pool,
             )?;
-        } else if !db::resource_pool::pool_has_rows(txn, name).await? {
+        } else if !db::resource_pool::pool_has_rows(db, name).await? {
             return Ok(None);
         }
         Ok(Some(&INTEGRATED_BACKEND))

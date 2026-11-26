@@ -5,6 +5,7 @@ package model
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -87,6 +88,13 @@ func (l *Labels) FromProto(protoLabels []*corev1.Label) {
 // Keep the key stable so these writers coordinate across deployed versions.
 func ExpectedInventoryMutationLockID(siteID uuid.UUID) uint64 {
 	return db.GetAdvisoryLockIDFromString("expected-inventory-mutation:" + siteID.String())
+}
+
+// ExpectedComponentIDAndUpdated is the ID and `Updated` timestamp read for an
+// Expected Machine, Expected Switch, or Expected Power Shelf.
+type ExpectedComponentIDAndUpdated struct {
+	ID      uuid.UUID `bun:"id"`
+	Updated time.Time `bun:"updated"`
 }
 
 // Expected-inventory metadata label keys. These mirror the flat source field

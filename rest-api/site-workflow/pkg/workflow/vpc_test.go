@@ -4,13 +4,16 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 )
@@ -126,7 +129,16 @@ func (cvv2ts *CreateVpcV2TestSuite) Test_CreateVpcV2_Failure() {
 
 	// Mock CreateVpcOnSite activity
 	cvv2ts.env.RegisterActivity(VpcManager.CreateVpcOnSite)
-	cvv2ts.env.OnActivity(VpcManager.CreateVpcOnSite, mock.Anything, mock.Anything).Return(nil, errors.New(errMsg))
+	// The original mutation gets one activity attempt. A retry would create a
+	// new foreground budget after the caller may already have stopped waiting.
+	cvv2ts.env.OnActivity(VpcManager.CreateVpcOnSite, mock.Anything, mock.Anything).Return(func(ctx context.Context, _ *corev1.VpcCreationRequest) (*corev1.Vpc, error) {
+		info := activity.GetInfo(ctx)
+		cvv2ts.Equal(int32(1), info.Attempt)
+		_, ok := ctx.Deadline()
+		cvv2ts.True(ok)
+		cvv2ts.Equal(cutil.ActivityStartToCloseTimeout, info.StartToCloseTimeout)
+		return nil, errors.New(errMsg)
+	})
 
 	// execute CreateVPCV2 workflow
 	cvv2ts.env.ExecuteWorkflow(CreateVPCV2, request)

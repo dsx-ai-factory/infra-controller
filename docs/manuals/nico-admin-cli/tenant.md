@@ -8,7 +8,6 @@ For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admi
 |---|---|
 | [`compute-allocation`](./commands/compute-allocation/compute-allocation.md) | Compute allocation management. |
 | [`expected-machine`](./commands/expected-machine/expected-machine.md) | Expected machine handling. |
-| [`expected-nvlink-domain`](./commands/expected-nvlink-domain/expected-nvlink-domain.md) | Administrator-owned expected NVLink domain declarations. |
 | [`expected-power-shelf`](./commands/expected-power-shelf/expected-power-shelf.md) | Expected power shelf handling. |
 | [`expected-rack`](./commands/expected-rack/expected-rack.md) | Expected rack handling. |
 | [`expected-rack-group`](./commands/expected-rack-group/expected-rack-group.md) | Expected rack group handling. |
@@ -17,6 +16,7 @@ For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admi
 | [`instance`](./commands/instance/instance.md) | Instance related handling. |
 | [`instance-type`](./commands/instance-type/instance-type.md) | Instance type management. |
 | [`ipxe-template`](./commands/ipxe-template/ipxe-template.md) | iPXE template management. |
+| [`nvlink-domain`](./commands/nvlink-domain/nvlink-domain.md) | Administrator-owned NVLink domain declarations. |
 | [`operating-system`](./commands/operating-system/operating-system.md) | Operating system definition management. |
 | [`os-image`](./commands/os-image/os-image.md) | OS catalog management. |
 | [`site-explorer`](./commands/site-explorer/site-explorer.md) | Site explorer functions. |

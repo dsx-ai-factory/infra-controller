@@ -134,13 +134,80 @@ Use these as starting points and tune based on your site characteristics:
 |--------|------------|--------------------|
 | Hosts usable | `carbide_hosts_usable_count` | Site-relative percentage of total hosts |
 | GPUs usable | `carbide_gpus_usable_count` | Site-relative percentage of total GPUs |
-| DPU unhealthy | `(carbide_dpus_up_count - carbide_dpus_healthy_count) / carbide_dpus_up_count` | Warning at > 5%, treat as warning-class with longer `for:` duration |
+| DPU health check failures | `carbide_dpu_health_check_failed_count{fresh="true"} > 0` | Alert per probe and target; tune severity and `for:` duration for the site |
 | DB pool exhaustion | `carbide_db_pool_idle_conns` | Alert on low idle connections or pool timeout errors |
+| DPUService rollout hold age | `max by (in_use) (carbide_hosts_dpu_service_sync_oldest_pending_age_seconds)` | Compare with the rollout window the site allows, separately for hosts with and without an instance |
+
+### DPUService rollout holds
+
+The age query above is a starting point for a site-specific threshold. NICo also provides a warning for hosts with outstanding holds that exceed their state SLA.
+
+A DPUDeployment-owned DPUService update with the `NodeEffect` gate enabled puts affected DPUs in the `NodeEffect` phase until their maintenance holds are released. Refer to [DPUService rollout gating](../manuals/dpf.md#dpuservice-rollout-gating).
+
+These gauges describe the outstanding NICo worklist as of each replica's last successful read:
+
+- `carbide_hosts_dpu_service_sync_pending_count` counts hosts with an outstanding DPU service sync record.
+- `carbide_hosts_dpu_service_sync_oldest_pending_age_seconds` reports the age in seconds of the oldest outstanding record, measured from its initial request.
+
+Both gauges carry two labels:
+
+- `above_sla` is `true` when the monitor counts the host as past the time limit for its current state. The monitor accounts for SLA waivers as described below.
+- `in_use` is `true` when an instance is allocated on the host.
+
+After a successful read, the replica exports all four label combinations. A combination without outstanding records reports `0` for both gauges. A site that does not use DPF records no holds, so every series reports `0`. Automatic rollout release requires an idle host, so allocated hosts can have outstanding holds during a rollout. Above-SLA held hosts can contribute to the warning regardless of allocation.
+
+Each nico-api replica that runs background services reads the holds from the database every 60 seconds and exports its own copy of every series.
+
+The PromQL examples in this section query one site. On a central datasource, add `forge_site="<site>"` to each metric selector to scope the query to one site.
+
+Use this expression to estimate the number of held hosts:
+
+```promql
+sum(max by (above_sla, in_use) (carbide_hosts_dpu_service_sync_pending_count))
+```
+
+This takes the largest reported count for each label combination before summing. Replicas read at different times, so a host that moves between label combinations can count twice until the samples agree. For a count from one snapshot, sum the label combinations from a single replica. For the age gauge, `max` returns the greatest reported age.
+
+The `NicoHostsAboveSLAWithDpuServiceSyncHold` warning fires when this expression stays true for 30 minutes:
+
+```promql
+sum(max by (in_use) (carbide_hosts_dpu_service_sync_pending_count{above_sla="true"})) > 0
+```
+
+The timer applies to the fleet. Different hosts can keep the condition true over the 30-minute period. This rule has not been validated in production. To enable it, apply the updated rules file as described in [Deploying alert rules](#4-deploying-alert-rules).
+
+A firing alert means the exported samples include a host that the monitor counted above its state SLA with an outstanding hold record. Investigate the stalled state to determine the cause. A DPU already serving traffic can continue serving while its rollout waits.
+
+NICo also records holds when DPF reports `NodeEffect` during provisioning. A provisioning hold can contribute without a service rollout. The `Failed` state has an SLA of zero, so a failed host can contribute while its hold is recorded and the monitor counts it above SLA.
+
+To respond:
+
+1. Run `nico-admin-cli dpf service-sync list` to list the hosts with outstanding records. The list has no SLA column. Skip hosts whose `State` is `Ready` or `Assigned/Ready`. These states have no SLA.
+1. Run `nico-admin-cli managed-host show <machine-id>` for each remaining host. A host that is past its SLA shows `In State > SLA: true`. If none match while the alert is firing, check the failed-read and waiver-cap warnings. Allow time for the next successful read and scrape to refresh the data.
+1. Investigate each matching host as you would any stuck host. Refer to the [stuck objects playbook](../playbooks/stuck_objects/stuck_objects.md).
+1. If the host needs the held DPUService change to recover, refer to [`dpf service-sync release`](../manuals/dpf.md#dpf-service-sync-release). Manual release requires every DPU to match its `DPUDeployment`. The `--machine-id` form defers for hosts with allocated instances. A successful release by `--instance-id` restarts DPU services and disrupts the named instance. Automatic rollout release requires `Ready`. Provisioning can release its own hold before the host reaches `Ready`.
+
+The alert resolves when Prometheus no longer sees a positive above-SLA count. A fresh read can stop counting a host after NICo records the hold completion, the host is within its current state SLA or enters a state without an SLA, or the collector checks and honors an `ExcludeFromStateMachineSla` health alert. Refer to [Health alert classifications](#6-health-alert-classifications).
+
+Each read checks for SLA waivers on up to 1,000 held hosts that are past the time limit for their state. The monitor checks the oldest hold requests first and counts unchecked hosts as `above_sla="true"`.
+
+When a successful read leaves hosts unchecked, nico-api logs `Too many held hosts are past their state SLA to check each for an SLA waiver; the unchecked hosts are counted as above SLA`. The log includes `checked_host_count` and `unchecked_host_count`.
+
+The series of a replica are absent, not `0`, when that replica has not read the holds successfully in the last 150 seconds. When the series are absent from every replica, a firing alert resolves, and the 30 minutes start again after the series return. To notice that the holds are not being read, alert on `absent(carbide_hosts_dpu_service_sync_pending_count)`.
+
+Each failed read also logs the nico-api warning `Could not read the outstanding DPU service sync holds; their gauges keep the previous read until it expires`. When the stored state of one host cannot be decoded, the read fails and the warning names that machine.
+
+DPU failure counts are per probe and target, not unique unhealthy DPUs. One DPU can
+fail multiple probes; do not sum these counts into an unhealthy percentage. The up
+and healthy gauges measure different conditions, so their difference or ratio does
+not measure unhealthy DPUs. See [DPU health metrics](metrics.md#health-whats-broken-right-now)
+for freshness and missing-series handling.
 
 ## 4. Deploying alert rules
 
 A start set of alert rules with production-validated thresholds is available at
 [`helm/observability/alerts/nico-alerts.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml).
+The group table below marks any rule that is not production-validated.
 
 The file uses `PrometheusRule` as the CRD kind. For VictoriaMetrics Operator deployments,
 change `apiVersion` to `operator.victoriametrics.com/v1beta1` and `kind` to `VMRule` -
@@ -166,7 +233,7 @@ The alert rules include these groups:
 | Group | Alerts |
 |-------|--------|
 | `nico-api` | API down, API fluctuating, state-handler latency |
-| `nico-sla` | Machines stuck, network segments stuck, IB partitions stuck |
+| `nico-sla` | Machines stuck, network segments stuck, IB partitions stuck, hosts above SLA with a DPUService rollout hold (not validated in production) |
 | `nico-capacity` | Low IP availability |
 | `nico-health` | Hosts unhealthy |
 
@@ -226,10 +293,18 @@ token (not free text) identifying the failure cause.
 **Manual intervention ratio:**
 
 ```text
-count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+(
+  count(carbide_object_manual_intervention_required{object_type="machine"} == 1)
+  or vector(0)
+)
   /
 count(carbide_object_state_entered_timestamp_seconds{object_type="machine"})
 ```
+
+The intervention metric is emitted only while operator action is needed. The
+numerator falls back to zero when that metric has no matching series. The
+denominator has no fallback, so missing machine-state telemetry leaves the ratio
+without a result.
 
 ### Joining with object traits
 

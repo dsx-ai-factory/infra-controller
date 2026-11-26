@@ -68,7 +68,7 @@ A drifted host becomes eligible only after the relevant gates pass:
 | Gate | Behavior |
 |---|---|
 | Automatic update policy | `firmware_global.autoupdate` supplies the site default. A per-machine override can enable or disable one host independently. |
-| Host state | With `firmware_global.instance_updates_manual_tagging = true`, automatic selection is limited to unassigned hosts in `Ready`. When false, assigned hosts can also be selected. Unassigned hosts are considered first. |
+| Host state | With `firmware_global.instance_updates_manual_tagging = true`, automatic candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other admission gates and [firmware-triggered reboot approval](#assigned-hosts-need-reboot-approval) still apply. |
 | Existing work | A host with an existing reprovisioning request is not selected again. Module-reported hosts consume shared capacity. |
 | Explicit start | When the model has `explicit_start_needed = true`, the current time must be inside that machine's firmware update window. |
 | Site capacity | The configured shared ceiling must have room for another host. Refer to the capacity policy below. |
@@ -104,8 +104,10 @@ The static `firmware_global.host_enable_autoupdate` and
 `firmware_global.host_disable_autoupdate` fields are legacy controls. The
 current scheduler does not read `host_enable_autoupdate`, and it compares
 `host_disable_autoupdate` entries only with machine IDs. A matching disabled
-entry also ends host selection for that scheduler pass. Use the per-machine
-command for new operational workflows.
+entry skips that host even when its per-machine policy enables automatic
+updates; selection continues with later candidates. Remove the legacy disabled
+entry before expecting a per-machine enable to admit that host. Use the
+per-machine command for new operational workflows.
 
 ### Open an explicit-start window
 
@@ -135,7 +137,8 @@ itself. Models without `explicit_start_needed` do not require this window.
 ### Assigned hosts need reboot approval
 
 An assigned host can have a pending reprovisioning request without immediately
-interrupting its instance. The request starts when either:
+interrupting its instance. For a firmware-triggered reboot from `Assigned/Ready`,
+the request starts when either:
 
 - the tenant approves updates while rebooting the instance; or
 - the current time is inside the site-level
@@ -151,12 +154,16 @@ nico-admin-cli -a <core-api-url> instance reboot \
 The autoreboot period is separate from the per-machine firmware window. The
 firmware window lets Machine Update Manager create the request for a model that
 requires explicit start. The autoreboot period lets an assigned host consume an
-existing request without waiting for tenant approval.
+existing request without waiting for tenant approval for that reboot.
 
 After approval, NICo moves the assigned host through its platform configuration
 and discovery-boot states before entering the same component-update loop used
 for an unassigned host. `HostReprovision` is the internal state name; this is
 not a return to pre-ingestion.
+
+A DPU reprovisioning workflow that has already reached its host-reboot step can
+continue into pending host firmware work without repeating this firmware
+approval check.
 
 ### Request host reprovisioning directly
 
@@ -376,9 +383,12 @@ labels and collection endpoint.
 ### Full-lockdown recovery rollout
 
 Lenovo GB300 BMC updates can leave BIOS USB lockdown open after BMC-only
-locking. Full-policy restoration and its restart are limited to an explored
-BMC report with vendor `LenovoAMI` and model `HG635N_V2`. Missing or unsupported
-identity leaves the host unavailable without issuing this full-policy restart.
+locking. On Lenovo XCC ThinkSystem SR680a V3, BMC-only locking changes none of
+KCS, Ethernet over USB, front-panel USB or firmware rollback. Full-policy
+restoration and its restart are limited to an explored BMC report with vendor
+`LenovoAMI` and model `HG635N_V2`, or vendor `Lenovo` and model
+`ThinkSystem SR680a V3`. Missing or unsupported identity leaves the host
+unavailable without issuing this full-policy restart.
 
 New recovery entries are disabled by default. First upgrade **every API and
 controller that reads machine state**, with the new key omitted. Wait until

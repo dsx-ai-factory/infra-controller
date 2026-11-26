@@ -2,15 +2,20 @@
 
 {% block title %}Console Logs — {{ machine_id }}{% endblock %}
 
+{% block body_class %}page-fill-height{% endblock %}
+
 {% block content %}
 <h1>Console Logs</h1>
-<p><a href="/admin/machine/{{ machine_id }}">{{ machine_id }}</a></p>
-<p>
-  <span id="console-status">Connecting…</span>
-  <button id="follow" type="button">Pause following</button>
-  <button id="clear" type="button">Clear</button>
-</p>
-<pre id="console-output" style="height: 70vh; overflow: auto; white-space: pre-wrap;"></pre>
+<section class="entity-summary log-viewer">
+  <div class="log-toolbar">
+    <span class="log-field">Machine</span>
+    {{ machine_id|machine_id_link|safe }}
+    <span id="console-status" class="bubble log-status">Connecting…</span>
+    <button id="follow" type="button" class="btn-secondary">Pause following</button>
+    <button id="clear" type="button" class="btn-secondary">Clear</button>
+  </div>
+  <div id="console-output" class="log-console"></div>
+</section>
 <script>
 (() => {
   const output = document.getElementById("console-output");
@@ -20,10 +25,15 @@
   let follow = true;
   const source = new EventSource("/admin/machine/{{ machine_id }}/console-logs/stream");
 
+  function setStatus(text, kind) {
+    status.textContent = text;
+    status.className = "bubble log-status" + (kind ? " " + kind : "");
+  }
+
   source.onopen = () => {
     lines.length = 0;
     output.textContent = "";
-    status.textContent = "Connected";
+    setStatus("Connected", "success");
   };
   source.onmessage = event => {
     lines.push(JSON.parse(event.data));
@@ -33,12 +43,13 @@
   };
   source.addEventListener("console-error", event => {
     const error = JSON.parse(event.data);
-    status.textContent = `${error.code}: ${error.message}`;
+    setStatus(`${error.code}: ${error.message}`, "error");
   });
-  source.onerror = () => { status.textContent = "Disconnected; retrying…"; };
+  source.onerror = () => { setStatus("Disconnected; retrying…", "warning"); };
   followButton.onclick = () => {
     follow = !follow;
     followButton.textContent = follow ? "Pause following" : "Follow";
+    followButton.classList.toggle("active", !follow);
     if (follow) output.scrollTop = output.scrollHeight;
   };
   document.getElementById("clear").onclick = () => {

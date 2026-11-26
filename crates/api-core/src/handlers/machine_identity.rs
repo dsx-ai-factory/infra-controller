@@ -65,9 +65,7 @@ async fn load_enabled_identity_for_well_known(
     api: &Api,
     org_id: &TenantOrganizationId,
 ) -> Result<TenantIdentityConfig, Status> {
-    let org_id_str = org_id.as_str().to_string();
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             let org_id = org_id.clone();
             Box::pin(async move {
@@ -80,7 +78,7 @@ async fn load_enabled_identity_for_well_known(
         Some(c) if c.enabled => Ok(c),
         _ => Err(CarbideError::NotFoundError {
             kind: "tenant_identity_config",
-            id: org_id_str,
+            id: org_id.as_str().to_string(),
         }
         .into()),
     }
@@ -170,7 +168,6 @@ pub(crate) async fn sign_machine_identity(
     let req = request.get_ref();
 
     let identity_row = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(
                 async move { tenant_identity_config::find_by_machine_id(txn, &machine_id).await },

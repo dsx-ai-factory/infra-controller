@@ -54,18 +54,20 @@ spec:
             properties:
               configPorts:
                 description: |-
-                  ConfigPorts defines the desired state of port configurations for a DPUService.
-                  This struct determines how ports are exposed from the DPU to the host cluster.
-                  A DPUService can only have a single ServiceType across all ports.
+                  ConfigPorts defines the desired state of port configurations for a
+                  DPUService. This struct determines how ports are exposed from the DPU to
+                  the host cluster. A DPUService can only have a single ServiceType across
+                  all ports.
                 properties:
                   ports:
                     description: |-
-                      Ports defines the list of port configurations that will be exposed by the DPUService.
-                      Each port must specify a name, port number, and protocol.
+                      Ports defines the list of port configurations that will be exposed by the
+                      DPUService. Each port must specify a name, port number, and protocol.
 
                       Constraints:
                       - If ServiceType is "NodePort", ports may optionally specify a NodePort.
-                      - If ServiceType is "None" or "ClusterIP", ports **cannot** specify a NodePort.
+                      - If ServiceType is "None" or "ClusterIP", ports **cannot**
+                        specify a NodePort.
                     items:
                       description: |-
                         ConfigPort defines the configuration of a single port within a DPUService.
@@ -85,7 +87,8 @@ spec:
 
                             Constraints:
                             - Can only be set when ServiceType is "NodePort".
-                            - Must be within the clusters valid NodePort range (Kubernetes default is 30000-32767).
+                            - Must be within the clusters valid NodePort range
+                              (Kubernetes default is 30000-32767).
                           type: integer
                         port:
                           description: |-
@@ -135,12 +138,13 @@ spec:
                     has(p.nodePort)))'
               deployInCluster:
                 description: |-
-                  DeployInCluster indicates if the DPUService Helm Chart will be deployed on
-                  the Host cluster. Default to false.
+                  DeployInCluster indicates if the DPUService Helm Chart will be deployed
+                  on the Host cluster. Default to false.
                 type: boolean
               dpuClusterSelector:
-                description: Select the Clusters with specific labels, Applications
-                  will be created only for these Clusters
+                description: |-
+                  Select the Clusters with specific labels, Applications will be created
+                  only for these Clusters
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -199,14 +203,15 @@ spec:
                           repo.
                         type: string
                       releaseName:
-                        description: ReleaseName is the name to give to the release
-                          generate from the DPUService.
+                        description: |-
+                          ReleaseName is the name to give to the release generate from
+                          the DPUService.
                         type: string
                       repoURL:
                         description: |-
-                          RepoURL specifies the URL to the repository that contains the application Helm chart.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          RepoURL specifies the URL to the repository that contains the application
+                          Helm chart. The URL must begin with either 'oci://' or 'https://',
+                          ensuring it points to a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                       version:
@@ -218,8 +223,9 @@ spec:
                     - version
                     type: object
                   values:
-                    description: Values specifies Helm values to be passed to Helm
-                      template, defined as a map. This takes precedence over Values.
+                    description: |-
+                      Values specifies Helm values to be passed to Helm template, defined as a
+                      map. This takes precedence over Values.
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                 required:
@@ -269,23 +275,25 @@ spec:
                     type: boolean
                   spiffe:
                     description: |-
-                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one SPIRE
-                      ClusterStaticEntry is registered per targeted DPU, parented to that DPU's SPIRE
-                      agent, so the service's pods can obtain an SVID. The identity defaults to
-                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and is
-                      configurable through `DPFOperatorConfig.spec.security.spiffe`.
-                      The namespace qualifies the service ID, which is only unique within one.
+                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one
+                      SPIRE ClusterStaticEntry is registered per targeted DPU, parented to that
+                      DPU's SPIRE agent, so the service's pods can obtain an SVID. The identity
+                      defaults to
+                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and
+                      is configurable through `DPFOperatorConfig.spec.security.spiffe`. The
+                      namespace qualifies the service ID, which is only unique within one.
 
                       Presence-gated: `spiffe: {}` enables it. It has no sub-fields yet.
 
-                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs in SPIFFE
-                      identity mode (`DPU.status.identityMode: Spiffe`); bootstrap-token DPUs are skipped.
-                      Both are reported on the SPIFFEEntriesReady condition rather than rejected at
-                      admission. Must not be set when deployInCluster is true, since in-cluster
-                      DPUServices run on the host and have no per-DPU SPIRE agent to parent to.
+                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs
+                      in SPIFFE identity mode (`DPU.status.identityMode: Spiffe`);
+                      bootstrap-token DPUs are skipped. Both are reported on the
+                      SPIFFEEntriesReady condition rather than rejected at admission. Must not
+                      be set when deployInCluster is true, since in-cluster DPUServices run on
+                      the host and have no per-DPU SPIRE agent to parent to.
 
-                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates it to
-                      generated DPUServices that target DPUClusters.
+                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates
+                      it to generated DPUServices that target DPUClusters.
                     type: object
                 type: object
               serviceDaemonSet:
@@ -295,8 +303,9 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: Annotations specifies annotations which are added
-                      to the ServiceDaemonSet.
+                    description: |-
+                      Annotations specifies annotations which are added to the
+                      ServiceDaemonSet.
                     type: object
                   labels:
                     additionalProperties:
@@ -403,8 +412,9 @@ spec:
                       the ServiceDaemonSet.
                     type: object
                   updateStrategy:
-                    description: UpdateStrategy specifies the DeaemonSet update strategy
-                      for the ServiceDaemonset.
+                    description: |-
+                      UpdateStrategy specifies the DeaemonSet update strategy for the
+                      ServiceDaemonset.
                     properties:
                       rollingUpdate:
                         description: Rolling update config params. Present only if
@@ -462,8 +472,9 @@ spec:
                     type: object
                 type: object
               serviceID:
-                description: ServiceID is the ID of the service that the DPUService
-                  is associated with.
+                description: |-
+                  ServiceID is the ID of the service that the DPUService is
+                  associated with.
                 type: string
             required:
             - helmChart
@@ -570,7 +581,8 @@ spec:
 
                           Constraints:
                           - Can only be set when ServiceType is "NodePort".
-                          - Must be within the clusters valid NodePort range (Kubernetes default is 30000-32767).
+                          - Must be within the clusters valid NodePort range
+                            (Kubernetes default is 30000-32767).
                         type: integer
                       port:
                         description: |-
@@ -592,18 +604,19 @@ spec:
                     type: object
                   type: array
                 description: |-
-                  ConfigPorts defines the observed state of the config ports.
-                  It contains the actual port numbers that are exposed on the DPUService per cluster.
+                  ConfigPorts defines the observed state of the config ports. It contains
+                  the actual port numbers that are exposed on the DPUService per cluster.
                 type: object
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
               serviceID:
                 description: |-
-                  ServiceID is the ID of the service that the DPUService is associated with.
-                  This is set when the DPUService is created.
+                  ServiceID is the ID of the service that the DPUService is associated
+                  with. This is set when the DPUService is created.
                 type: string
             type: object
         type: object

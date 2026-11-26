@@ -21,7 +21,8 @@
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::db_read::DbReader;
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::site_prefix::{
@@ -92,10 +93,7 @@ impl StateControllerIO for SitePrefixReadiness {
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "site_prefixes_controller_queued_objects";
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "site_prefix_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<SitePrefixId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<SitePrefixId>, DatabaseError> {
         let mut ids = Vec::new();
         for (authority, lifecycle_state) in [
             (
@@ -106,7 +104,7 @@ impl StateControllerIO for SitePrefixReadiness {
         ] {
             ids.extend(
                 db::site_prefix::find_ids(
-                    &mut *txn,
+                    pool,
                     SitePrefixSearchFilter {
                         authority,
                         lifecycle_state: Some(lifecycle_state),
@@ -121,19 +119,20 @@ impl StateControllerIO for SitePrefixReadiness {
         Ok(ids)
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &SitePrefixId,
-    ) -> Result<Option<SitePrefix>, DatabaseError> {
-        Ok(db::site_prefix::find_by_ids(txn, &[*object_id])
-            .await?
-            .pop())
+    ) -> Result<Option<SitePrefix>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(db::site_prefix::find_by_ids(db, &[*object_id]).await?.pop())
     }
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &SitePrefixId,
         state: &SitePrefix,
     ) -> Result<Versioned<SitePrefixLifecycleState>, DatabaseError> {
@@ -221,7 +220,11 @@ impl StateHandler for SitePrefixReadiness {
         ) {
             return Ok(StateHandlerOutcome::do_nothing());
         }
-        let mut txn = ctx.services.begin().await?;
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // Retirement drains retained children; it neither waits for
         // another DPU acknowledgement nor generates a new isolation request.
         let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning

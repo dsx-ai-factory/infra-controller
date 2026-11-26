@@ -15,18 +15,18 @@
  * limitations under the License.
  */
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::{ConnectedBmc, ExploredBmcRefError, ExploredConnectError};
+use bmc_runtime::{ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_redfish::nv_redfish::RedfishBmc;
+use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::CredentialManager;
-use carbide_uuid::machine::MachineIdSubtypeTrait;
+use carbide_utils::redfish::BmcAccessInfo;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use component_manager::component_manager::ComponentManager;
 use db::db_read::PgPoolReader;
 use libredfish::Redfish;
@@ -59,12 +59,6 @@ pub struct MachineStateHandlerServices {
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
     /// Connects moved BMC operations through the site's `bmc_backend`.
     pub bmc_connector: BmcConnector,
-    /// Credential-lifecycle operations (password set/rotate/clear,
-    /// candidate validation). A sealed trait implemented only by the direct
-    /// pool, so handing these to a wrapper pool is a compile error (a
-    /// wrong-pool guard, not a wire-path guarantee -- see
-    /// [`BmcCredentialOps`]).
-    pub bmc_credential_ops: Arc<dyn BmcCredentialOps>,
     /// An implementation of the IPMITool that understands how to reboot a machine
     pub ipmi_tool: Arc<dyn IPMITool>,
     /// Configuration used by MachineStateHandler.
@@ -92,6 +86,9 @@ pub struct MachineStateHandlerServices {
     /// `RotatingBmc` state as BMC root (a single root-authenticated Redfish call
     /// with no host-power impact), so this gate only decides *entry*.
     pub dpu_bmc_service_rotation_gate: RotationGate,
+    /// Startup-cached DPF capability; DPF owns BF4 service-account passwords when true.
+    pub dpf_per_dpu_bmc_credentials: bool,
+    pub dpf_rotation_locks: Option<db::work_lock_manager::WorkLockManagerHandle>,
     /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
     /// shared across this replica's per-object ticks. Family-scoped to
     /// `lockdown_ikm` and keyed by each NIC's MAC.
@@ -121,57 +118,71 @@ impl MachineStateHandlerServices {
         machine: &Machine<impl MachineIdSubtypeTrait>,
     ) -> Result<BackendBmc, StateHandlerError> {
         let bmc_access_info = self.bmc_access_info_for_machine(machine).await?;
+        self.connect_by_access(machine.id.into(), &bmc_access_info, false)
+            .await
+    }
+
+    /// Use a captured endpoint and one mutation attempt for a durable hardware request.
+    pub(crate) async fn connect_bmc_for_mutation(
+        &self,
+        machine_id: MachineId,
+        access: &BmcAccessInfo,
+    ) -> Result<BackendBmc, StateHandlerError> {
+        self.connect_by_access(machine_id, access, true).await
+    }
+
+    async fn connect_by_access(
+        &self,
+        machine_id: MachineId,
+        access: &BmcAccessInfo,
+        single_attempt: bool,
+    ) -> Result<BackendBmc, StateHandlerError> {
         let report = || async {
-            db::explored_endpoints::find_by_ips(&self.db_pool, vec![bmc_addr(machine)?.ip()])
+            let ip = access
+                .host
+                .parse::<IpAddr>()
+                .map_err(|error| StateHandlerError::GenericError(error.into()))?;
+            db::explored_endpoints::find_by_ips(&self.db_pool, vec![ip])
                 .await?
                 .into_iter()
                 .next()
                 .map(|endpoint| endpoint.report)
                 .ok_or_else(|| StateHandlerError::MissingData {
-                    object_id: machine.id.to_string(),
+                    object_id: machine_id.to_string(),
                     missing: "explored endpoint of the BMC",
                 })
         };
         // Boxed so the state handler's future stays within the query depth limit.
-        Box::pin(self.bmc_connector.connect(&bmc_access_info, report))
+        let result = if single_attempt {
+            Box::pin(
+                self.bmc_connector
+                    .connect_without_mutation_retries(access, report),
+            )
             .await
-            .map_err(|error| match error {
-                BmcConnectError::Report(error) => error,
-                BmcConnectError::Libredfish(error) => error.into(),
-                BmcConnectError::Drivers(ExploredConnectError::Reference(
-                    ExploredBmcRefError::NoServiceRoot,
-                )) => StateHandlerError::MissingData {
-                    object_id: machine.id.to_string(),
-                    missing: "service root in the BMC's explored endpoint",
-                },
-                BmcConnectError::Drivers(error) => ExternalServiceError::with_source(
-                    "redfish",
-                    "create_client",
-                    error.to_string(),
-                    "redfish_client_creation_error",
-                    error,
-                )
-                .into(),
-            })
-    }
-
-    /// Connects to `machine`'s BMC through the drivers; `None`, without
-    /// connecting, when the site runs libredfish.
-    pub(crate) async fn connect_drivers(
-        &self,
-        machine: &Machine<impl MachineIdSubtypeTrait>,
-    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, StateHandlerError> {
-        if !matches!(self.bmc_connector, BmcConnector::Drivers(_)) {
-            return Ok(None);
-        }
-        Ok(match self.connect_bmc(machine).await? {
-            BackendBmc::Drivers(bmc) => Some(bmc),
-            BackendBmc::Libredfish(_) => None,
+        } else {
+            Box::pin(self.bmc_connector.connect(access, report)).await
+        };
+        result.map_err(|error| match error {
+            BmcConnectError::Report(error) => error,
+            BmcConnectError::Libredfish(error) => error.into(),
+            BmcConnectError::Drivers(ExploredConnectError::Reference(
+                ExploredBmcRefError::NoServiceRoot,
+            )) => StateHandlerError::MissingData {
+                object_id: machine_id.to_string(),
+                missing: "service root in the BMC's explored endpoint",
+            },
+            BmcConnectError::Drivers(error) => ExternalServiceError::with_source(
+                "redfish",
+                "create_client",
+                error.to_string(),
+                "redfish_client_creation_error",
+                error,
+            )
+            .into(),
         })
     }
 
-    /// Resolves a machine's BMC access info; credential-lifecycle call sites
-    /// hand this to [`BmcCredentialOps`], which builds its own direct client.
+    /// Resolves a machine's BMC access info.
     pub(crate) async fn bmc_access_info_for_machine(
         &self,
         machine: &Machine<impl MachineIdSubtypeTrait>,

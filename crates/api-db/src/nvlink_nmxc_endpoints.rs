@@ -123,12 +123,13 @@ pub async fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn endpoint_queries_return_complete_records(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let serial_b = NvlinkNmxcEndpoint {
             chassis_serial: "SN-B".to_string(),
             endpoint: "https://b.example:9370".to_string(),
@@ -193,7 +194,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_by_chassis_serials_returns_matching_rows(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(txn.as_mut(), "SN-A", "https://a.example:9370")
             .await
             .unwrap();
@@ -219,7 +220,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_by_chassis_serials_unknown_serials_are_excluded(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(txn.as_mut(), "SN-KNOWN", "https://known.example:9370")
             .await
             .unwrap();
@@ -235,7 +236,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_by_chassis_serials_empty_slice_returns_empty(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(txn.as_mut(), "SN-X", "https://x.example:9370")
             .await
             .unwrap();

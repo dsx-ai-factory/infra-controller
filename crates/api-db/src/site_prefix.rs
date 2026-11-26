@@ -102,7 +102,7 @@ async fn lock_site_prefix_id(
         )
     "#;
     sqlx::query(query)
-        .bind(site_prefix_id.to_string())
+        .bind(sqlx::types::Text(site_prefix_id))
         .execute(txn)
         .await
         .map(|_| ())
@@ -1075,15 +1075,18 @@ pub async fn find_by_ids(
 /// `find_isolation_hosts` selects hosts using
 /// [`ManagedHostStateSnapshot::needs_site_prefix_isolation`].
 /// When the caller's site policy does not require isolation, no hosts are selected.
-pub async fn find_isolation_hosts(
-    txn: &mut PgConnection,
+pub async fn find_isolation_hosts<DB>(
+    conn: &mut DB,
     isolation_required: bool,
-) -> DatabaseResult<Vec<ManagedHostStateSnapshot>> {
+) -> DatabaseResult<Vec<ManagedHostStateSnapshot>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     if !isolation_required {
         return Ok(Vec::new());
     }
 
-    let mut hosts = crate::managed_host::load_all(txn, LoadSnapshotOptions::default())
+    let mut hosts = crate::managed_host::load_all(conn, LoadSnapshotOptions::default())
         .await?
         .into_iter()
         .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
@@ -1096,13 +1099,13 @@ pub async fn find_isolation_hosts(
 /// Returns the initial protection request time, or None for an unrequested or
 /// missing root. Once recorded, this time does not change during readiness.
 pub async fn isolation_requested_at(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<DateTime<Utc>>> {
     let query = "SELECT isolation_requested_at FROM site_prefixes WHERE id = $1";
     sqlx::query_scalar(query)
         .bind(site_prefix_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map(Option::flatten)
         .map_err(|error| DatabaseError::query(query, error))
@@ -1130,7 +1133,7 @@ pub async fn request_isolation(
         ));
     }
 
-    if let Some(requested_at) = isolation_requested_at(txn, site_prefix.id).await? {
+    if let Some(requested_at) = isolation_requested_at(&mut *txn, site_prefix.id).await? {
         return Ok(ConditionalWrite::Applied(requested_at));
     }
 
@@ -1218,6 +1221,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn tenant_managed(prefix: &str, tenant_organization_id: &str) -> NewTenantManagedSitePrefix {
         NewTenantManagedSitePrefix {
@@ -1235,7 +1239,7 @@ mod tests {
         pool: &sqlx::PgPool,
         tenant_organization_id: &str,
     ) -> Result<(), DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         crate::tenant::create_and_persist(
             tenant_organization_id.to_string(),
             Metadata {
@@ -1255,7 +1259,7 @@ mod tests {
         value: NewTenantManagedSitePrefix,
         quota_limit: u32,
     ) -> Result<CreateResult, DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         let result = create_tenant_managed(value, quota_limit, txn.as_pgconn()).await?;
         txn.commit().await?;
         Ok(result)
@@ -1265,7 +1269,7 @@ mod tests {
         pool: &sqlx::PgPool,
         site_prefix_id: SitePrefixId,
     ) -> Result<Vec<model::state_history::StateHistoryRecord>, DatabaseError> {
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         crate::state_history::for_object(
             txn.as_pgconn(),
             crate::state_history::StateHistoryTableId::SitePrefix,
@@ -1284,7 +1288,7 @@ mod tests {
         assert!(api_connection.cached_statements_size() > 0);
 
         let mut migration_connection = pool.acquire().await?;
-        let mut migration = migration_connection.begin().await?;
+        let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE site_prefixes
@@ -1303,7 +1307,7 @@ mod tests {
         connection: &mut PgConnection,
         prefix: IpNetwork,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         reconcile_configured(&mut txn, &[prefix]).await?;
         let [operator]: [SitePrefix; 1] =
             find_legacy_operator_managed_for_vpc_prefix_attachment(&mut txn, prefix)
@@ -1415,7 +1419,7 @@ mod tests {
         let equivalent_noncanonical_prefix: IpNetwork = "10.1.2.3/8".parse()?;
         let other_configured_prefix: IpNetwork = "192.168.0.0/16".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[
@@ -1427,7 +1431,7 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let tenant_prefix =
             create_tenant_managed(tenant_managed("10.0.0.0/8", "tenant-a"), 8, &mut txn)
                 .await?
@@ -1452,7 +1456,7 @@ mod tests {
         let configured_id = configured_before.id;
         assert_eq!(history(&pool, configured_id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[other_configured_prefix, configured_prefix]).await?;
         txn.commit().await?;
 
@@ -1472,7 +1476,7 @@ mod tests {
         );
         assert_eq!(history(&pool, configured_id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[]).await?;
         txn.commit().await?;
 
@@ -1493,7 +1497,7 @@ mod tests {
         );
         assert_eq!(history(&pool, configured_id).await?.len(), 2);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[configured_prefix]).await?;
         txn.commit().await?;
 
@@ -1511,11 +1515,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let prefix: IpNetwork = "10.0.0.0/8".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         insert(NewSitePrefix::configured(prefix), &mut txn).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let error = insert(NewSitePrefix::configured(prefix), &mut txn)
             .await
             .unwrap_err();
@@ -1537,7 +1541,7 @@ mod tests {
         create_tenant(&pool, "tenant-b").await?;
 
         let prefix: IpNetwork = "10.0.0.0/8".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[prefix]).await?;
         let tenant_a = create_tenant_managed(tenant_managed("10.0.0.0/8", "tenant-a"), 8, &mut txn)
             .await?
@@ -1567,7 +1571,7 @@ mod tests {
         let ipv6_prefix: IpNetwork = "2001:db8::/32".parse()?;
         let replacement_prefix: IpNetwork = "198.51.100.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[public_prefix, nested_prefix, ipv6_prefix]).await?;
         txn.commit().await?;
 
@@ -1588,7 +1592,7 @@ mod tests {
             .unwrap()
             .id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[replacement_prefix]).await?;
         txn.commit().await?;
 
@@ -1608,7 +1612,7 @@ mod tests {
             SitePrefixLifecycleState::Ready
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[replacement_prefix, public_prefix]).await?;
         txn.commit().await?;
 
@@ -1627,7 +1631,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         async fn reconcile(pool: sqlx::PgPool, prefix: IpNetwork) -> DatabaseResult<()> {
-            let mut txn = crate::Transaction::begin(&pool).await?;
+            let mut txn = pool.txn_begin().await?;
             reconcile_configured(txn.as_pgconn(), &[prefix]).await?;
             txn.commit().await
         }
@@ -1656,7 +1660,7 @@ mod tests {
             pool: sqlx::PgPool,
             value: NewTenantManagedSitePrefix,
         ) -> Result<SitePrefix, DatabaseError> {
-            let mut txn = crate::Transaction::begin(&pool).await?;
+            let mut txn = pool.txn_begin().await?;
             match create_tenant_managed(value, 8, txn.as_pgconn()).await {
                 Ok(result) => {
                     txn.commit().await?;
@@ -1822,7 +1826,7 @@ mod tests {
             if_version_match: Some(created.version),
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let updated = update_tenant_metadata(&update, created.version, &mut txn).await?;
         txn.commit().await?;
         assert_eq!(updated.metadata, updated_metadata);
@@ -1831,7 +1835,7 @@ mod tests {
         assert_ne!(updated.version, created.version);
         assert_eq!(history(&pool, created.id).await?.len(), 1);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let stale_error = update_tenant_metadata(&update, created.version, &mut txn)
             .await
             .unwrap_err();
@@ -1849,7 +1853,7 @@ mod tests {
             id: created.id,
             tenant_organization_id: "tenant-a".parse()?,
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let current = find_by_id_for_update(&mut txn, created.id).await?.unwrap();
         let deleting = retire_tenant_managed(&retire, &current, &mut txn).await?;
         txn.commit().await?;
@@ -1859,7 +1863,7 @@ mod tests {
         );
         assert_ne!(deleting.version, updated.version);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let current = find_by_id_for_update(&mut txn, created.id).await?.unwrap();
         let retry = retire_tenant_managed(&retire, &current, &mut txn).await?;
         txn.commit().await?;
@@ -1942,7 +1946,7 @@ mod tests {
         let specific_prefix: IpNetwork = "172.16.0.0/16".parse()?;
         let vpc_prefix: IpNetwork = "172.16.1.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[broad_prefix, specific_prefix]).await?;
         let specific_id: SitePrefixId =
             sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
@@ -1982,7 +1986,7 @@ mod tests {
         let ambiguous_prefix: IpNetwork = "172.16.1.0/24".parse()?;
         let missing_prefix: IpNetwork = "192.0.2.0/24".parse()?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[unique_root, ambiguous_broad_root, ambiguous_specific_root],
@@ -2145,7 +2149,7 @@ mod tests {
         let broad_root: IpNetwork = "10.0.0.0/8".parse()?;
         let specific_root: IpNetwork = "10.1.0.0/16".parse()?;
         let unrelated_root: IpNetwork = "192.0.2.0/24".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Reconstruct persisted predecessor roots after the target config has
         // removed its final root.
@@ -2226,7 +2230,7 @@ mod tests {
         let broad: IpNetwork = "10.0.2.0/24".parse()?;
         let replacement: IpNetwork = "10.0.2.128/25".parse()?;
         let partial: IpNetwork = "10.0.2.128/27".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(&mut txn, &[broad, replacement, partial]).await?;
         let tenant_root =
             create_tenant_managed(tenant_managed("10.0.2.0/24", "tenant-a"), 8, &mut txn)
@@ -2310,7 +2314,7 @@ mod tests {
         let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
         let replacement_root: IpNetwork = "172.16.0.0/16".parse()?;
         let operator_root_covering_tenant_child: IpNetwork = "192.168.0.0/15".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         reconcile_configured(
             &mut txn,
             &[

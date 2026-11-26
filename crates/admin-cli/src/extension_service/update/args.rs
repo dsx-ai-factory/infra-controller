@@ -16,8 +16,13 @@
  */
 
 use ::rpc::forge::dpu_extension_service_credential::Type;
+use carbide_uuid::extension_service::ExtensionServiceId;
 use clap::Parser;
 use rpc::errors::RpcDataConversionError;
+use rpc::forge::{
+    DpuExtensionServiceObservability, ServiceVpcAddressFamily, ServiceVpcInterfaceRequirement,
+    ServiceVpcInterfaceRequirements, UpdateDpuExtensionServiceRequest,
+};
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
@@ -25,28 +30,49 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 #[command(after_long_help = "\
 EXAMPLES:
 
-Update the data of an existing service:
+Update only the registration's metadata:
     $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
-    --data '{\"image\":\"my-registry/my-service:2.0\"}'
+    --description \"Updated telemetry agent\" --data ''
 
-Rename a service and update its description:
+Revise a Ready Helm chart definition and preserve its registered service interface:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --data '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"2.0.0\",\"serviceID\":\"my-service\",\"deployInCluster\":false,\"security\":{\"privileged\":false}}'
+
+Submit a Helm chart definition with its complete IPv4 requirement:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --service-vpc-family ipv4 --if-version-ctr-match 3 --data \
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"2.0.0\",\"serviceID\":\"my-service\",\"deployInCluster\":false,\"security\":{\"privileged\":false}}'
+
+Remove the service interface requirement from a Ready registration after all attachments are gone:
+    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
+    --clear-service-vpc --data \
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"2.0.0\",\"serviceID\":\"my-service\",\"deployInCluster\":false,\"security\":{\"privileged\":false}}'
+
+Rename a Pod service, update its description and rotate its registry credentials:
     $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
     --name my-renamed-service --description \"Updated telemetry agent\" \
-    --data '{\"image\":\"my-registry/my-service:2.0\"}'
-
-Rotate the registry pull credentials:
-    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
-    --data '{\"image\":\"my-registry/my-service:2.0\"}' --registry-url my-registry.example.com \
-    --username admin --password mynewpassword
-
-Update only if the version counter matches (optimistic concurrency):
-    $ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef01234567 \
-    --data '{\"image\":\"my-registry/my-service:2.0\"}' --if-version-ctr-match 3
+    --registry-url my-registry.example.com --username admin --password mynewpassword --data \
+    '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-service\"},\"spec\":{\"containers\":[{\"name\":\"service\",\"image\":\"my-registry.example.com/my-service:2.0\"}]}}'
 
 ")]
 pub(crate) struct Args {
     #[clap(short = 'i', long = "id", help = "The extension service ID to update")]
-    service_id: String,
+    service_id: ExtensionServiceId,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Submit one service interface requirement for a demand-driven DPF Helm chart",
+        long_help = "Submit the complete service interface requirement for a demand-driven DPF Helm chart. Pass the stored family to keep it. Changing the family requires that no active or terminating attachment references the registration. Use either this option or --clear-service-vpc. Omit both to read and resubmit the stored requirement. An accepted Helm definition update with an IPv6 requirement waits in Updating while IPv6 registration reconciliation is unavailable. Use extension-service show to check the Lifecycle Reason."
+    )]
+    pub(super) service_vpc_family: Option<ServiceVpcAddressFamily>,
+
+    #[arg(
+        long,
+        conflicts_with = "service_vpc_family",
+        help = "Remove the service interface requirement from a Ready Helm registration with no active or terminating attachments"
+    )]
+    pub(super) clear_service_vpc: bool,
 
     #[clap(
         short = 'n',
@@ -58,7 +84,12 @@ pub(crate) struct Args {
     #[clap(long, help = "New extension service description (optional)")]
     description: Option<String>,
 
-    #[clap(short = 'd', long, help = "New extension service data")]
+    #[clap(
+        short = 'd',
+        long,
+        help = "Complete desired service definition",
+        long_help = "Complete desired service definition. For a metadata-only update, pass --data '' with --name or --description, keep the existing family, and omit credential and observability flags. Helm definition updates require Ready, keep the chart's serviceID, and revise stable V1. Core rejects a Helm definition update when the parsed chart data and family requirement are both unchanged."
+    )]
     data: String,
 
     #[clap(long, help = "New registry URL for the service credential (optional)")]
@@ -80,7 +111,7 @@ pub(crate) struct Args {
 
     #[clap(
         long,
-        help = "Update only if current number of versions matches this number (optional)"
+        help = "Update only if the registration's version counter matches this revision. When resubmitting the stored family, the CLI defaults to the revision it read"
     )]
     if_version_ctr_match: Option<i32>,
 
@@ -91,10 +122,10 @@ pub(crate) struct Args {
     observability: Option<String>,
 }
 
-impl TryFrom<Args> for ::rpc::forge::UpdateDpuExtensionServiceRequest {
-    type Error = CarbideCliError;
-
-    fn try_from(args: Args) -> CarbideCliResult<Self> {
+impl Args {
+    /// Validates local fields before a caller reads the registration to preserve its requirements.
+    pub(super) fn into_request(self) -> CarbideCliResult<UpdateDpuExtensionServiceRequest> {
+        let args = self;
         let credential =
             if args.username.is_some() || args.password.is_some() || args.registry_url.is_some() {
                 if args.username.is_none() || args.password.is_none() || args.registry_url.is_none()
@@ -122,45 +153,30 @@ impl TryFrom<Args> for ::rpc::forge::UpdateDpuExtensionServiceRequest {
                 None
             };
 
-        let observability: Vec<::rpc::forge::DpuExtensionServiceObservabilityConfig> =
-            if let Some(r) = args.observability {
-                serde_json::from_str(&r)?
-            } else {
-                vec![]
-            };
+        let observability = args
+            .observability
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .map(|configs| DpuExtensionServiceObservability { configs });
 
-        Ok(Self {
-            // TODO(Service VPC 03): Expose the complete service interface definition.
-            // Omission lets Core accept services with no interfaces and reject incomplete updates.
-            service_vpc_interfaces: None,
-            service_id: args.service_id,
+        Ok(UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: Some(ServiceVpcInterfaceRequirements {
+                interfaces: args
+                    .service_vpc_family
+                    .into_iter()
+                    .map(|family| ServiceVpcInterfaceRequirement {
+                        address_family: family.into(),
+                    })
+                    .collect(),
+            }),
+            service_id: args.service_id.to_string(),
             service_name: args.service_name,
             description: args.description,
             data: args.data,
             credential,
             if_version_ctr_match: args.if_version_ctr_match,
-            observability: Some(::rpc::forge::DpuExtensionServiceObservability {
-                configs: observability,
-            }),
+            observability,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verifies the CLI omits a service-interface definition it cannot express,
-    /// so Core can reject incomplete updates to networked services.
-    #[test]
-    fn update_omits_unexpressed_service_interface_definition() {
-        // Parse the smallest valid update through the public command arguments.
-        let args = Args::try_parse_from(["update", "--id", "service-id", "--data", "{}"])
-            .expect("valid update arguments");
-
-        // The request must not misrepresent the missing controls as an explicit removal.
-        let request = ::rpc::forge::UpdateDpuExtensionServiceRequest::try_from(args)
-            .expect("valid update request");
-        assert!(request.service_vpc_interfaces.is_none());
     }
 }

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: REST API deployment
+templates:
+  - configmap.yaml
+  - deployment.yaml
+set:
+  global.image.repository: example.test
+  global.image.tag: latest
+  # configmap.yaml needs an auth source to render.
+  config.issuers:
+    - name: test-idp
+      origin: custom
+      jwks: https://idp.example.test/.well-known/jwks.json
+      issuer: https://idp.example.test
+tests:
+  - it: annotates the pod with the config checksum next to pod annotations
+    template: deployment.yaml
+    set:
+      podAnnotations:
+        example.com/team: rest
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: rest
+
+  - it: keeps the chart's config checksum when podAnnotations sets the same key
+    template: deployment.yaml
+    set:
+      podAnnotations:
+        checksum/config: user-value
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$
+
+  - it: annotates the pod with the config checksum when there are no pod annotations
+    template: deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$

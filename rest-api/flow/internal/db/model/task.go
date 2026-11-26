@@ -235,7 +235,7 @@ func (f taskComponentIDFilter) ApplyTo(q *bun.SelectQuery) *bun.SelectQuery {
 	// and hyphens, so it cannot close the SQL string literal or inject.
 	expr := fmt.Sprintf(
 		`attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
-		f.componentID.String(),
+		f.componentID,
 	)
 	return q.Where("?", bun.Safe(expr))
 }
@@ -428,13 +428,19 @@ func ListFirmwareTasksForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID
 // No operation payloads or reports are read. Overflow returns no partial list.
 func ListTaskContextForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
 	tasks := make([]Task, 0)
-	err := idb.NewSelect().Model(&tasks).
+	query := idb.NewSelect().Model(&tasks).
 		Column("id", "type", "rack_id", "attributes", "status", "created_at").
 		Where("rack_id = ?", rackID).
 		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
 		OrderExpr("created_at ASC, id ASC").
-		Limit(taskcommon.MaxTaskContextPerRack + 1).
-		Scan(ctx)
+		Limit(taskcommon.MaxTaskContextPerRack + 1)
+	// Attribute decoding can quote stored keys. Finish query hooks first so
+	// bunotel cannot record those values before the store sanitizes the error.
+	rows, err := query.Rows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = query.DB().ScanRows(ctx, rows, &tasks)
 	if err != nil {
 		return nil, err
 	}

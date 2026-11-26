@@ -16,6 +16,10 @@ import (
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// GetComponentFirmwareDetails reads passive installed, expected and tracked
+	// firmware evidence through the shared connection. The shorter of the caller
+	// deadline and configured client timeout bounds the read.
+	GetComponentFirmwareDetails(context.Context, *corev1.GetComponentFirmwareDetailsRequest) (*corev1.GetComponentFirmwareDetailsResponse, error)
 	// GetComponentPowerDetails reads passive hardware, policy, and tracked actions
 	// through the shared Core connection, bounded by both caller and client timeouts.
 	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)

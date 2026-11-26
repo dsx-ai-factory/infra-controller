@@ -413,18 +413,17 @@ fn subscription_response_to_log(response: &SubscriptionResponse) -> CollectorEve
 
 /// Formats the human-readable NMX-C log body from structured attributes.
 fn notification_log_body(name: &str, attributes: &[(Cow<'static, str>, String)]) -> String {
-    let summary = attributes
+    let mut body = format!("NMX-C stream notification received: {name}");
+    for (key, value) in attributes
         .iter()
         .filter(|(key, _)| key.as_ref() != "notification")
-        .map(|(key, value)| format!("{}={}", key.as_ref(), value))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if summary.is_empty() {
-        format!("NMX-C stream notification received: {name}")
-    } else {
-        format!("NMX-C stream notification received: {name} {summary}")
+    {
+        body.push(' ');
+        body.push_str(key.as_ref());
+        body.push('=');
+        body.push_str(value);
     }
+    body
 }
 
 /// Appends concise, queryable fields for every NMX-C notification variant.

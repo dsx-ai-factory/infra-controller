@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::ffi::CString;
+use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
 
@@ -87,10 +88,14 @@ fn dhcp_v6_multicast_groups(join_site_scoped_group: bool) -> impl Iterator<Item 
 }
 
 pub(super) fn u8_to_mac(data: &[u8]) -> String {
-    data.iter()
-        .map(|x| format!("{x:02x}"))
-        .collect::<Vec<String>>()
-        .join(":")
+    let mut mac = String::new();
+    for (index, byte) in data.iter().enumerate() {
+        if index > 0 {
+            mac.push(':');
+        }
+        write!(mac, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    mac
 }
 
 pub(super) fn u8_to_hex_string(data: &[u8]) -> Result<String, DhcpError> {
@@ -285,9 +290,12 @@ mod tests {
 
     #[test]
     fn u8_to_mac_zero_pads_octets() {
-        assert_eq!(
-            u8_to_mac(&[0x00, 0x00, 0x5e, 0x00, 0x53, 0x01]),
-            "00:00:5e:00:53:01"
+        value_scenarios!(u8_to_mac:
+            "empty and arbitrary-length slices preserve the byte sequence" {
+                &[][..] => "".to_string(),
+                &[0x00, 0x0a, 0xff][..] => "00:0a:ff".to_string(),
+                &[0x00, 0x00, 0x5e, 0x00, 0x53, 0x01][..] => "00:00:5e:00:53:01".to_string(),
+            }
         );
     }
 

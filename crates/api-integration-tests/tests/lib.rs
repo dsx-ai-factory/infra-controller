@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 // Keep these suites in one executable so libtest can run their environments in parallel.
+use db::TransactionVending as _;
 mod decommission;
 mod rack;
 
@@ -109,7 +110,7 @@ async fn run_integration() -> eyre::Result<()> {
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
         recovery_tenant_id.to_string(),
@@ -290,7 +291,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Startup rejects remote bindings, so add this fixture after both servers
     // start. Its missing accepted definition makes the direct poll below emit
     // the unavailable counter for the catalogue.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &model::resource_pool::ResourcePoolSelection {
@@ -331,7 +332,7 @@ async fn run_integration() -> eyre::Result<()> {
     // Extension-service controller families only appear in the catalogue
     // scrape once the controller processes an object. The controller only
     // reconciles DPF Helm chart services; without DPF this one waits in Creating.
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::extension_service::create(
         &mut txn,
         ConfigVersion::initial(),
@@ -675,6 +676,21 @@ async fn run_integration() -> eyre::Result<()> {
         "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
     )
     .await?;
+    // The hold gauges are read from the database with or without DPF, so they
+    // are in the scrape, at zero, before any hold exists. A read that fails
+    // publishes nothing and is retried a minute later with a 30 second
+    // deadline, so the wait is long enough for one retry.
+    for gauge in [
+        "carbide_hosts_dpu_service_sync_pending_count",
+        "carbide_hosts_dpu_service_sync_oldest_pending_age_seconds",
+    ] {
+        metrics::wait_for_metric_line_within(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE {gauge} gauge\n"),
+            Duration::from_secs(120),
+        )
+        .await?;
+    }
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
@@ -937,7 +953,7 @@ async fn exercise_dpf_exploration_suppression(
     )
     .fetch_one(&test_env.db_pool)
     .await?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -969,7 +985,7 @@ async fn exercise_dpf_exploration_suppression(
             ip_address: address.to_string(),
         })
         .await;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::bmc_suppression::delete(
         &mut txn,
         mac,
@@ -1047,7 +1063,7 @@ async fn exercise_admin_address_reconcile_failures(
     .hardware_info
     .context("the chosen host's DPU recorded hardware info")?;
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, false, &mut txn).await?;
     // The next explorer run revisits the host and its steady-state repair
     // fails the same way.
@@ -1092,18 +1108,19 @@ async fn exercise_admin_address_reconcile_failures(
         .await?;
     }
 
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
     txn.commit().await?;
     Ok(())
 }
 
 /// Proves `FindIBPartitionsByIds` returns a row with an unrecognized stored MTU
-/// and exports the fallback counter for the generated catalogue.
+/// and exercises the fallback and controller transition metrics for the catalogue.
 async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
+    use model::ib_partition::IBPartitionControllerState;
     use rpc::carbide_api_client::CarbideApiClient;
     use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
@@ -1111,11 +1128,12 @@ async fn exercise_ib_partition_mtu_fallback(
     sqlx::query(
         "INSERT INTO ib_partitions
             (id, name, organization_id, config_version, controller_state_version,
-             mtu, rate_limit, service_level)
-         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, 3, 200, 0)",
+             controller_state, mtu, rate_limit, service_level)
+         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, $3, 3, 200, 0)",
     )
     .bind(id)
     .bind(ConfigVersion::initial())
+    .bind(sqlx::types::Json(IBPartitionControllerState::Provisioning))
     .execute(&test_env.db_pool)
     .await?;
 
@@ -1140,6 +1158,15 @@ async fn exercise_ib_partition_mtu_fallback(
             include_history: false,
         })
         .await;
+    // Keep the fixture until the controller has recorded the transition and
+    // all three families are visible in the live scrape.
+    for line in [
+        "# TYPE carbide_ib_partitions_state_entered_total counter\n",
+        "# TYPE carbide_ib_partitions_state_exited_total counter\n",
+        "# TYPE carbide_ib_partitions_time_in_state_seconds histogram\n",
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
     sqlx::query("DELETE FROM ib_partitions WHERE id = $1")
         .bind(id)
         .execute(&test_env.db_pool)
@@ -2305,7 +2332,7 @@ async fn prepare_dpu_certificate_expiry(
         .observed_machine_id()
         .context("ready DPU has no observed machine ID")?
         .try_into()?;
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     let mut observation = db::machine::find_one(
         &mut *txn,
         &dpu_id,

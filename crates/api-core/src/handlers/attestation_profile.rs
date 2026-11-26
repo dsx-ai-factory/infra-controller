@@ -244,21 +244,16 @@ pub(crate) async fn list(
 pub(crate) async fn coverage(
     api: &Api,
 ) -> Result<Response<rpc::GetAttestationCoverageResponse>, Status> {
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|error| db::DatabaseError::new("attestation coverage", error))?;
-
-    let counts = db::explored_endpoints::hardware_class_counts(&mut *conn).await?;
-    let mut attester_sets = attester_sets_by_class(&mut conn).await?;
+    let counts = db::explored_endpoints::hardware_class_counts(api.pg_pool()).await?;
+    let mut attester_sets = attester_sets_by_class(api.pg_pool()).await?;
 
     let mut entries = Vec::with_capacity(counts.len());
+    let mut reader = api.db_reader();
     for count in counts {
         // Asked of resolution per class rather than restated here, so the view
         // cannot disagree with what scheduling would do for one machine.
         let resolution =
-            db::attestation_profile::resolve(&mut *conn, count.hardware_class.as_deref()).await?;
+            db::attestation_profile::resolve(&mut reader, count.hardware_class.as_deref()).await?;
         let (coverage, mode) = reported_coverage(&resolution);
         let hardware_class = count.hardware_class.unwrap_or_default();
 
@@ -273,7 +268,7 @@ pub(crate) async fn coverage(
 
     // Reported on its own because `any` is never a recorded class, so no entry
     // above can carry it.
-    let any_profile = db::attestation_profile::find(&mut *conn, ANY_HARDWARE_CLASS).await?;
+    let any_profile = db::attestation_profile::find(api.pg_pool(), ANY_HARDWARE_CLASS).await?;
 
     Ok(Response::new(rpc::GetAttestationCoverageResponse {
         entries,
@@ -289,10 +284,10 @@ pub(crate) async fn coverage(
 /// A class with no sets recorded is absent rather than present and empty,
 /// which the caller reads as the empty list it reports.
 async fn attester_sets_by_class(
-    conn: &mut sqlx::PgConnection,
+    db: impl db::db_read::DbReader<'_>,
 ) -> Result<HashMap<String, Vec<rpc::AttesterSet>>, CarbideError> {
     let mut by_class: HashMap<String, Vec<rpc::AttesterSet>> = HashMap::new();
-    for set in db::hardware_class_attesters::counts_by_class(conn).await? {
+    for set in db::hardware_class_attesters::counts_by_class(db).await? {
         by_class
             .entry(set.hardware_class)
             .or_default()

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -1130,6 +1131,9 @@ func TestTenantAccountSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			predecessor, getErr := tasd.GetByID(ctx, nil, tc.ta.ID, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := tasd.Update(ctx, nil, TenantAccountUpdateInput{
 				TenantAccountID:  tc.ta.ID,
 				TenantID:         tc.paramTenantID,
@@ -1158,9 +1162,7 @@ func TestTenantAccountSQLDAO_Update(t *testing.T) {
 			}
 			assert.Equal(t, *tc.expectedStatus, got.Status)
 
-			if got.Updated.String() == tc.ta.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

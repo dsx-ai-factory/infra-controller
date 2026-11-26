@@ -11,7 +11,7 @@ use bmc_platform::{
 use nv_redfish::core::Bmc;
 use nv_redfish::oem::ami::config_bmc::{
     ConfigBmc, ConfigBmcUpdate, LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockoutHostControlState,
 };
 
 use crate::lockdown::support::{
@@ -22,6 +22,7 @@ use crate::lockdown::support::{
 ///
 /// Full lockdown controls OEM `ConfigBMC` protection and the host interface.
 /// BMC-only lockdown controls only the host interface.
+/// Full lockdown does not manage runtime EFI variable protection.
 pub(crate) struct LenovoAmiLockdown;
 
 async fn config_bmc<B: Bmc>(cx: &OpCx<'_, B>) -> Result<ConfigBmc<B>, PlatformError> {
@@ -45,11 +46,6 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
                 LockoutHostControlState::Disable,
             ),
             signal(
-                raw.lockout_bios_variable_write_mode,
-                LockoutBiosVariableWriteMode::Enable,
-                LockoutBiosVariableWriteMode::Disable,
-            ),
-            signal(
                 raw.lockdown_bios_settings_change,
                 LockdownBiosSettingsChangeState::Enable,
                 LockdownBiosSettingsChangeState::Disable,
@@ -65,9 +61,8 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
             state_from_signals(&signals),
             bmc,
             format!(
-                "host_control={}, bios_variable_write={}, bios_settings_change={}, bios_upgrade_downgrade={}, host_interface={}",
+                "host_control={}, bios_settings_change={}, bios_upgrade_downgrade={}, host_interface={}",
                 reported(&raw.lockout_host_control),
-                reported(&raw.lockout_bios_variable_write_mode),
                 reported(&raw.lockdown_bios_settings_change),
                 reported(&raw.lockdown_bios_upgrade_downgrade),
                 reported(&interface)
@@ -92,23 +87,20 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
             }
         }
         cx.require_host_interface().await?;
-        let (host_control, variable_write, settings_change, upgrade_downgrade) = match desired {
+        let (host_control, settings_change, upgrade_downgrade) = match desired {
             LockdownDesiredState::Enabled => (
                 LockoutHostControlState::Enable,
-                LockoutBiosVariableWriteMode::Enable,
                 LockdownBiosSettingsChangeState::Enable,
                 LockdownBiosUpgradeDowngradeState::Enable,
             ),
             LockdownDesiredState::Disabled => (
                 LockoutHostControlState::Disable,
-                LockoutBiosVariableWriteMode::Disable,
                 LockdownBiosSettingsChangeState::Disable,
                 LockdownBiosUpgradeDowngradeState::Disable,
             ),
         };
         let update = ConfigBmcUpdate::builder()
             .with_lockout_host_control(host_control)
-            .with_lockout_bios_variable_write_mode(variable_write)
             .with_lockdown_bios_settings_change(settings_change)
             .with_lockdown_bios_upgrade_downgrade(upgrade_downgrade)
             .build();
@@ -139,7 +131,6 @@ mod tests {
     fn controls(value: &str) -> Value {
         json!({
             "LockoutHostControl": value,
-            "LockoutBiosVariableWriteMode": value,
             "LockdownBiosSettingsChange": value,
             "LockdownBiosUpgradeDowngrade": value,
         })
@@ -247,6 +238,27 @@ mod tests {
                 result
                     .message
                     .contains(&format!("host_interface={enabled}"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_ignores_bios_variable_write_protection() {
+        for (value, enabled, variable_write, expected) in [
+            ("Enable", false, "Disable", LockdownState::Enabled),
+            ("Disable", true, "Enable", LockdownState::Disabled),
+        ] {
+            let mut config = controls(value);
+            config["@odata.id"] = json!(CONFIG);
+            config["LockoutBiosVariableWriteMode"] = json!(variable_write);
+            let bmc = fixture(value, json!(enabled))
+                .document(CONFIG, config)
+                .build()
+                .await;
+            let cx = bmc.cx().await;
+            assert_eq!(
+                LenovoAmiLockdown.status(&cx).await.unwrap().aggregate,
+                expected
             );
         }
     }

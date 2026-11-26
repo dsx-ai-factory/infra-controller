@@ -75,7 +75,7 @@ fn normalize_status(
     active: Option<SecureBootCurrentBootType>,
 ) -> Result<SecureBootStatus, PlatformError> {
     let Some(configured) = configured else {
-        return Err(PlatformError::InvalidResponse {
+        return Err(PlatformError::NotReady {
             message: "SecureBootEnable is absent".to_string(),
         });
     };
@@ -106,5 +106,13 @@ mod tests {
             normalize_status(Some(true), Some(SecureBootCurrentBootType::Disabled)).unwrap(),
             SecureBootStatus::Pending
         );
+    }
+
+    #[test]
+    fn secure_boot_without_its_configured_state_is_not_ready() {
+        assert!(matches!(
+            normalize_status(None, Some(SecureBootCurrentBootType::Disabled)),
+            Err(PlatformError::NotReady { .. })
+        ));
     }
 }

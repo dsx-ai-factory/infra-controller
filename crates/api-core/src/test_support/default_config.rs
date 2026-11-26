@@ -109,6 +109,19 @@ pub fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
 /// `mlxconfig_profiles` is intentionally exempted by `SKIP_SERIALIZING` in
 /// `crates/api-web/src/configuration.rs`.
 pub fn fully_populated() -> CarbideConfig {
+    let mut config = get();
+    config.site_explorer.host_bluefield_rules = serde_json::from_value(serde_json::json!([{
+        "id": "example-oem-bf3",
+        "sources": ["system_pcie_device"],
+        "part_numbers": [{ "exact": "EXAMPLE-OEM-BF3" }],
+        "product": "bluefield3_dpu"
+    }]))
+    .expect("valid host BlueField rule");
+    config.site_explorer.host_serial_rules = serde_json::from_value(serde_json::json!([{
+        "id": "site-enclosure",
+        "source": {"kind": "chassis", "chassis_id": {"exact": "Enclosure"}}
+    }]))
+    .expect("valid host serial rule");
     CarbideConfig {
         auth: Some(AuthConfig {
             permissive_mode: true,
@@ -143,7 +156,7 @@ pub fn fully_populated() -> CarbideConfig {
             ..Default::default()
         },
         admin_lock_admission_permits: Some(16),
-        ..get()
+        ..config
     }
 }
 
@@ -244,6 +257,7 @@ pub fn get() -> CarbideConfig {
                 endpoints: vec!["https://127.0.0.1:443".to_string()],
                 backend: None,
                 remote_pool: None,
+                auth: None,
                 pkeys: vec![resource_pool::Range {
                     start: "1".to_string(),
                     end: "100".to_string(),
@@ -275,6 +289,7 @@ pub fn get() -> CarbideConfig {
             rack_firmware_reprovisioning_enabled: false,
             controller: StateControllerConfig::default(),
         },
+        nvlink_domain_state_controller: Default::default(),
         rack_state_controller: RackStateControllerConfig {
             controller: StateControllerConfig::default(),
             nmx_cluster_switch_mtls_services: vec![],
@@ -374,6 +389,7 @@ pub fn get() -> CarbideConfig {
         x86_pxe_boot_url_override: None,
         arm_pxe_boot_url_override: None,
         pxe_public_base_url: default_pxe_public_base_url(),
+        nico_pxe_service_url: None,
         set_http_boot_uri_for_vendors: vec![],
         external_api_url: None,
         external_pxe_url: None,

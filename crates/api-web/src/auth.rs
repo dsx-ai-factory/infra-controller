@@ -79,7 +79,7 @@ pub(super) async fn callback(
             return (StatusCode::BAD_REQUEST, "invalid client secret format").into();
         };
 
-        let client_id = oauth2_layer.client.client_id().as_str().to_owned();
+        let client_id = oauth2_layer.client.client_id().as_str();
         // We don't actually care about the token response right now.
         // What matters is that we received one with the proper structure,
         // which includes an access token.
@@ -236,7 +236,7 @@ pub(super) async fn callback(
         .header(
             header::AUTHORIZATION,
             match HeaderValue::from_str(
-                format!("Bearer {}", token.access_token().secret().to_owned()).as_str(),
+                format!("Bearer {}", token.access_token().secret()).as_str(),
             ) {
                 Ok(h) => h,
                 Err(e) => {
@@ -441,14 +441,15 @@ where
     S: ToString,
 {
     fn from(value: (StatusCode, S)) -> Self {
+        let detail = value.1.to_string();
         if !value.0.is_success() {
             tracing::info!(
                 http_status = value.0.as_u16(),
-                response_detail = %value.1.to_string(),
+                response_detail = %detail,
                 "auth_callback returned an unsuccessful response",
             );
         }
-        AuthCallbackResponse::Response((value.0, value.1.to_string()).into_response())
+        AuthCallbackResponse::Response((value.0, detail).into_response())
     }
 }
 

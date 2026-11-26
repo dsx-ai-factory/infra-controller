@@ -19,13 +19,13 @@ use carbide_instrument::Instrumentation;
 use carbide_resource_pool::{
     ResourcePoolBackendError, ResourcePoolRegistryError, ResourcePoolWithBackend,
 };
+use db::db_read::PgPoolReader;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::spx_partition::SpxPartitionAlreadyDeleted;
 use db::{ConditionalWrite, ObjectColumnFilter, WithTransaction, spx_partition};
 use futures_util::FutureExt;
 use model::resource_pool;
 use model::spx_partition::NewSpxPartition;
-use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use super::vni;
@@ -99,12 +99,12 @@ fn emit_and_map_dpa_vni_allocation_failure(
 /// same diagnostics and allocation-failure metrics as a failed allocation from it.
 async fn select_dpa_vni_pool<'a>(
     api: &'a Api,
-    txn: &mut PgConnection,
+    db: &mut PgPoolReader,
     owner_id: &str,
     requested_vni: Option<i32>,
 ) -> Result<ResourcePoolWithBackend<'a, i32>, CarbideError> {
     let source_pool = api.common_pools.ethernet.pool_dpa_vni.as_ref();
-    match api.resource_pool_registry.select(txn, source_pool).await {
+    match api.resource_pool_registry.select(db, source_pool).await {
         Ok(Some(selected)) => Ok(selected),
         Ok(None) => Err(emit_and_map_dpa_vni_allocation_failure(
             &api.instrumentation,
@@ -155,9 +155,7 @@ pub(crate) async fn create(
         error => CarbideError::from(error),
     };
 
-    let mut txn = api.txn_begin().await?;
-    let selected = select_dpa_vni_pool(api, &mut txn, &owner_id, req.vni).await?;
-    txn.commit().await?;
+    let selected = select_dpa_vni_pool(api, &mut api.db_reader(), &owner_id, req.vni).await?;
     let allocation = selected
         .prepare_allocation(
             &api.database_connection,

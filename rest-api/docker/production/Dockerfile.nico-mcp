@@ -44,9 +44,11 @@ RUN --mount=type=bind,from=gomodcache,target=/go-mod-download \
     GOPROXY="file:///go-mod-download|$(go env GOPROXY)" sh scripts/go-mod-download.sh
 
 # nico-mcp only needs the mcp service, the CLI package it reuses for the REST
-# client + OpenAPI parser, and the embedded spec.
+# client + OpenAPI parser, the URL redaction the CLI imports, and the embedded
+# spec.
 COPY mcp/ ./mcp/
 COPY cli/ ./cli/
+COPY common/pkg/util/redact/ ./common/pkg/util/redact/
 COPY openapi/ ./openapi/
 
 # Build the application

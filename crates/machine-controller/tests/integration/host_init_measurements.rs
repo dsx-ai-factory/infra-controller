@@ -86,13 +86,7 @@ async fn setup_waiting_host(env: &Env, age: Duration) -> TestManagedHost {
 }
 
 async fn insert_verified_ek(env: &Env, host: &TestManagedHost) {
-    let mut txn = env
-        .test_harness
-        .api()
-        .database_connection
-        .begin()
-        .await
-        .unwrap();
+    let mut txn = env.test_harness.api().txn_begin().await.unwrap();
     db::attestation::ek_cert_verification_status::insert(
         txn.as_mut(),
         b"test-ek-sha256",
@@ -182,13 +176,7 @@ async fn pending_bundle_does_not_reboot(pool: PgPool) {
         .await;
     let host = setup_waiting_host(&env, Duration::minutes(10)).await;
     insert_verified_ek(&env, &host).await;
-    let mut txn = env
-        .test_harness
-        .api()
-        .database_connection
-        .begin()
-        .await
-        .unwrap();
+    let mut txn = env.test_harness.api().txn_begin().await.unwrap();
     db::machine_topology::set_topology_update_needed(&mut txn, &host.host.id, true)
         .await
         .unwrap();

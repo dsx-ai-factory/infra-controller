@@ -121,19 +121,14 @@ pub struct TenantKeyset {
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let algo = if let Some(algo) = self.algo.as_ref() {
-            format!("{algo} ")
-        } else {
-            "".to_string()
-        };
-
-        let comment = if let Some(comment) = self.comment.as_ref() {
-            format!(" {comment}")
-        } else {
-            "".to_string()
-        };
-
-        write!(f, "{}{}{}", algo, self.key, comment)
+        if let Some(algo) = &self.algo {
+            write!(f, "{algo} ")?;
+        }
+        f.write_str(&self.key)?;
+        if let Some(comment) = &self.comment {
+            write!(f, " {comment}")?;
+        }
+        Ok(())
     }
 }
 

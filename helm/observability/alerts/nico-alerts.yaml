@@ -1,6 +1,7 @@
-# NICo PrometheusRule - Production-validated alerting rules
+# NICo PrometheusRule - alerting rules
 #
-# These thresholds are validated in production NICo/Carbide deployments.
+# These thresholds are validated in production NICo/Carbide deployments, except
+# for a rule whose comment says "Not production-validated".
 # Review and adjust for your site before applying.
 #
 # Apply with: kubectl apply -f nico-alerts.yaml
@@ -117,6 +118,20 @@ spec:
             severity: warning
           annotations:
             summary: "IB partitions stuck above SLA (1-9)"
+
+        # Not production-validated. Each nico-api replica with background services
+        # exports its own snapshot of recorded holds. A positive above-SLA count in
+        # either in_use bucket satisfies the condition. If reads keep failing on every
+        # replica, the exported samples expire and the alert resolves after evaluation.
+        - alert: NicoHostsAboveSLAWithDpuServiceSyncHold
+          expr: sum(max by (in_use) (carbide_hosts_dpu_service_sync_pending_count{above_sla="true"})) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "DPUService hold metrics report hosts above their state SLA"
+            description: "The DPUService hold metrics report at least one host in an above-SLA bucket. Run `nico-admin-cli dpf service-sync list` to inspect the current worklist."
+            runbook_url: "https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/observability/alerts.md#dpuservice-rollout-holds"
 
     - name: nico-capacity
       rules:

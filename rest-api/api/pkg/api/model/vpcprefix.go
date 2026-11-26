@@ -27,6 +27,8 @@ const (
 type APIVpcPrefixCreateRequest struct {
 	// Name is the name of the VpcPrefix
 	Name string `json:"name"`
+	// Labels is a set of user-defined key-value pairs
+	Labels map[string]string `json:"labels"`
 	// VpcID is the ID of the vpc containing the VpcPrefix
 	VpcID string `json:"vpcId"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
@@ -147,14 +149,19 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 		return err
 	}
 
+	err = util.ValidateLabels(vpcr.Labels)
+	if err != nil {
+		return err
+	}
+
 	return vpcr.validatePrefix()
 }
 
 // ToProto builds the workflow request that asks a Site to create a new
 // VpcPrefix for this API request. `vp` is the just-persisted DB record;
 // its `ToProto(vpc)` is the source of the canonical wire fields
-// (Id, VpcId, Config.Prefix, Metadata.Name). The parent `vpc` is needed
-// to translate to the Site-facing VPC ID (`Vpc.GetSiteID`).
+// (Id, VpcId, Config.Prefix, Metadata.Name, Metadata.Labels). The parent
+// `vpc` is needed to translate to the Site-facing VPC ID (`Vpc.GetSiteID`).
 //
 // The method trusts that the request has already passed `Validate` and
 // `ValidatePrefixLength`; the handler supplies the resolved IP Block family
@@ -178,6 +185,8 @@ func (vpcr *APIVpcPrefixCreateRequest) ToProto(vp *cdbm.VpcPrefix, vpc *cdbm.Vpc
 type APIVpcPrefixUpdateRequest struct {
 	// Name is the name of the VpcPrefix
 	Name *string `json:"name"`
+	// Labels replaces the VpcPrefix's user-defined key-value pairs when supplied
+	Labels map[string]string `json:"labels"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
 	IPBlockID *string `json:"ipBlockId"`
 	// Prefix is the immutable CIDR allocated to the VpcPrefix
@@ -210,7 +219,7 @@ func (vpur *APIVpcPrefixUpdateRequest) Validate() error {
 		return err
 	}
 
-	return nil
+	return util.ValidateLabels(vpur.Labels)
 }
 
 // ToProto builds the workflow request that pushes this Update's
@@ -218,8 +227,8 @@ func (vpur *APIVpcPrefixUpdateRequest) Validate() error {
 // the wire fields because the handler has already merged the request's
 // (sparse) update fields into the entity by the time this is called;
 // sending the post-merge state matches the pre-existing handler
-// behaviour. Currently only `Metadata.Name` flows over (`Prefix` is
-// immutable for VpcPrefix and rejected by Validate).
+// behaviour. `Metadata.Name` and `Metadata.Labels` flow over; `Prefix`
+// is immutable for VpcPrefix and rejected by Validate.
 func (vpur *APIVpcPrefixUpdateRequest) ToProto(vp *cdbm.VpcPrefix) *corev1.VpcPrefixUpdateRequest {
 	vpProto := vp.ToProto(nil)
 	return &corev1.VpcPrefixUpdateRequest{
@@ -234,6 +243,8 @@ type APIVpcPrefix struct {
 	ID string `json:"id"`
 	// Name is the name of the VpcPrefix
 	Name string `json:"name"`
+	// Labels is the set of user-defined key-value pairs
+	Labels APILabels `json:"labels"`
 	// SiteID is the ID of the Site containing the VpcPrefix
 	SiteID string `json:"siteId"`
 	// Site is the summary of the Site
@@ -267,6 +278,7 @@ func NewAPIVpcPrefix(dbvp *cdbm.VpcPrefix, dbsds []cdbm.StatusDetail, dbpu *ipam
 	apiVpcPrefix := APIVpcPrefix{
 		ID:           dbvp.ID.String(),
 		Name:         dbvp.Name,
+		Labels:       APILabels(dbvp.Labels),
 		SiteID:       dbvp.SiteID.String(),
 		VpcID:        dbvp.VpcID.String(),
 		IPBlockID:    util.GetUUIDPtrToStrPtr(dbvp.IPBlockID),

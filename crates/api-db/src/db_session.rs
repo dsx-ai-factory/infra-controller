@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pooled session ownership for read-only transactions that can be abandoned.
+//! Pooled session ownership for transactions that can be abandoned.
 
 use std::time::Duration;
 
 use crate::{DatabaseError, Transaction};
 
-/// `DbSessionGuard` owns a pooled connection until successful work explicitly
-/// returns it through `return_to_pool`. Dropping the guard before that discards
-/// the connection and immediately releases the local pool slot.
+/// `DbSessionGuard` owns a pooled connection until work that ended its
+/// transaction explicitly returns it through `return_to_pool`. Dropping the
+/// guard before that discards the connection and immediately releases the
+/// local pool slot.
 ///
 /// SQLx's normal cleanup can wait for a blocked query before rollback, so the
 /// guard also covers setup and network stalls that the statement cap cannot.
@@ -138,9 +139,11 @@ impl DbSessionGuard {
         Ok(txn)
     }
 
-    /// Returns a healthy connection through SQLx after its transaction commits.
-    /// Call this only after successful work; dropping an abandoned guard discards
-    /// its connection instead of waiting for SQLx rollback cleanup.
+    /// Returns the connection through SQLx once its transaction has ended, by a
+    /// commit or by a rollback the server answered. A `Transaction` dropped by
+    /// work that ran to completion also qualifies; SQLx sends its rollback
+    /// before reusing the connection. Only a dropped guard discards its
+    /// connection, without waiting for SQLx rollback cleanup.
     /// An unfinished raw retention transaction is always discarded; SQLx has no
     /// `Transaction` owner to roll it back on normal pool return.
     pub fn return_to_pool(mut self) {

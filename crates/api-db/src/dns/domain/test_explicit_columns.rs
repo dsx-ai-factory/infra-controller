@@ -32,7 +32,7 @@ async fn domain_queries_survive_added_columns(
     // Keep the API connection and its prepared statements while another
     // connection applies the schema change, just as a migration would.
     let mut migration_connection = pool.acquire().await?;
-    let mut migration = migration_connection.begin().await?;
+    let mut migration = crate::Transaction::begin_inner(&mut migration_connection).await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE domains ADD COLUMN test_added_column text;
@@ -49,7 +49,7 @@ async fn domain_queries_survive_added_columns(
 async fn exercise_domain_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let first_input = NewDomain {
         default_ttl: Some(ZoneTtl::try_from(600)?),
         ..NewDomain::new("first.example.com")

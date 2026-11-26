@@ -52,10 +52,19 @@ func (rs *FlowServerImpl) addPowerTaskWaitingContext(ctx context.Context, rackID
 // The promoter stops at the first conflicting waiting task, so even an earlier
 // task with disjoint targets is relevant. Neither list proves why a task waited.
 func powerTaskWaitingContext(task taskdef.PowerTaskDetails, metadata []taskdef.TaskContextMetadata) *pb.PowerTaskWaitingContext {
-	result := &pb.PowerTaskWaitingContext{}
-	incoming := taskdef.TaskContextMetadata{RackID: task.RackID, Type: taskcommon.TaskTypePowerControl, Attributes: task.Attributes}
+	active, earlier := taskWaitingReferences(taskdef.TaskContextMetadata{
+		ID: task.ID, RackID: task.RackID, Type: taskcommon.TaskTypePowerControl,
+		Attributes: task.Attributes, CreatedAt: task.CreatedAt,
+	}, metadata)
+	return &pb.PowerTaskWaitingContext{ActiveConflicts: active, EarlierWaiting: earlier}
+}
+
+// taskWaitingReferences applies the promoter's conflict rules to power or firmware
+// metadata. Earlier waiting work is informative even without overlapping targets;
+// neither returned list establishes a saved cause or execution order.
+func taskWaitingReferences(incoming taskdef.TaskContextMetadata, metadata []taskdef.TaskContextMetadata) (active, earlier []*pb.TaskBrief) {
 	for _, other := range metadata {
-		if other.ID == task.ID {
+		if other.ID == incoming.ID {
 			continue
 		}
 		brief := &pb.TaskBrief{
@@ -64,14 +73,14 @@ func powerTaskWaitingContext(task taskdef.PowerTaskDetails, metadata []taskdef.T
 		switch other.Status {
 		case taskcommon.TaskStatusPending, taskcommon.TaskStatusRunning:
 			if conflict.MetadataConflicts(incoming, other) {
-				result.ActiveConflicts = append(result.ActiveConflicts, brief)
+				active = append(active, brief)
 			}
 		case taskcommon.TaskStatusWaiting:
 			// Equal timestamps do not tell us which task was submitted first.
-			if other.CreatedAt.Before(task.CreatedAt) {
-				result.EarlierWaiting = append(result.EarlierWaiting, brief)
+			if other.CreatedAt.Before(incoming.CreatedAt) {
+				earlier = append(earlier, brief)
 			}
 		}
 	}
-	return result
+	return active, earlier
 }

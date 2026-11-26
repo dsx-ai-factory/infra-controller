@@ -101,6 +101,8 @@ impl TryFrom<proto::DhcpConfig> for ModelDhcpConfig {
                 .map(|s| s.parse())
                 .collect::<Result<Vec<_>, _>>()?,
             carbide_api_url: c.carbide_api_url,
+            // shortcut: control protocol lacks this field; forward it with https://github.com/dsx-ai-factory/infra-controller/issues/9424.
+            nico_pxe_service_url: None,
             carbide_ntpservers: c
                 .carbide_ntpservers
                 .iter()
@@ -1421,7 +1423,10 @@ mod tests {
                     ..Default::default()
                 };
                 ModelDhcpConfig::try_from(config)
-                    .map(|config| config.dhcpv6_server_preference)
+                    .map(|config| {
+                        assert_eq!(config.nico_pxe_service_url, None);
+                        config.dhcpv6_server_preference
+                    })
                     .map_err(drop)
             };
             "legacy omission" {

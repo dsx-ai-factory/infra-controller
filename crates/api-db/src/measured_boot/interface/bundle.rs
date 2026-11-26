@@ -209,10 +209,10 @@ pub async fn get_measurement_bundle_by_id(
 /// for the given `bundle_name`, if it exists. This leverages the generic
 /// get_object_for_id function since its a simple/common pattern.
 pub async fn get_measurement_bundle_for_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bundle_name: String,
 ) -> Result<Option<MeasurementBundleRecord>, DatabaseError> {
-    common::get_object_for_unique_column(txn, "name", bundle_name.clone())
+    common::get_object_for_unique_column(conn, "name", bundle_name.clone())
         .await
         .map_err(|e| e.with_op_name("get_measurement_bundle_for_name"))
 }
@@ -232,10 +232,10 @@ pub async fn get_measurement_bundle_records(
 /// MeasurementBundleRecord instances in the database with the given profile
 /// ID.
 pub async fn get_measurement_bundle_records_for_profile_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Vec<MeasurementBundleRecord>, DatabaseError> {
-    common::get_objects_where_id(txn, profile_id)
+    common::get_objects_where_id(conn, profile_id)
         .await
         .map_err(|e| e.with_op_name("get_measurement_bundle_records_for_profile_id"))
 }
@@ -270,13 +270,13 @@ pub async fn get_measurement_bundle_values_for_bundle_id(
 /// get_machines_for_bundle_id returns a unique list of
 /// all MachineId that leverage the given bundle.
 pub async fn get_machines_for_bundle_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bundle_id: MeasurementBundleId,
 ) -> Result<Vec<MachineId>, DatabaseError> {
     let query = "select distinct machine_id from measurement_journal where bundle_id = $1 order by machine_id";
     sqlx::query_as(query)
         .bind(bundle_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_machines_for_bundle_id", e))
 }
@@ -286,13 +286,13 @@ pub async fn get_machines_for_bundle_id(
 ///
 /// This is specifically used by the `bundle list machines by-name` CLI call.
 pub async fn get_machines_for_bundle_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bundle_name: String,
 ) -> Result<Vec<MachineId>, DatabaseError> {
     let query = "select distinct machine_id from measurement_journal,measurement_bundles where measurement_journal.bundle_id=measurement_bundles.bundle_id and measurement_bundles.name = $1 order by machine_id";
     sqlx::query_as(query)
         .bind(bundle_name)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("get_machines_for_bundle_name", e))
 }

@@ -17,9 +17,10 @@ nico-admin-cli machine force-delete <--machine>
 [--delete-retained-boot-interfaces]
 [--release-preserved-addresses]
 [--allow-delete-with-instance-type]
-[--allow-delete-with-instance] [--wait-for-instance-dpu]
-[--allow-delete-with-orphaned-dpf-crds] [--extended]
-[--sort-by] [-h|--help]
+[--allow-delete-with-instance] [--extended]
+[--wait-for-instance-dpu]
+[--allow-delete-with-orphaned-dpf-crds] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -74,6 +75,14 @@ an assigned Instance Type and removes the attached Instance
 control-plane record without first requesting a graceful workload
 shutdown; force-delete cleanup may forcibly restart the host.
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--wait-for-instance-dpu`
 
 Wait for all attached DPUs to acknowledge the Admin network
@@ -97,14 +106,6 @@ time. A timeout does not cancel deletion. This flag does not replace
 
 Delete machine even if DPF CRDs exist and DPF is disabled at the site
 level. This flag acknowledges that orphaned DPF resources may remain
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

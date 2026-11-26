@@ -18,6 +18,7 @@
 use carbide_instrument::testing::MetricsCapture;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use db::TransactionVending as _;
 use model::firmware::FirmwareComponentType;
 use model::machine::{HostReprovisionState, InstanceState, ManagedHostState};
 use model::test_support::ManagedHostConfig;
@@ -356,19 +357,19 @@ async fn concurrent_completion_preserves_result_against_stale_poll(pool: PgPool)
     .await;
     let before = mh.host.machine().await;
     if let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = &mut waiting {
-        *result = Some(model::machine::ScoutUpgradeResult {
+        *result = Some(Box::new(model::machine::ScoutUpgradeResult {
             success: true,
             exit_code: 0,
             stdout: "completed".into(),
             stderr: String::new(),
             error: String::new(),
-        });
+        }));
     }
     let completed = ManagedHostState::HostReprovision {
         retry_count: 0,
         reprovision_state: waiting,
     };
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let host_id = mh.host.id;
     let write = db::machine::try_update_controller_state(
         &mut txn,

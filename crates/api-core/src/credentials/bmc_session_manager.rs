@@ -384,12 +384,7 @@ impl BmcSessionStore for PgBmcSessionStore {
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
     ) -> Result<Vec<StoredSession>, BmcSessionError> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|err| BmcSessionError::Store(err.to_string()))?;
-        bmc_redfish_session::find_by_owner(conn.as_mut(), spiffe_service_id, bmc_mac)
+        bmc_redfish_session::find_by_owner(&self.pool, spiffe_service_id, bmc_mac)
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))
     }

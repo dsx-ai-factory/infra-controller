@@ -29,11 +29,12 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use futures_util::task::AtomicWaker;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
@@ -44,7 +45,7 @@ use tracing::instrument::WithSubscriber;
 use url::Url;
 
 use crate::FirmwareDownloader;
-use crate::downloader::{ManagedDownload, ManagedDownloadResource, verify_sha256_file};
+use crate::downloader::{ManagedDownload, ManagedDownloadResource, sha256_file};
 
 const NAMESPACE: &str = "digest-v1";
 const MAX_CAPACITY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
@@ -103,12 +104,13 @@ pub enum CacheError {
 }
 
 /// `CacheLookup` either supplies a verified leased reader or asks the caller
-/// to poll again. Pending requests do not accumulate queued tasks or waiters.
+/// to poll again with fresh retention membership.
 #[derive(Debug)]
 pub enum CacheLookup {
     /// Verified bytes whose file cannot be evicted while physical reads remain.
     Ready(CachedArtifact),
-    /// Download/check capacity, reader capacity, or an active transfer is busy.
+    /// No reader is ready. A worker may still be queued, capacity may be busy,
+    /// a transfer may be active, or a corrupt or replaced inode may need a new open.
     Pending,
 }
 
@@ -128,16 +130,21 @@ struct CacheInner {
     readers: Arc<Semaphore>,
     state: Mutex<CacheState>,
     work: Arc<CacheWork>,
+    #[cfg(feature = "test-support")]
+    gates: crate::test_support::CacheGates,
     #[cfg(test)]
     write_queued: Arc<Notify>,
     #[cfg(test)]
     panic_before_write: Arc<AtomicBool>,
     #[cfg(test)]
     transfer_stopped: Notify,
+    #[cfg(test)]
+    corrupt_file_verified: Notify,
 }
 
 // One mutex excludes eviction, read acquisition, and reservation changes.
-// Filesystem work runs on bounded blocking workers while holding it.
+// Once an opened descriptor has a reader lease, SHA-256 and streaming reads
+// use that descriptor outside the mutex.
 #[derive(Default)]
 struct CacheState {
     initialized: bool,
@@ -151,37 +158,45 @@ struct Entry {
     // staging bytes. After the last physical owner drops it is actual bytes.
     charged_bytes: u64,
     downloading: bool,
-    readers: Arc<AtomicUsize>,
-    // There is only one leased inode at a time. A replacement pathname stays
-    // separate in accounting until these physical readers have disappeared.
-    leased_file: Option<fs::Metadata>,
+    readers: Arc<Mutex<ActiveReaders>>,
     last_use: u64,
     failure: Option<String>,
 }
 
+// The accounting descriptor stays open while any reader of this inode exists.
+// Registration and final close share this mutex. A metadata observer holds
+// the cache-state mutex until it drops its own reference to the descriptor.
+#[derive(Default)]
+struct ActiveReaders {
+    count: usize,
+    file: Option<Arc<File>>,
+}
+
 impl Entry {
-    // All live readers belong to this inode; a replacement is not a second
-    // leased generation until those readers finish.
-    fn matches_lease(&self, metadata: Option<&fs::Metadata>) -> bool {
-        self.leased_file
-            .as_ref()
-            .zip(metadata)
-            .is_some_and(|(leased, current)| {
-                leased.dev() == current.dev() && leased.ino() == current.ino()
-            })
+    fn reader_count(&self) -> usize {
+        self.readers
+            .lock()
+            .expect("cache reader mutex poisoned")
+            .count
     }
 
-    fn observe(&mut self, metadata: Option<&fs::Metadata>, partial_bytes: u64) -> io::Result<()> {
+    fn observe(
+        &mut self,
+        metadata: Option<&fs::Metadata>,
+        partial_bytes: u64,
+    ) -> io::Result<Option<fs::Metadata>> {
         let path_bytes = metadata.map_or(0, fs::Metadata::len);
-        let complete_bytes = if self.readers.load(Ordering::Acquire) == 0 {
-            self.leased_file = None;
-            path_bytes
-        } else {
-            let leased = self
-                .leased_file
-                .as_ref()
-                .expect("physical readers have leased metadata");
-            if self.matches_lease(metadata) {
+        let file = self
+            .readers
+            .lock()
+            .expect("cache reader mutex poisoned")
+            .file
+            .clone();
+        let leased = file.map(|file| file.metadata()).transpose()?;
+        let complete_bytes = if let Some(leased) = &leased {
+            // A leased inode can grow or be unlinked while verification or a
+            // stream is running. Charge its observed size even without a path.
+            if same_inode(leased, metadata) {
                 leased.len().max(path_bytes)
             } else {
                 leased
@@ -189,12 +204,18 @@ impl Entry {
                     .checked_add(path_bytes)
                     .ok_or_else(byte_count_overflow)?
             }
+        } else {
+            path_bytes
         };
         self.charged_bytes = complete_bytes
             .checked_add(partial_bytes)
             .ok_or_else(byte_count_overflow)?;
-        Ok(())
+        Ok(leased)
     }
+}
+
+fn same_inode(opened: &fs::Metadata, path: Option<&fs::Metadata>) -> bool {
+    path.is_some_and(|path| path.dev() == opened.dev() && path.ino() == opened.ino())
 }
 
 fn byte_count_overflow() -> io::Error {
@@ -208,7 +229,7 @@ impl CacheState {
         self.entries.retain(|digest, entry| {
             entry.charged_bytes != 0
                 || entry.downloading
-                || entry.readers.load(Ordering::Acquire) != 0
+                || entry.reader_count() != 0
                 || retained.contains(digest)
         });
     }
@@ -248,14 +269,24 @@ impl FirmwareArtifactCache {
                 readers: Arc::new(Semaphore::new(MAX_READERS)),
                 state: Mutex::new(CacheState::default()),
                 work,
+                #[cfg(feature = "test-support")]
+                gates: Default::default(),
                 #[cfg(test)]
                 write_queued: Arc::new(Notify::new()),
                 #[cfg(test)]
                 panic_before_write: Arc::new(AtomicBool::new(false)),
                 #[cfg(test)]
                 transfer_stopped: Notify::new(),
+                #[cfg(test)]
+                corrupt_file_verified: Notify::new(),
             }),
         })
+    }
+
+    /// Test-only synchronization at preparation, physical open and verification.
+    #[cfg(feature = "test-support")]
+    pub fn test_gates(&self) -> &crate::test_support::CacheGates {
+        &self.inner.gates
     }
 
     /// Validates the storage budget without filesystem or runtime work. Capacity
@@ -280,8 +311,10 @@ impl FirmwareArtifactCache {
     /// `retained` is the caller's current authoritative set, used under the same
     /// exclusion as read acquisition and eviction. Reads, active transfers, and
     /// these digests cannot be evicted. A failure is reported once; the next open
-    /// retries. Include the requested digest in `retained`: an idle entry with
-    /// no bytes or retention may lose its failure before any caller sees it.
+    /// retries. Removing a corrupt cached file returns `Pending`. Another open
+    /// must supply fresh retention before reserving its replacement. Include
+    /// the requested digest in `retained` so an idle entry with no bytes keeps
+    /// its failure until the caller sees it.
     /// Storage is reserved before source access. Reader admission is
     /// separately bounded at 32, without a queue, so slow readers do not retain
     /// the shared downloader's worker slots. Verified adopted files may be read
@@ -289,7 +322,8 @@ impl FirmwareArtifactCache {
     /// require free capacity. Redirect rejection is a source security boundary,
     /// so an origin cannot substitute a different destination.
     /// This wrapper does not lock the retained set. Callers whose authoritative
-    /// retained set can grow must use [`Self::open_with_retention_lock`].
+    /// retained set can grow must protect it with [`Self::open_with_retention_lock`]
+    /// or call [`Self::prepare_open`] before acquiring their lock.
     pub async fn open(
         &self,
         source: &Url,
@@ -300,20 +334,23 @@ impl FirmwareArtifactCache {
             .await
     }
 
-    /// Open while the caller holds its retention lock. `release` owns
+    /// Open while the caller holds its retention lock, including time queued
+    /// for a blocking worker. `release` owns
     /// that lock until polled after physical eviction/reservation or reader
     /// acquisition. Registered work retains it after request cancellation and
-    /// releases it before any source transfer or response. Release failure drops
-    /// a reader or fails a reservation and starts no download.
+    /// releases it before verifying the leased descriptor, downloading, or
+    /// responding. Release failure drops a reader or fails a reservation and
+    /// starts no download.
     ///
     /// Source, retention, capacity and reader rules are shared with [`Self::open`].
     /// Use this method when authoritative membership can grow concurrently.
     /// `release` must also clean up on drop, since rejection or panic can drop it
     /// without polling. The caller must bound its completion; the cache supplies
     /// no timeout, retains downloader capacity, and drains registered work during
-    /// shutdown. Early returns still poll
-    /// `release`, whose error takes precedence there. After physical work, an
-    /// existing open error takes precedence over a simultaneous release error.
+    /// shutdown. Invalid input, cancellation before registration and a busy
+    /// downloader poll `release` and propagate its error. If the owner refuses
+    /// registration, the callback is dropped. After physical work, an existing
+    /// open error takes precedence over a simultaneous release error.
     pub async fn open_with_retention_lock(
         &self,
         source: &Url,
@@ -321,13 +358,7 @@ impl FirmwareArtifactCache {
         retained: &HashSet<ArtifactDigest>,
         release: impl Future<Output = Result<(), CacheError>> + Send + 'static,
     ) -> Result<CacheLookup, CacheError> {
-        if !matches!(source.scheme(), "http" | "https")
-            || source.host_str().is_none()
-            || !source.username().is_empty()
-            || source.password().is_some()
-            || source.query().is_some()
-            || source.fragment().is_some()
-        {
+        if !valid_source(source) {
             release.await?;
             return Err(CacheError::InvalidSource);
         }
@@ -339,17 +370,95 @@ impl FirmwareArtifactCache {
             release.await?;
             return Ok(CacheLookup::Pending);
         };
-        let inner = self.inner.clone();
-        let retained = retained.clone();
-        let source = source.to_string();
         let capacity = Arc::new(capacity);
-        let (response, received) = oneshot::channel();
+        let worker = self.schedule_open(capacity.clone(), None)?;
+        submit_open(worker, source, digest, retained.clone(), release, capacity).await
+    }
+
+    /// Start a worker while the caller authorizes the request. Each preparation
+    /// requires its own request admission permit, held through handoff or until
+    /// the owner reaps an abandoned worker. Downloader capacity is acquired
+    /// only for an authorized request with a running worker. A started worker
+    /// occupies a blocking thread until handoff, drop, or cache cancellation.
+    /// Check out any database connection first if checkout needs a blocking
+    /// thread. Then prepare the worker, acquire retention exclusion, read current
+    /// membership, and pass the lock's release callback to [`PreparedCacheOpen::open`].
+    /// Drop the preparation if authorization fails. Registration after shutdown
+    /// returns [`CacheError::Cancelled`].
+    pub fn prepare_open(
+        &self,
+        admission: Arc<OwnedSemaphorePermit>,
+    ) -> Result<PreparedCacheOpen, CacheError> {
+        let (started, ready) = oneshot::channel();
+        let worker = self.schedule_open(admission, Some(started))?;
+        Ok(PreparedCacheOpen {
+            worker,
+            ready,
+            cache: self.inner.clone(),
+        })
+    }
+
+    fn schedule_open(
+        &self,
+        admission: Arc<OwnedSemaphorePermit>,
+        started: Option<oneshot::Sender<()>>,
+    ) -> Result<oneshot::Sender<OpenRequest>, CacheError> {
+        let inner = self.inner.clone();
+        let (send, mut receive) = oneshot::channel::<OpenRequest>();
         let span = tracing::Span::current();
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
         self.inner.work.register(
             async move {
                 let context = inner.clone();
-                let mut opened = blocking(move || context.open(digest, &retained)).await;
+                let physical = blocking(move || {
+                    if let Some(started) = started {
+                        // Signal from the running thread before it waits for the snapshot.
+                        if started.send(()).is_err() {
+                            return Err(admission);
+                        }
+                        #[cfg(feature = "test-support")]
+                        context.gates.prepared.run();
+                    }
+                    // Only channel handoff and cancellation belong here. Timers
+                    // or I/O would make progress depend on the caller's runtime.
+                    let request = tokio::runtime::Handle::current().block_on(async {
+                        tokio::select! {
+                            biased;
+                            _ = context.cancel.cancelled() => {
+                                // Close before draining. A successful sender transferred
+                                // its release callback, even if shutdown just won the race.
+                                receive.close();
+                                receive.try_recv().ok()
+                            }
+                            request = &mut receive => request.ok(),
+                        }
+                    });
+                    let Some(request) = request else {
+                        return Err(admission);
+                    };
+                    // The submitted open owns downloader capacity through settlement.
+                    drop(admission);
+                    let opened = context.open(request.digest, &request.retained);
+                    Ok((opened, request))
+                })
+                .await;
+                let (mut opened, request) = match physical {
+                    Ok(opened) => opened,
+                    Err(admission) => {
+                        return WorkResult::Finished {
+                            _capacity: admission,
+                        };
+                    }
+                };
+                let OpenRequest {
+                    digest,
+                    source,
+                    release,
+                    response,
+                    capacity,
+                    retained,
+                } = request;
+                drop(retained);
                 if let Err(error) = release.await {
                     if matches!(&opened, Ok(OpenResult::Download)) {
                         let context = inner.clone();
@@ -361,7 +470,7 @@ impl FirmwareArtifactCache {
                         opened = Err(error);
                     }
                 }
-                match opened {
+                let result = match opened {
                     Ok(OpenResult::Download) => {
                         // The request may disappear after Pending. This registered
                         // parent still owns transport, physical work and settlement.
@@ -400,31 +509,142 @@ impl FirmwareArtifactCache {
                             !completion.panicked.load(Ordering::Acquire),
                             "managed firmware physical worker panicked"
                         );
-                        WorkResult::Downloaded {
+                        return WorkResult::Finished {
                             _capacity: capacity,
+                        };
+                    }
+                    Ok(OpenResult::Verify(lease)) => {
+                        if inner.cancel.is_cancelled() {
+                            Err(CacheError::Cancelled)
+                        } else {
+                            // Shutdown drains even a queued verifier. It keeps its reader
+                            // lease and checks cancellation before its first read. The
+                            // owner returns downloader capacity when it reaps the result.
+                            blocking(move || CachedArtifact::verify(lease, digest)).await
                         }
                     }
-                    result => WorkResult::Opened {
-                        response,
-                        result: result.map(|opened| match opened {
-                            OpenResult::Lookup(lookup) => lookup,
-                            OpenResult::Download => unreachable!(),
-                        }),
-                        _capacity: capacity,
-                    },
+                    Ok(OpenResult::Pending) => Ok(CacheLookup::Pending),
+                    Err(error) => Err(error),
+                };
+                WorkResult::Opened {
+                    response,
+                    result,
+                    _capacity: capacity,
                 }
             }
             .instrument(span)
             .with_subscriber(dispatch),
         )?;
-        received
-            .await
-            .map_err(|_| CacheError::Io(io::Error::other("firmware cache owner failed")))?
+        Ok(send)
     }
 }
 
+fn valid_source(source: &Url) -> bool {
+    matches!(source.scheme(), "http" | "https")
+        && source.host_str().is_some()
+        && source.username().is_empty()
+        && source.password().is_none()
+        && source.query().is_none()
+        && source.fragment().is_none()
+}
+
+/// A single open prepared before the caller reads fresh retention membership.
+/// A busy cache returns Pending after the caller releases its snapshot.
+pub struct PreparedCacheOpen {
+    worker: oneshot::Sender<OpenRequest>,
+    ready: oneshot::Receiver<()>,
+    cache: Arc<CacheInner>,
+}
+
+struct OpenRequest {
+    digest: ArtifactDigest,
+    source: String,
+    retained: HashSet<ArtifactDigest>,
+    release: BoxFuture<'static, Result<(), CacheError>>,
+    response: oneshot::Sender<Result<CacheLookup, CacheError>>,
+    capacity: Arc<OwnedSemaphorePermit>,
+}
+
+impl PreparedCacheOpen {
+    /// Give a running worker ownership of the current retention lock through
+    /// physical open or reservation. A queued worker or busy downloader returns
+    /// Pending after release if the cache is still running. A later open must
+    /// supply fresh membership.
+    /// The release future must finish within a caller-enforced deadline and
+    /// clean up on drop. Early rejection polls release and propagates its error.
+    /// After handoff the cache polls release even if the caller disappears.
+    /// A physical open error takes precedence over a simultaneous release error.
+    pub async fn open(
+        mut self,
+        source: &Url,
+        digest: ArtifactDigest,
+        retained: HashSet<ArtifactDigest>,
+        release: impl Future<Output = Result<(), CacheError>> + Send + 'static,
+    ) -> Result<CacheLookup, CacheError> {
+        if !valid_source(source) {
+            drop(self.worker);
+            release.await?;
+            return Err(CacheError::InvalidSource);
+        }
+        if self.cache.cancel.is_cancelled() {
+            drop(self.worker);
+            release.await?;
+            return Err(CacheError::Cancelled);
+        }
+        let capacity = match self.ready.try_recv() {
+            Ok(()) => self.cache.downloader.try_capacity(),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                release.await?;
+                return Err(CacheError::Cancelled);
+            }
+        };
+        let Some(capacity) = capacity else {
+            drop(self.worker);
+            release.await?;
+            self.cache.check_cancelled()?;
+            return Ok(CacheLookup::Pending);
+        };
+        submit_open(
+            self.worker,
+            source,
+            digest,
+            retained,
+            release,
+            Arc::new(capacity),
+        )
+        .await
+    }
+}
+
+async fn submit_open(
+    worker: oneshot::Sender<OpenRequest>,
+    source: &Url,
+    digest: ArtifactDigest,
+    retained: HashSet<ArtifactDigest>,
+    release: impl Future<Output = Result<(), CacheError>> + Send + 'static,
+    capacity: Arc<OwnedSemaphorePermit>,
+) -> Result<CacheLookup, CacheError> {
+    let (response, received) = oneshot::channel();
+    if let Err(request) = worker.send(OpenRequest {
+        digest,
+        source: source.to_string(),
+        retained,
+        release: release.boxed(),
+        response,
+        capacity,
+    }) {
+        request.release.await?;
+        return Err(CacheError::Cancelled);
+    }
+    received
+        .await
+        .map_err(|_| CacheError::Io(io::Error::other("firmware cache owner failed")))?
+}
+
 enum OpenResult {
-    Lookup(CacheLookup),
+    Pending,
+    Verify(Arc<ReaderLease>),
     Download,
 }
 
@@ -448,7 +668,7 @@ enum WorkResult {
         result: Result<CacheLookup, CacheError>,
         _capacity: Arc<OwnedSemaphorePermit>,
     },
-    Downloaded {
+    Finished {
         _capacity: Arc<OwnedSemaphorePermit>,
     },
     Read {
@@ -510,12 +730,18 @@ impl CacheWork {
                 result = next => match result {
                     None => break,
                     Some(Ok(WorkResult::Opened { response, result, .. })) => {
-                        response.send(result).ok();
+                        // Shutdown can start after verification but before delivery.
+                        // Release the reader here instead of starting a new stream.
+                        if self.cancel.is_cancelled() && matches!(result, Ok(CacheLookup::Ready(_))) {
+                            response.send(Err(CacheError::Cancelled)).ok();
+                        } else {
+                            response.send(result).ok();
+                        }
                     }
                     Some(Ok(WorkResult::Read { response, result, .. })) => {
                         response.send(result).ok();
                     }
-                    Some(Ok(WorkResult::Downloaded { .. })) => {}
+                    Some(Ok(WorkResult::Finished { .. })) => {}
                     Some(Err(error)) => {
                         self.cancel.cancel();
                         if error.is_panic() && panic.is_none() { panic = Some(error.into_panic()); }
@@ -544,6 +770,18 @@ async fn blocking<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'sta
 }
 
 impl CacheInner {
+    fn check_cancelled(&self) -> Result<(), CacheError> {
+        if self.cancel.is_cancelled() {
+            Err(CacheError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn checksum(&self, file: impl Read) -> Result<[u8; 32], CacheError> {
+        sha256_file(file, || self.check_cancelled())
+    }
+
     fn path(&self, digest: ArtifactDigest) -> PathBuf {
         self.directory.join(digest.to_string())
     }
@@ -557,15 +795,15 @@ impl CacheInner {
             .state
             .lock()
             .expect("firmware cache state mutex poisoned");
-        if self.cancel.is_cancelled() {
-            return Err(CacheError::Cancelled);
-        }
+        self.check_cancelled()?;
+        #[cfg(feature = "test-support")]
+        self.gates.open.run();
         if !state.initialized {
             self.reconcile(&mut state)?;
         }
         if let Some(entry) = state.entries.get_mut(&digest) {
             if entry.downloading {
-                return Ok(OpenResult::Lookup(CacheLookup::Pending));
+                return Ok(OpenResult::Pending);
             }
             if let Some(error) = entry.failure.take() {
                 state.prune(retained);
@@ -577,70 +815,47 @@ impl CacheInner {
         let metadata = regular_metadata(&path)?;
         let partial_length = regular_bytes(&partial)?;
         state.prune(retained);
-        let entry = state.entries.entry(digest).or_default();
-        entry.observe(metadata.as_ref(), partial_length.unwrap_or(0))?;
-        if entry.readers.load(Ordering::Acquire) != 0 && !entry.matches_lease(metadata.as_ref()) {
-            // The pathname may be absent or already replaced. Keep the old
-            // inode and replacement charged, without leasing two generations.
-            return Ok(OpenResult::Lookup(CacheLookup::Pending));
+        let CacheState {
+            entries, last_use, ..
+        } = &mut *state;
+        let entry = entries.entry(digest).or_default();
+        let leased = entry.observe(metadata.as_ref(), partial_length.unwrap_or(0))?;
+        if leased
+            .as_ref()
+            .is_some_and(|leased| !same_inode(leased, metadata.as_ref()))
+        {
+            return Ok(OpenResult::Pending);
         }
         if metadata.is_some() {
-            let mut file = File::open(&path)?;
-            match verify_sha256_file(&mut file, &digest.to_string()) {
-                Ok(()) => {
-                    let Ok(reader_permit) = self.readers.clone().try_acquire_owned() else {
-                        return Ok(OpenResult::Lookup(CacheLookup::Pending));
-                    };
-                    let verified_metadata = file.metadata()?;
-                    let entry = state.entries.get(&digest).expect("opened artifact exists");
-                    if entry.readers.load(Ordering::Acquire) != 0
-                        && !entry.matches_lease(Some(&verified_metadata))
-                    {
-                        self.refresh_entry(
-                            digest,
-                            state
-                                .entries
-                                .get_mut(&digest)
-                                .expect("opened artifact exists"),
-                        )?;
-                        return Ok(OpenResult::Lookup(CacheLookup::Pending));
-                    }
-                    file.rewind()?;
-                    state.last_use = state.last_use.saturating_add(1);
-                    let last_use = state.last_use;
-                    let entry = state.entries.entry(digest).or_default();
-                    entry.last_use = last_use;
-                    if entry.readers.load(Ordering::Acquire) == 0 {
-                        entry.leased_file = Some(verified_metadata.clone());
-                    }
-                    entry.readers.fetch_add(1, Ordering::AcqRel);
-                    let lease = Arc::new(ReaderLease {
-                        cache: self.clone(),
-                        readers: entry.readers.clone(),
-                        _capacity: reader_permit,
-                    });
-                    self.refresh_entry(digest, entry)?;
-                    return Ok(OpenResult::Lookup(CacheLookup::Ready(CachedArtifact {
-                        content_length: verified_metadata.len(),
-                        file: Arc::new(Mutex::new(file)),
-                        lease,
-                        read: None,
-                        buffered: Vec::new(),
-                        offset: 0,
-                        eof: false,
-                    })));
-                }
-                Err(error) => {
-                    if state
-                        .entries
-                        .get(&digest)
-                        .is_some_and(|entry| entry.readers.load(Ordering::Acquire) != 0)
-                    {
-                        return Err(CacheError::Io(io::Error::other(error.to_string())));
-                    }
-                    fs::remove_file(&path)?;
-                }
+            let Ok(reader_permit) = self.readers.clone().try_acquire_owned() else {
+                return Ok(OpenResult::Pending);
+            };
+            let file = Arc::new(File::open(&path)?);
+            let opened = file.metadata()?;
+            if leased
+                .as_ref()
+                .is_some_and(|leased| !same_inode(leased, Some(&opened)))
+            {
+                self.refresh_entry(digest, entry)?;
+                return Ok(OpenResult::Pending);
             }
+            // Every reader has its own cursor. All leases on this generation
+            // keep one descriptor available for byte accounting until they finish.
+            {
+                let mut readers = entry.readers.lock().expect("cache reader mutex poisoned");
+                readers.file.get_or_insert_with(|| file.clone());
+                readers.count += 1;
+            }
+            let lease = Arc::new(ReaderLease {
+                file,
+                _registration: ReaderRegistration(entry.readers.clone()),
+                cache: self.clone(),
+                _capacity: reader_permit,
+            });
+            self.refresh_entry(digest, entry)?;
+            *last_use = last_use.saturating_add(1);
+            entry.last_use = *last_use;
+            return Ok(OpenResult::Verify(lease));
         }
         if partial_length.is_some() {
             fs::remove_file(&partial)?;
@@ -792,7 +1007,7 @@ impl CacheInner {
                     **digest != protected
                         && !retained.contains(digest)
                         && !entry.downloading
-                        && entry.readers.load(Ordering::Acquire) == 0
+                        && entry.reader_count() == 0
                         && !obstructed.contains(*digest)
                         && entry.charged_bytes != 0
                 })
@@ -895,18 +1110,23 @@ impl Drop for CacheReservation {
 }
 
 struct ReaderLease {
+    // Fields drop in declaration order. Close the stream descriptor before
+    // unregistering this reader, including when verification returns an error.
+    file: Arc<File>,
+    _registration: ReaderRegistration,
     cache: Arc<CacheInner>,
-    readers: Arc<AtomicUsize>,
     _capacity: OwnedSemaphorePermit,
 }
 
-impl Drop for ReaderLease {
+struct ReaderRegistration(Arc<Mutex<ActiveReaders>>);
+
+impl Drop for ReaderRegistration {
     fn drop(&mut self) {
-        self.readers
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_sub(1)
-            })
-            .expect("reader lease was counted");
+        let mut readers = self.0.lock().expect("cache reader mutex poisoned");
+        readers.count -= 1;
+        if readers.count == 0 {
+            readers.file = None;
+        }
     }
 }
 
@@ -915,7 +1135,6 @@ impl Drop for ReaderLease {
 /// physical reads after the response or its read future is dropped.
 pub struct CachedArtifact {
     content_length: u64,
-    file: Arc<Mutex<File>>,
     lease: Arc<ReaderLease>,
     read: Option<oneshot::Receiver<io::Result<Vec<u8>>>>,
     buffered: Vec<u8>,
@@ -933,6 +1152,43 @@ impl fmt::Debug for CachedArtifact {
 }
 
 impl CachedArtifact {
+    fn verify(lease: Arc<ReaderLease>, digest: ArtifactDigest) -> Result<CacheLookup, CacheError> {
+        let mut file = lease.file.as_ref();
+        let cache = &lease.cache;
+        #[cfg(feature = "test-support")]
+        cache.gates.verify.run();
+        let actual = cache.checksum(file)?;
+        cache.check_cancelled()?;
+        let opened = file.metadata()?;
+        if actual != digest.0 {
+            // Other readers keep their descriptors and charges. Only unlink
+            // this corrupt generation under the cache owner's filesystem lock.
+            #[cfg(test)]
+            cache.corrupt_file_verified.notify_one();
+            let _state = cache
+                .state
+                .lock()
+                .expect("firmware cache state mutex poisoned");
+            cache.check_cancelled()?;
+            let path = cache.path(digest);
+            let current = regular_metadata(&path);
+            cache.check_cancelled()?;
+            if same_inode(&opened, current?.as_ref()) {
+                fs::remove_file(path)?;
+            }
+            return Ok(CacheLookup::Pending);
+        }
+        file.rewind()?;
+        Ok(CacheLookup::Ready(Self {
+            content_length: opened.len(),
+            lease,
+            read: None,
+            buffered: Vec::new(),
+            offset: 0,
+            eof: false,
+        }))
+    }
+
     /// Returns the verified file length, in bytes.
     pub fn content_length(&self) -> u64 {
         self.content_length
@@ -957,7 +1213,6 @@ impl AsyncRead for CachedArtifact {
         }
         if reader.offset == reader.buffered.len() {
             if reader.read.is_none() {
-                let file = reader.file.clone();
                 let lease = reader.lease.clone();
                 let (response, received) = oneshot::channel();
                 let span = tracing::Span::current();
@@ -965,13 +1220,8 @@ impl AsyncRead for CachedArtifact {
                 let worker_lease = lease.clone();
                 let work = async move {
                     let result = blocking(move || {
-                        let _lease = worker_lease;
-                        let read_file = file;
                         let mut contents = vec![0; 64 * 1024];
-                        let length = read_file
-                            .lock()
-                            .expect("firmware reader mutex poisoned")
-                            .read(&mut contents)?;
+                        let length = worker_lease.file.as_ref().read(&mut contents)?;
                         contents.truncate(length);
                         Ok(contents)
                     })

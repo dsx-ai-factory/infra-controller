@@ -4,6 +4,7 @@
 package nico
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -343,6 +344,11 @@ func (m *Manager) GetPowerStatus(
 // Core resolves the rack profile's desired firmware object for RMS, or skips
 // an already-current switch on the non-RMS direct path.
 func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
+	err := m.ValidateFirmwareControl(info)
+	if err != nil {
+		return err
+	}
+
 	log.Debug().
 		Str("components", target.String()).
 		Str("target_version", info.TargetVersion).
@@ -373,6 +379,7 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		Target:                &corev1.UpdateComponentFirmwareRequest_Switches{Switches: switchTarget},
 		TargetVersion:         info.TargetVersion,
 		ForceUpdate:           info.OverrideVersionCheck,
+		CredentialOverrides:   info.CredentialOverrides,
 		BypassStateController: info.OverrideReadinessCheck,
 	}
 	if info.AccessToken != "" {
@@ -384,11 +391,17 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	}
 	resp, err := m.nicoClient.UpdateComponentFirmware(ctx, req)
 	if err != nil {
+		if info.CredentialOverrides != nil {
+			return nicoprovider.FirmwareRPCError("dispatch", err)
+		}
 		return fmt.Errorf("UpdateComponentFirmware failed: %w", err)
 	}
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			if info.CredentialOverrides != nil {
+				return fmt.Errorf("%s", nicoprovider.FirmwareResultDiagnostic(r, target.UsesMACAddresses()))
+			}
 			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
@@ -460,17 +473,16 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 		return err
 	}
 
-	var referenceJSON string
+	var referenceJSON []byte
 	for _, id := range target.Identifiers {
 		actual, ok := actualFirmware[id]
 		if !ok {
 			return fmt.Errorf("switch %s has no firmware version data", id)
 		}
-		encoded, _ := json.Marshal(actual)
-		currentJSON := string(encoded)
-		if referenceJSON == "" {
+		currentJSON, _ := json.Marshal(actual)
+		if len(referenceJSON) == 0 {
 			referenceJSON = currentJSON
-		} else if currentJSON != referenceJSON {
+		} else if !bytes.Equal(currentJSON, referenceJSON) {
 			return fmt.Errorf(
 				"NVSwitch firmware versions are inconsistent: switch %s has %s, expected %s",
 				id, currentJSON, referenceJSON,
@@ -480,7 +492,7 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 
 	log.Info().
 		Int("switch_count", target.Len()).
-		Str("firmware_versions", referenceJSON).
+		Str("firmware_versions", string(referenceJSON)).
 		Msg("All NVSwitch firmware versions are consistent")
 	return nil
 }
@@ -489,6 +501,11 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 // Core may return multiple sub-component statuses (BMC/CPLD/BIOS/NVOS) per switch, so we
 // aggregate them into a single status per switch UUID.
 func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (map[string]operations.FirmwareUpdateStatus, error) {
+	return m.GetFirmwareStatusWithCredentials(ctx, target, nil)
+}
+
+// GetFirmwareStatusWithCredentials forwards the dispatch credentials for polling.
+func (m *Manager) GetFirmwareStatusWithCredentials(ctx context.Context, target common.Target, credentials *corev1.ComponentCredentialOverrides) (map[string]operations.FirmwareUpdateStatus, error) {
 	log.Debug().
 		Str("components", target.String()).
 		Msg("GetFirmwareStatus called for NVSwitch")
@@ -497,7 +514,7 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentFirmwareStatusRequest{}
+	req := &corev1.GetComponentFirmwareStatusRequest{CredentialOverrides: credentials}
 	if target.UsesMACAddresses() {
 		req.Target = &corev1.GetComponentFirmwareStatusRequest_SwitchBmcMacs{
 			SwitchBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
@@ -510,6 +527,9 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
 	if err != nil {
+		if credentials != nil {
+			return nil, nicoprovider.FirmwareRPCError("status query", err)
+		}
 		return nil, fmt.Errorf("GetComponentFirmwareStatus failed: %w", err)
 	}
 
@@ -517,6 +537,11 @@ func (m *Manager) GetFirmwareStatus(ctx context.Context, target common.Target) (
 	// sub-component updates (BMC, CPLD, BIOS, NVOS) for the same switch.
 	grouped := make(map[string][]*corev1.FirmwareUpdateStatus)
 	for _, s := range resp.GetStatuses() {
+		if credentials != nil && s.GetResult() != nil &&
+			(s.GetResult().GetError() != "" || s.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS ||
+				nicoprovider.MapFirmwareState(s.GetState()) == operations.FirmwareUpdateStateFailed) {
+			s.Result.Error = nicoprovider.FirmwareResultDiagnostic(s.GetResult(), target.UsesMACAddresses())
+		}
 		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		grouped[compID] = append(grouped[compID], s)
 	}
@@ -655,4 +680,16 @@ func aggregateNICoStatuses(compID string, statuses []*corev1.FirmwareUpdateStatu
 		ComponentID: compID,
 		State:       operations.FirmwareUpdateStateQueued,
 	}
+}
+
+// ValidateFirmwareControl rejects device credentials that this execution path
+// would otherwise ignore. It runs before any device operation.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	if info.DeviceCredentials == nil && info.CredentialOverrides == nil {
+		return nil
+	}
+	if !info.OverrideReadinessCheck {
+		return fmt.Errorf("device credential overrides require readiness override for direct dispatch")
+	}
+	return nil
 }

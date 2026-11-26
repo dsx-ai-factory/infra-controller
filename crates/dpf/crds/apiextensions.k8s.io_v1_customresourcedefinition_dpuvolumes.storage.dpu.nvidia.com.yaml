@@ -60,8 +60,9 @@ spec:
             properties:
               accessModes:
                 description: |-
-                  Access modes define how the volume can be mounted. These modes are directly passed to the
-                  PersistentVolumeClaim created for the Vendor CSI Plugin selected by the DPUStoragePolicy.
+                  Access modes define how the volume can be mounted. These modes are
+                  directly passed to the PersistentVolumeClaim created for the Vendor CSI
+                  Plugin selected by the DPUStoragePolicy.
                 items:
                   type: string
                 maxItems: 3
@@ -72,22 +73,26 @@ spec:
                     values: ReadWriteOnce, ReadOnlyMany, ReadWriteMany'
                   rule: self.all(mode, mode in ['ReadWriteOnce', 'ReadOnlyMany', 'ReadWriteMany'])
               dpuStoragePolicyName:
-                description: Name of the DPUStoragePolicyName object that will be
-                  used to create the volume.
+                description: |-
+                  Name of the DPUStoragePolicyName object that will be used to create the
+                  volume.
                 minLength: 1
                 type: string
               parameters:
                 additionalProperties:
                   type: string
                 default: {}
-                description: Additional parameters for the volume, these parameters
-                  are merged with the values from the DPUStoragePolicy object.
+                description: |-
+                  Additional parameters for the volume, these parameters are merged with
+                  the values from the DPUStoragePolicy object.
                 type: object
               resources:
                 description: |-
-                  Resources represents the storage resources requested for the volume. These resource requirements
-                  are directly passed to the PersistentVolumeClaim created for the Vendor CSI Plugin selected
-                  by the DPUStoragePolicy. Since volume resizing is not supported, modifications to the resource request are prohibited.
+                  Resources represents the storage resources requested for the volume.
+                  These resource requirements are directly passed to the
+                  PersistentVolumeClaim created for the Vendor CSI Plugin selected by the
+                  DPUStoragePolicy. Since volume resizing is not supported, modifications
+                  to the resource request are prohibited.
                 properties:
                   limits:
                     additionalProperties:
@@ -120,8 +125,9 @@ spec:
               volumeMode:
                 default: Filesystem
                 description: |-
-                  Volume mode defines how the volume should be mounted and used. This value is directly passed to the
-                  PersistentVolumeClaim created for the Vendor CSI Plugin selected by the DPUStoragePolicy.
+                  Volume mode defines how the volume should be mounted and used. This value
+                  is directly passed to the PersistentVolumeClaim created for the Vendor
+                  CSI Plugin selected by the DPUStoragePolicy.
                 enum:
                 - Filesystem
                 - Block
@@ -203,8 +209,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
               phase:
@@ -214,16 +221,19 @@ spec:
                 - Bound
                 type: string
               state:
-                description: State of the volume. This field is managed by the controller.
-                  User usually do not need to set fields from this struct.
+                description: |-
+                  State of the volume. This field is managed by the controller. User
+                  usually do not need to set fields from this struct.
                 properties:
                   csiDriverName:
-                    description: CSIDriverName contains the name of the CSI driver
-                      in the DPU cluster that was selected for volume creation.
+                    description: |-
+                      CSIDriverName contains the name of the CSI driver in the DPU cluster that
+                      was selected for volume creation.
                     type: string
                   dpuCluster:
-                    description: DPUCluster contains the reference to the DPUCluster
-                      object that was selected for volume creation.
+                    description: |-
+                      DPUCluster contains the reference to the DPUCluster object that was
+                      selected for volume creation.
                     properties:
                       name:
                         description: Name specifies the name of the referenced object
@@ -242,13 +252,15 @@ spec:
                     additionalProperties:
                       type: string
                     description: |-
-                      Parameters contains the final set of parameters for volume creation, computed by merging
-                      the parameters from the DPUStoragePolicy object with user-provided parameters.
+                      Parameters contains the final set of parameters for volume creation,
+                      computed by merging the parameters from the DPUStoragePolicy object with
+                      user-provided parameters.
                     type: object
                   persistentVolumeClaimRef:
-                    description: PersistentVolumeClaimRef contains the reference to
-                      the PersistentVolumeClaim object in the DPU cluster that was
-                      created for the volume.
+                    description: |-
+                      PersistentVolumeClaimRef contains the reference to the
+                      PersistentVolumeClaim object in the DPU cluster that was created for
+                      the volume.
                     properties:
                       name:
                         description: Name specifies the name of the referenced object
@@ -264,21 +276,24 @@ spec:
                     - namespace
                     type: object
                   selectedDPUStorageVendorName:
-                    description: SelectedDPUStorageVendorName contains the name of
-                      the DPUStorageVendor object that was selected for volume creation.
+                    description: |-
+                      SelectedDPUStorageVendorName contains the name of the DPUStorageVendor
+                      object that was selected for volume creation.
                     type: string
                   storageClassName:
-                    description: StorageClassName contains the name of the storage
-                      class in the DPU cluster that was selected for volume creation.
+                    description: |-
+                      StorageClassName contains the name of the storage class in the DPU
+                      cluster that was selected for volume creation.
                     type: string
                   storageVendorPluginName:
-                    description: StorageVendorPluginName contains the name of the
-                      storage vendor plugin deployed on the DPU cluster that was selected
-                      for volume creation.
+                    description: |-
+                      StorageVendorPluginName contains the name of the storage vendor plugin
+                      deployed on the DPU cluster that was selected for volume creation.
                     type: string
                   volumeInfo:
-                    description: VolumeInfo contains a subset of fields from the PersistentVolume
-                      object created in the DPU cluster
+                    description: |-
+                      VolumeInfo contains a subset of fields from the PersistentVolume object
+                      created in the DPU cluster
                     properties:
                       accessModes:
                         description: Actual access modes of the volume in the DPU
@@ -300,14 +315,16 @@ spec:
                           type: string
                         description: |-
                           VolumeAttributes from the PersistentVolume object in the DPU cluster
-                          This field usually contains parameters returned by the Vendor CSI plugin on volume creation.
+                          This field usually contains parameters returned by the Vendor CSI plugin
+                          on volume creation.
                         type: object
                       volumeMode:
                         description: Actual volume mode of the volume in the DPU cluster
                         type: string
                       volumeName:
-                        description: VolumeName contains the name of the PersistentVolume
-                          object in the DPU cluster
+                        description: |-
+                          VolumeName contains the name of the PersistentVolume object in the DPU
+                          cluster
                         type: string
                     type: object
                 type: object

@@ -190,14 +190,11 @@ pub(super) async fn dns_html(AxumState(state): AxumState<Arc<Api>>) -> Response 
         };
 
     // Build domain ID -> name map, and count records per zone.
-    let domain_name_map: HashMap<String, String> = domains
-        .iter()
-        .map(|d| (d.id.to_string(), d.name.clone()))
-        .collect();
+    let domain_name_map: HashMap<_, _> = domains.iter().map(|d| (d.id, d.name.as_str())).collect();
 
-    let mut record_counts: HashMap<String, usize> = HashMap::new();
+    let mut record_counts: HashMap<_, usize> = HashMap::new();
     for r in &db_records {
-        *record_counts.entry(r.domain_id.to_string()).or_default() += 1;
+        *record_counts.entry(r.domain_id).or_default() += 1;
     }
 
     let zones: Vec<DnsZoneDisplay> = domains
@@ -211,7 +208,7 @@ pub(super) async fn dns_html(AxumState(state): AxumState<Arc<Api>>) -> Response 
             DnsZoneDisplay {
                 name: d.name.clone(),
                 soa_serial,
-                record_count: record_counts.get(&d.id.to_string()).copied().unwrap_or(0),
+                record_count: record_counts.get(&d.id).copied().unwrap_or(0),
             }
         })
         .collect();
@@ -220,9 +217,10 @@ pub(super) async fn dns_html(AxumState(state): AxumState<Arc<Api>>) -> Response 
         .into_iter()
         .map(|r| {
             let zone = domain_name_map
-                .get(&r.domain_id.to_string())
-                .cloned()
-                .unwrap_or_default();
+                .get(&r.domain_id)
+                .copied()
+                .unwrap_or_default()
+                .to_string();
             DnsRecordDisplay {
                 q_name: r.q_name,
                 q_type: r.q_type,
@@ -536,9 +534,9 @@ pub(super) async fn overlay_html(AxumState(state): AxumState<Arc<Api>>) -> Respo
     };
 
     // Group prefixes by VPC ID.
-    let mut prefixes_by_vpc: HashMap<String, Vec<OverlayVpcPrefixDisplay>> = HashMap::new();
+    let mut prefixes_by_vpc: HashMap<_, Vec<OverlayVpcPrefixDisplay>> = HashMap::new();
     for p in rpc_prefixes {
-        let vpc_id = p.vpc_id.map(|id| id.to_string()).unwrap_or_default();
+        let vpc_id = p.vpc_id;
         let prefix_str = p
             .config
             .as_ref()
@@ -571,8 +569,8 @@ pub(super) async fn overlay_html(AxumState(state): AxumState<Arc<Api>>) -> Respo
     let vpcs: Vec<OverlayVpcDisplay> = rpc_vpcs
         .into_iter()
         .map(|vpc| {
+            let prefixes = prefixes_by_vpc.remove(&vpc.id).unwrap_or_default();
             let id = vpc.id.map(|id| id.to_string()).unwrap_or_default();
-            let prefixes = prefixes_by_vpc.remove(&id).unwrap_or_default();
             let tenant = vpc
                 .config
                 .as_ref()

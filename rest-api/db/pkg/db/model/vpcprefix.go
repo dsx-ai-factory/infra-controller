@@ -83,6 +83,7 @@ type VpcPrefix struct {
 	Tenant          *Tenant    `bun:"rel:belongs-to,join:tenant_id=id"`
 	IPBlockID       *uuid.UUID `bun:"ip_block_id,type:uuid"`
 	IPBlock         *IPBlock   `bun:"rel:belongs-to,join:ip_block_id=id"`
+	Labels          Labels     `bun:"labels,type:jsonb,notnull,default:'{}'"`
 	Prefix          string     `bun:"prefix,notnull"`
 	PrefixLength    int        `bun:"prefix_length,notnull"`
 	Status          string     `bun:"status,notnull"`
@@ -109,7 +110,8 @@ func (vp *VpcPrefix) ToProto(vpc *Vpc) *corev1.VpcPrefix {
 			Prefix: vp.Prefix,
 		},
 		Metadata: &corev1.Metadata{
-			Name: vp.Name,
+			Name:   vp.Name,
+			Labels: vp.Labels.ToProto(),
 		},
 	}
 	if vpc != nil {
@@ -157,6 +159,7 @@ func (vp *VpcPrefix) GetCIDR() (netip.Prefix, error) {
 //     the proto omits both the deprecated top-level field and the
 //     structured `Metadata` / `Config` field; `FromProto` is a full
 //     overwrite of those fields, not a merge.
+//   - `Labels` is replaced from `Metadata.Labels`; omitted metadata clears it.
 //   - `VpcID` is cleared when the proto omits it OR when the proto value
 //     is unparseable, so `FromProto` is a clean reset rather than a
 //     partial merge.
@@ -173,6 +176,7 @@ func (vp *VpcPrefix) FromProto(proto *corev1.VpcPrefix) {
 	if proto.Metadata != nil && proto.Metadata.Name != "" {
 		vp.Name = proto.Metadata.Name
 	}
+	vp.Labels.FromProto(proto.Metadata.GetLabels())
 	vp.Prefix = proto.Prefix
 	if proto.Config != nil && proto.Config.Prefix != "" {
 		vp.Prefix = proto.Config.Prefix
@@ -205,6 +209,7 @@ type VpcPrefixCreateInput struct {
 	VpcID        uuid.UUID
 	TenantID     uuid.UUID
 	IpBlockID    *uuid.UUID
+	Labels       map[string]string
 	Prefix       string
 	PrefixLength int
 	Status       string
@@ -219,6 +224,7 @@ type VpcPrefixUpdateInput struct {
 	VpcID           *uuid.UUID
 	TenantID        *uuid.UUID
 	IpBlockID       *uuid.UUID
+	Labels          map[string]string
 	Prefix          *string
 	PrefixLength    *int
 	Status          *string
@@ -311,6 +317,10 @@ func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPref
 	if id == nil {
 		id = cutil.GetPtr(uuid.New())
 	}
+	labels := Labels(input.Labels)
+	if labels == nil {
+		labels = Labels{}
+	}
 
 	vpp := &VpcPrefix{
 		ID:              *id,
@@ -320,6 +330,7 @@ func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPref
 		VpcID:           input.VpcID,
 		TenantID:        input.TenantID,
 		IPBlockID:       input.IpBlockID,
+		Labels:          labels,
 		Prefix:          input.Prefix,
 		PrefixLength:    input.PrefixLength,
 		IsMissingOnSite: false,
@@ -415,9 +426,10 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 	if ok {
 		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
-				Where("to_tsvector('english', (coalesce(vp.name, ' ') || ' ' || coalesce(vp.status, ' '))) @@ to_tsquery('english', ?)", *normalizedTokens).
+				Where("to_tsvector('english', (coalesce(vp.name, ' ') || ' ' || coalesce(vp.status, ' ') || ' ' || coalesce(vp.labels::text, ' '))) @@ to_tsquery('english', ?)", *normalizedTokens).
 				WhereOr("vp.name ILIKE ?", "%"+searchQuery+"%").
-				WhereOr("vp.status ILIKE ?", "%"+searchQuery+"%")
+				WhereOr("vp.status ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("vp.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
 		cotel.SetAttribute(vpDAOSpan, attribute.String("search_query", searchQuery))
 	}
@@ -483,6 +495,10 @@ func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPref
 		vp.IPBlockID = input.IpBlockID
 		updatedFields = append(updatedFields, "ip_block_id")
 		cotel.SetAttribute(vpDAOSpan, attribute.String("ip_block_id", input.IpBlockID.String()))
+	}
+	if input.Labels != nil {
+		vp.Labels = input.Labels
+		updatedFields = append(updatedFields, "labels")
 	}
 	if input.Prefix != nil {
 		vp.Prefix = *input.Prefix

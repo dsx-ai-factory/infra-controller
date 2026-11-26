@@ -134,9 +134,9 @@ mod opt_duration_str {
             None => s.serialize_none(),
             Some(d) => {
                 if d.subsec_millis() > 0 || d.as_secs() == 0 {
-                    s.serialize_str(&format!("{}ms", d.as_millis()))
+                    s.collect_str(&format_args!("{}ms", d.as_millis()))
                 } else {
-                    s.serialize_str(&format!("{}s", d.as_secs()))
+                    s.collect_str(&format_args!("{}s", d.as_secs()))
                 }
             }
         }
@@ -381,6 +381,29 @@ impl PlatformTimingProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_duration_serialization_preserves_units_and_absence() {
+        carbide_test_support::value_scenarios!(run = |duration| {
+            opt_duration_str::serialize(&duration, serde_json::value::Serializer)
+                .expect("optional duration serializes")
+        };
+            "seconds" {
+                Some(Duration::from_secs(2)) => serde_json::json!("2s"),
+            }
+            "milliseconds" {
+                Some(Duration::from_millis(1500)) => serde_json::json!("1500ms"),
+                Some(Duration::ZERO) => serde_json::json!("0ms"),
+            }
+            "submillisecond truncation" {
+                Some(Duration::from_nanos(1)) => serde_json::json!("0ms"),
+                Some(Duration::from_secs(1) + Duration::from_nanos(1)) => serde_json::json!("1s"),
+            }
+            "absent" {
+                None => serde_json::Value::Null,
+            }
+        );
+    }
 
     // ── Phase 2: platform defaults ────────────────────────────────────────────
 

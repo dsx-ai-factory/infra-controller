@@ -15,9 +15,9 @@ nico-admin-cli os-image create <-i|--id>
 <-t|--tenant-org-id> [-v|--create-volume]
 [-s|--capacity] [-n|--name]
 [-d|--description] [-y|--auth-type]
-[-p|--auth-token] [-f|--rootfs-id]
-[-l|--rootfs-label] [-b|--boot-disk]
-[--bootfs-id] [--extended] [--efifs-id]
+[--extended] [-p|--auth-token]
+[-f|--rootfs-id] [-l|--rootfs-label]
+[-b|--boot-disk] [--bootfs-id] [--efifs-id]
 [--sort-by] [-h|--help]
 ```
 
@@ -69,6 +69,14 @@ Description of the OS image entry.
 
 Authentication type, usually Bearer.
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `-p, --auth-token <AUTH_TOKEN>`
 
 Authentication token, usually in base64.
@@ -95,14 +103,6 @@ specified'.
 `--bootfs-id <BOOTFS_ID>`
 
 UUID of the image boot filesystem (/boot)
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--efifs-id <EFIFS_ID>`
 

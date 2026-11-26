@@ -13,12 +13,15 @@ import (
 
 // Vpc represents a simplified VPC
 type Vpc struct {
-	ID                        string    `json:"id"`
-	Name                      string    `json:"name"`
-	Description               *string   `json:"description"`
-	NetworkVirtualizationType string    `json:"networkVirtualizationType"`
-	Created                   time.Time `json:"created"`
-	Updated                   time.Time `json:"updated"`
+	ID                        string            `json:"id"`
+	Name                      string            `json:"name"`
+	Description               *string           `json:"description"`
+	SiteID                    string            `json:"siteId"`
+	Labels                    map[string]string `json:"labels"`
+	Status                    string            `json:"status"`
+	NetworkVirtualizationType string            `json:"networkVirtualizationType"`
+	Created                   time.Time         `json:"created"`
+	Updated                   time.Time         `json:"updated"`
 }
 
 // VpcCreateRequest is a request to create a VPC
@@ -72,7 +75,11 @@ func toStandardVpcUpdateRequest(request VpcUpdateRequest) standard.VpcUpdateRequ
 }
 
 func vpcFromStandard(api standard.VPC) Vpc {
-	v := Vpc{}
+	v := Vpc{
+		SiteID: api.GetSiteId(),
+		Labels: api.Labels,
+		Status: string(api.GetStatus()),
+	}
 	if api.Id != nil {
 		v.ID = *api.Id
 	}

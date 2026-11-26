@@ -196,17 +196,17 @@ pub(crate) async fn handle_show_measurement_bundle(
     api: &Api,
     req: ShowMeasurementBundleRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut db_reader = api.db_reader();
     let bundle = match req.selector {
         Some(show_measurement_bundle_request::Selector::BundleId(bundle_uuid)) => {
-            db::measured_boot::bundle::from_id(&mut txn, bundle_uuid)
+            db::measured_boot::bundle::from_id(&mut db_reader, bundle_uuid)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
                 })?
         }
         Some(show_measurement_bundle_request::Selector::BundleName(bundle_name)) => {
-            db::measured_boot::bundle::from_name(&mut txn, bundle_name)
+            db::measured_boot::bundle::from_name(&mut db_reader, bundle_name)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -218,7 +218,6 @@ pub(crate) async fn handle_show_measurement_bundle(
             );
         }
     };
-    txn.commit().await?;
 
     Ok(ShowMeasurementBundleResponse {
         bundle: Some(bundle.into()),
@@ -268,11 +267,10 @@ pub(crate) async fn handle_list_measurement_bundle_machines(
     api: &Api,
     req: ListMeasurementBundleMachinesRequest,
 ) -> Result<ListMeasurementBundleMachinesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let machine_ids: Vec<String> = match req.selector {
         // Select by bundle ID.
         Some(list_measurement_bundle_machines_request::Selector::BundleId(bundle_uuid)) => {
-            get_machines_for_bundle_id(&mut txn, bundle_uuid)
+            get_machines_for_bundle_id(api.pg_pool(), bundle_uuid)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -283,7 +281,7 @@ pub(crate) async fn handle_list_measurement_bundle_machines(
         }
         // ...or by profile name.
         Some(list_measurement_bundle_machines_request::Selector::BundleName(bundle_name)) => {
-            get_machines_for_bundle_name(&mut txn, bundle_name)
+            get_machines_for_bundle_name(api.pg_pool(), bundle_name)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("{e}"),
@@ -296,8 +294,6 @@ pub(crate) async fn handle_list_measurement_bundle_machines(
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
 
-    txn.commit().await?;
-
     Ok(ListMeasurementBundleMachinesResponse { machine_ids })
 }
 
@@ -305,13 +301,13 @@ pub(crate) async fn handle_find_closest_match(
     api: &Api,
     req: FindClosestBundleMatchRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut db_reader = api.db_reader();
 
     let report_id = req
         .report_id
         .ok_or(CarbideError::MissingArgument("report_id"))?;
 
-    let report = db::measured_boot::report::from_id(&mut txn, report_id)
+    let report = db::measured_boot::report::from_id(&mut db_reader, report_id)
         .await
         .map_err(|e| CarbideError::Internal {
             message: format!("{e}"),
@@ -319,13 +315,13 @@ pub(crate) async fn handle_find_closest_match(
 
     // get profile
     let journal =
-        db::measured_boot::journal::get_journal_for_report_id(&mut txn, report_id).await?;
+        db::measured_boot::journal::get_journal_for_report_id(api.pg_pool(), report_id).await?;
 
     let bundle = match bundle::find_closest_match(
-        &mut txn,
-        journal.profile_id.ok_or(CarbideError::InvalidArgument(
-            "A journal without profile detected".into(),
-        ))?,
+        &mut db_reader,
+        journal.profile_id.ok_or_else(|| {
+            CarbideError::InvalidArgument("A journal without profile detected".into())
+        })?,
         &report.pcr_values(),
     )
     .await?
@@ -335,8 +331,6 @@ pub(crate) async fn handle_find_closest_match(
             return Ok(ShowMeasurementBundleResponse { bundle: None });
         }
     };
-
-    txn.commit().await?;
 
     Ok(ShowMeasurementBundleResponse {
         bundle: Some(bundle.into()),

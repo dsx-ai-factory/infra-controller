@@ -22,14 +22,15 @@ use model::machine_update_module::{
 };
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, Transaction};
 
-pub async fn get_fw_updates_running_count(txn: &mut PgConnection) -> Result<i64, DatabaseError> {
+pub async fn get_fw_updates_running_count(conn: impl DbReader<'_>) -> Result<i64, DatabaseError> {
     let query = r#"SELECT COUNT(*) as count FROM machines m
             WHERE (reprovisioning_requested->>'update_firmware')::boolean is true
             AND reprovisioning_requested->>'started_at' IS NOT NULL;"#;
     let (count,): (i64,) = sqlx::query_as(query)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::new("get_fw_updates_running_count", e))?;
 
@@ -102,7 +103,7 @@ pub async fn trigger_reprovisioning_for_managed_host(
 }
 
 pub async fn get_reprovisioning_machines(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<DpuMachineUpdate>, DatabaseError> {
     let reference = AutomaticFirmwareUpdateReference::REF_NAME.to_string() + "%";
 
@@ -115,20 +116,23 @@ pub async fn get_reprovisioning_machines(
 
     let result: Vec<DpuMachineUpdate> = sqlx::query_as(query)
         .bind(&reference)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(result)
 }
 
-pub async fn get_updated_machines(
-    txn: &mut PgConnection,
+pub async fn get_updated_machines<DB>(
+    conn: &mut DB,
     host_health_config: HostHealthConfig,
-) -> Result<Vec<DpuMachineUpdate>, DatabaseError> {
-    let machine_ids = crate::managed_host::load_host_ids(&mut *txn).await?;
+) -> Result<Vec<DpuMachineUpdate>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let machine_ids = crate::managed_host::load_host_ids(&mut *conn).await?;
     let snapshots = crate::managed_host::load_by_machine_ids(
-        txn,
+        conn,
         &machine_ids,
         LoadSnapshotOptions {
             include_history: false,

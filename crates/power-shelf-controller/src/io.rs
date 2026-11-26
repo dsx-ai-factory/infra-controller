@@ -19,6 +19,7 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{
     ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
     power_shelf as db_power_shelf,
@@ -28,7 +29,7 @@ use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfSearchFilter, state_sla,
 };
 use model::{DeletedFilter, StateSla};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate::context::PowerShelfStateHandlerContextObjects;
@@ -51,12 +52,9 @@ impl StateControllerIO for PowerShelfStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "power_shelf_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         db_power_shelf::find_ids(
-            txn,
+            pool,
             PowerShelfSearchFilter {
                 rack_id: None,
                 deleted: DeletedFilter::Include,
@@ -68,13 +66,17 @@ impl StateControllerIO for PowerShelfStateControllerIO {
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         power_shelf_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let mut power_shelves = db_power_shelf::find_by(
-            txn,
+            db,
             ObjectColumnFilter::One(db::power_shelf::IdColumn, power_shelf_id),
         )
         .await?;
@@ -98,7 +100,6 @@ impl StateControllerIO for PowerShelfStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

@@ -114,6 +114,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
 				Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP}},
 				IsDpfEnabled:             cutil.GetPtr(false),
+				DpuPolicy:                cutil.GetPtr(ExpectedMachineDpuPolicyInherit),
 				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 			},
 		},
@@ -123,7 +124,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Id:            &corev1.UUID{Value: "not-a-uuid"},
 				BmcMacAddress: "aa:bb",
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}, DpuPolicy: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
 		},
 		{
 			name: "empty metadata does not read obsolete names",
@@ -132,7 +133,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Description: cutil.GetPtr("obsolete-description"),
 				Metadata:    &corev1.Metadata{},
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}, DpuPolicy: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
 		},
 	}
 	for _, tc := range tests {
@@ -140,6 +141,27 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 			got := stored
 			got.FromProto(tc.proto, tc.linkedMachineID)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	dpuTests := []struct {
+		name   string
+		mode   *corev1.DpuMode
+		stored *ExpectedMachineDpuPolicy
+		want   *ExpectedMachineDpuPolicy
+	}{
+		{name: "omitted dpu mode is Inherit", stored: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "unspecified dpu mode is Inherit", mode: corev1.DpuMode_DPU_MODE_UNSPECIFIED.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "DPU mode is Inherit", mode: corev1.DpuMode_DPU_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyInherit)},
+		{name: "NIC mode is Nic", mode: corev1.DpuMode_NIC_MODE.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyNic)},
+		{name: "no DPU is Ignore", mode: corev1.DpuMode_NO_DPU.Enum(), want: cutil.GetPtr(ExpectedMachineDpuPolicyIgnore)},
+		{name: "unknown dpu mode clears stale state", mode: cutil.GetPtr(corev1.DpuMode(99)), stored: cutil.GetPtr(ExpectedMachineDpuPolicyNic), want: nil},
+	}
+	for _, tc := range dpuTests {
+		t.Run(tc.name, func(t *testing.T) {
+			em := &ExpectedMachine{DpuPolicy: tc.stored}
+			em.FromProto(&corev1.ExpectedMachine{Id: &corev1.UUID{Value: incomingID.String()}, DpuMode: tc.mode}, nil)
+			assert.Equal(t, tc.want, em.DpuPolicy)
 		})
 	}
 }
@@ -320,6 +342,16 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 		}
 		proto := em.ToProto(ExpectedMachineCredentials{})
 		assert.Nil(t, proto.ServerName)
+	})
+
+	t.Run("omits dpu_mode when no policy is stored", func(t *testing.T) {
+		em := &ExpectedMachine{ID: id}
+		assert.Nil(t, em.ToProto(ExpectedMachineCredentials{}).DpuMode)
+	})
+
+	t.Run("forwards a stored dpu policy", func(t *testing.T) {
+		em := &ExpectedMachine{ID: id, DpuPolicy: cutil.GetPtr(ExpectedMachineDpuPolicyNic)}
+		assert.Equal(t, corev1.DpuMode_NIC_MODE, em.ToProto(ExpectedMachineCredentials{}).GetDpuMode())
 	})
 }
 
@@ -839,6 +871,68 @@ func TestExpectedMachineSQLDAO_Get_MachineRelation_NoMatch(t *testing.T) {
 	assert.Nil(t, got.Machine, "Machine relation should be nil when MachineID is null")
 }
 
+func TestExpectedMachineSQLDAO_GetAllIDsAndUpdated(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	createExpectedMachine := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedComponentIDAndUpdated {
+		t.Helper()
+		created, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+			ExpectedMachineID:   id,
+			SiteID:              site.ID,
+			BmcMacAddress:       bmcMacAddress,
+			ChassisSerialNumber: "CHASSIS-" + bmcMacAddress,
+			CreatedBy:           user.ID,
+		})
+		require.NoError(t, err)
+		return ExpectedComponentIDAndUpdated{ID: created.ID, Updated: created.Updated}
+	}
+
+	// The row created first has the higher ID, so creation order differs from ID order.
+	siteIDsAndUpdated := []ExpectedComponentIDAndUpdated{
+		createExpectedMachine(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
+		createExpectedMachine(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
+	}
+	createExpectedMachine(site2, uuid.New(), "00:1B:44:11:3A:B9")
+
+	tests := []struct {
+		desc     string
+		filter   ExpectedMachineFilterInput
+		expected []ExpectedComponentIDAndUpdated
+	}{
+		{
+			desc:     "Site filter excludes other Sites and keeps creation order",
+			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+			expected: siteIDsAndUpdated,
+		},
+		{
+			desc:     "no matching ExpectedMachines returns an empty slice",
+			filter:   ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+		{
+			desc:     "empty ExpectedMachine ID filter returns an empty slice",
+			filter:   ExpectedMachineFilterInput{ExpectedMachineIDs: []uuid.UUID{}},
+			expected: []ExpectedComponentIDAndUpdated{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got, err := emsd.GetAllIDsAndUpdated(ctx, nil, tc.filter)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestExpectedMachineSQLDAO_GetAll(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
@@ -1284,7 +1378,36 @@ func TestExpectedMachineSQLDAO_Update(t *testing.T) {
 			expectedError: true,
 			errorContains: "duplicate key value",
 		},
+		{
+			desc: "set dpu policy where none was stored",
+			input: ExpectedMachineUpdateInput{
+				ExpectedMachineID: emsExp[2].ID,
+				DpuPolicy:         cutil.GetPtr(ExpectedMachineDpuPolicyIgnore),
+			},
+		},
+		{
+			desc: "change dpu policy",
+			input: ExpectedMachineUpdateInput{
+				ExpectedMachineID: emsExp[2].ID,
+				DpuPolicy:         cutil.GetPtr(ExpectedMachineDpuPolicyNic),
+			},
+		},
+		{
+			desc: "clear dpu policy back to Inherit",
+			input: ExpectedMachineUpdateInput{
+				ExpectedMachineID: emsExp[2].ID,
+				DpuPolicy:         cutil.GetPtr(ExpectedMachineDpuPolicyInherit),
+			},
+		},
 	}
+
+	// Rows created before the dpu_policy column existed hold NULL.
+	_, err := dbSession.DB.NewUpdate().Model((*ExpectedMachine)(nil)).
+		Set("dpu_policy = NULL").
+		Where("id = ?", emsExp[2].ID).
+		Exec(ctx)
+	require.NoError(t, err)
+
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			got, err := emsd.Update(ctx, nil, tc.input)
@@ -1309,6 +1432,9 @@ func TestExpectedMachineSQLDAO_Update(t *testing.T) {
 				}
 				if tc.input.Labels != nil {
 					assert.Equal(t, Labels(tc.input.Labels), got.Labels)
+				}
+				if tc.input.DpuPolicy != nil {
+					assert.Equal(t, tc.input.DpuPolicy, got.DpuPolicy)
 				}
 
 				if tc.verifyChildSpanner {
@@ -2256,6 +2382,62 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress(t *testing.T) {
 	assert.Equal(t, &preservedIPName, stored.Name)
 }
 
+// TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy guards against dpu_policy supplied for
+// one row clearing the value omitted by another row.
+func TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	originalPolicy := ExpectedMachineDpuPolicyInherit
+	preservedPolicy := ExpectedMachineDpuPolicyNic
+	updatedPolicy := ExpectedMachineDpuPolicyIgnore
+
+	emUpdated, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F6",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-A",
+		DpuPolicy:           &originalPolicy,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+	emPreserved, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F7",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-B",
+		DpuPolicy:           &preservedPolicy,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+
+	got, err := emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
+		{
+			ExpectedMachineID: emUpdated.ID,
+			DpuPolicy:         &updatedPolicy,
+		},
+		{
+			ExpectedMachineID: emPreserved.ID,
+		},
+	})
+	require.NoError(t, err)
+	if assert.Len(t, got, 2) {
+		assert.Equal(t, &updatedPolicy, got[0].DpuPolicy)
+		assert.Equal(t, &preservedPolicy, got[1].DpuPolicy)
+	}
+
+	stored, err := emsd.Get(ctx, nil, emPreserved.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, &preservedPolicy, stored.DpuPolicy)
+}
+
 // TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile guards against a
 // mixed batch clearing host_lifecycle_profile on rows that did not set it.
 // Because the shared bulk UPDATE applies one column list to every row, the field
@@ -2381,4 +2563,54 @@ func TestExpectedMachineSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
 
 	err = dao.DeleteAll(ctx, nil, ExpectedMachineFilterInput{})
 	assert.ErrorIs(t, err, db.ErrInvalidParams)
+}
+
+func TestExpectedMachineDpuPolicy_ProtoConversions(t *testing.T) {
+	tests := []struct {
+		policy ExpectedMachineDpuPolicy
+		mode   corev1.DpuMode
+	}{
+		{policy: ExpectedMachineDpuPolicyInherit, mode: corev1.DpuMode_DPU_MODE},
+		{policy: ExpectedMachineDpuPolicyNic, mode: corev1.DpuMode_NIC_MODE},
+		{policy: ExpectedMachineDpuPolicyIgnore, mode: corev1.DpuMode_NO_DPU},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.policy), func(t *testing.T) {
+			assert.Equal(t, tc.mode, tc.policy.ToProto())
+
+			var got ExpectedMachineDpuPolicy
+			got.FromProto(tc.mode)
+			assert.Equal(t, tc.policy, got)
+		})
+	}
+
+	t.Run("unspecified maps to Inherit", func(t *testing.T) {
+		got := ExpectedMachineDpuPolicyNic
+		got.FromProto(corev1.DpuMode_DPU_MODE_UNSPECIFIED)
+		assert.Equal(t, ExpectedMachineDpuPolicyInherit, got)
+	})
+
+	t.Run("unknown values map to empty", func(t *testing.T) {
+		got := ExpectedMachineDpuPolicyNic
+		got.FromProto(corev1.DpuMode(99))
+		assert.Equal(t, ExpectedMachineDpuPolicy(""), got)
+		assert.Equal(t, corev1.DpuMode_DPU_MODE_UNSPECIFIED, ExpectedMachineDpuPolicy("bogus").ToProto())
+	})
+}
+
+func TestExpectedMachineCreateInput_ToExpectedMachine(t *testing.T) {
+	t.Run("omitted settings use their defaults", func(t *testing.T) {
+		em := ExpectedMachineCreateInput{}.ToExpectedMachine()
+		assert.Equal(t, cutil.GetPtr(false), em.RetainBmcCredentials)
+		assert.Equal(t, cutil.GetPtr(ExpectedMachineDpuPolicyInherit), em.DpuPolicy)
+	})
+
+	t.Run("supplied settings are kept", func(t *testing.T) {
+		em := ExpectedMachineCreateInput{
+			RetainBmcCredentials: cutil.GetPtr(true),
+			DpuPolicy:            cutil.GetPtr(ExpectedMachineDpuPolicyIgnore),
+		}.ToExpectedMachine()
+		assert.Equal(t, cutil.GetPtr(true), em.RetainBmcCredentials)
+		assert.Equal(t, cutil.GetPtr(ExpectedMachineDpuPolicyIgnore), em.DpuPolicy)
+	})
 }

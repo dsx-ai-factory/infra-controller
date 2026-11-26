@@ -39,6 +39,9 @@
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
   
+  /* Every rounded corner: cards, tables, bubbles, chips, buttons, inputs */
+  --radius: 6px;
+
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
@@ -109,6 +112,35 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Thin scrollbars with a transparent track everywhere. scrollbar-width and
+   scrollbar-color style Chrome and Firefox; the ::-webkit-scrollbar rules
+   style Safari (Chrome ignores them once the standard properties are set). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  background-clip: content-box;
+  background-color: var(--scrollbar-thumb);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
 /* Suppress all transitions until the first paint is complete.  Without this,
    Safari (and sometimes Chrome) animates elements from browser-default styles
    to the CSS-defined styles on initial page load, producing flashes and layout
@@ -160,7 +192,7 @@ a:hover {
 pre {
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1rem;
   overflow-x: auto;
   font-family: 'Consolas', 'Monaco', monospace;
@@ -177,7 +209,7 @@ code {
   font-size: 0.9rem;
   background-color: var(--bg-tertiary);
   padding: 0.2rem 0.4rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 pre code {
@@ -200,7 +232,7 @@ nav {
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-right: 1px solid var(--border-color);
-  overflow-y: auto;
+  overflow: hidden;
   padding: 0;
   z-index: 1000;
   box-shadow: var(--shadow);
@@ -212,27 +244,27 @@ nav.nav-disabled {
   transition: opacity 0.2s ease;
 }
 
-/* Auto-hide scrollbar for navigation */
-nav::-webkit-scrollbar {
-  width: 8px;
+/* Only the links scroll, between the header and the footer. Positioned so
+   the sidebar script can measure links against it. The scrollbar shows only
+   while hovering the sidebar. */
+nav .nav-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-color: transparent transparent;
 }
 
-nav::-webkit-scrollbar-track {
-  background: transparent;
+nav:hover .nav-scroll {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
-nav::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0);
-  border-radius: 4px;
-  transition: background-color 0.3s;
+nav .nav-scroll::-webkit-scrollbar-thumb {
+  background-color: transparent;
 }
 
-nav:hover::-webkit-scrollbar-thumb {
+nav:hover .nav-scroll::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar-thumb);
-}
-
-nav::-webkit-scrollbar-thumb:hover {
-  background-color: var(--scrollbar-thumb-hover);
 }
 
 nav h3 {
@@ -257,12 +289,8 @@ nav h3 a:hover {
   text-decoration: none;
 }
 
-/* Site name and search stay put while the links scroll under them */
+/* Site name and search, above the scrolling links */
 nav .nav-header {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  /* Solid, so links scrolling underneath don't show through */
   background-color: var(--bg-nav-solid);
   border-bottom: 1px solid var(--border-color);
 }
@@ -270,9 +298,6 @@ nav .nav-header {
 /* Dark mode toggle (.btn-plain) in a footer pinned to the bottom of the
    sidebar, styled as a sidebar row */
 nav .nav-footer {
-  position: sticky;
-  bottom: 0;
-  margin-top: auto;
   padding: 0.5rem 0;
   background-color: var(--bg-nav-solid);
   border-top: 1px solid var(--border-color);
@@ -285,7 +310,7 @@ nav .nav-footer button.theme-toggle {
   width: calc(100% - 1.5rem);
   margin: 0 0.75rem;
   padding: 0.45rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text-secondary);
   font-size: 0.95rem;
   text-align: left;
@@ -339,7 +364,7 @@ nav details.nav-group > summary:hover {
   padding: 0.45rem 0.65rem;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   box-shadow: none;
   color: var(--text-secondary);
   font-size: 0.95rem;
@@ -400,7 +425,7 @@ nav details.nav-group > ul a {
   display: block;
   margin: 0.05rem 0;
   padding: 0.35rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text-secondary);
   font-size: 0.9rem;
   text-decoration: none;
@@ -426,7 +451,7 @@ nav ul a.active .nav-icon {
   color: var(--text-primary);
 }
 
-/* The footer sits at the bottom; nothing else shrinks to make room for it */
+/* The header and footer keep their size; only .nav-scroll shrinks */
 nav > * {
   flex-shrink: 0;
 }
@@ -495,7 +520,7 @@ nav > * {
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem 1rem 0.5rem 2.3rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
   transition: all 0.2s ease;
   box-shadow: var(--shadow-sm);
@@ -541,7 +566,7 @@ table {
   background-color: var(--bg-table);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
-  border-radius: 12px;
+  border-radius: var(--radius);
   overflow: hidden;
   box-shadow: var(--shadow);
   margin-bottom: 2rem;
@@ -628,7 +653,7 @@ td table {
   margin: 1.5rem;
   box-shadow: var(--shadow-sm);
   background-color: var(--bg-tertiary);
-  border-radius: 8px;
+  border-radius: var(--radius);
   width: calc(100% - 3rem);
   table-layout: auto;
   box-sizing: border-box;
@@ -694,7 +719,7 @@ select {
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem 1rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
   transition: all 0.2s ease;
   width: 100%;
@@ -731,7 +756,7 @@ input[type="checkbox"] {
   margin-bottom: 2rem;
   padding: 1.5rem;
   background-color: transparent;
-  border-radius: 12px;
+  border-radius: var(--radius);
   border: 1px solid var(--border-color);
   align-items: flex-end;
 }
@@ -762,7 +787,7 @@ input[type="checkbox"] {
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   padding: 0.5rem 1rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
   transition: all 0.2s ease;
   width: 100%;
@@ -792,7 +817,7 @@ input[type="submit"] {
   color: var(--text-on-accent);
   border: 1px solid var(--accent-green);
   padding: 0.5rem 1.25rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 1rem;
   font-weight: 500;
   cursor: pointer;
@@ -872,7 +897,7 @@ button.btn-plain:hover:enabled:not(.tab-button) {
   margin-right: 10px;
   background-color: var(--accent-green-light);
   color: var(--accent-green-hover);
-  border-radius: 8px;
+  border-radius: var(--radius);
   transition: opacity 1s ease;
   white-space: nowrap;
   font-size: 14px;
@@ -955,7 +980,7 @@ div#json a {
   background-color: var(--bg-accent-button);
   color: var(--text-on-accent);
   padding: 0.5rem 1.25rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 1px solid var(--accent-green);
   font-size: 1rem;
   font-weight: 500;
@@ -1022,7 +1047,7 @@ td form button {
 .bubble {
   display: inline-block;
   padding: 0.4rem 1rem;
-  border-radius: 20px;
+  border-radius: var(--radius);
   font-size: inherit;
   font-weight: 500;
   white-space: normal;
@@ -1100,7 +1125,7 @@ td.cell-warning a:hover {
 /* Health alert classification pills - used by backend health_alert_classifications_fmt filter */
 div.health_alert_classification {
   background-color: rgba(229, 62, 62, 0.15);
-  border-radius: 20px;
+  border-radius: var(--radius);
   margin: 2px;
   display: inline-block;
   padding: 0.4rem 1rem;
@@ -1161,7 +1186,7 @@ div.health_alert_classification {
   overflow-x: auto;
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 
@@ -1236,20 +1261,40 @@ table.overview td.cell-nowrap {
   white-space: nowrap;
 }
 
+/* A bubble in a no-wrap cell (e.g. an outdated agent version) stays on one line */
+table.overview td.cell-nowrap .bubble {
+  white-space: nowrap;
+  max-width: none;
+}
+
 /* A host's DPUs, under the host ID */
 .cell-dpu {
   margin-top: 0.2rem;
 }
 
 /* Long states wrap after a "/" onto up to two lines, then end in an ellipsis */
+/* States wrap only between words, so a crowded table can't crush them below
+   their longest word; table_filter.js then keeps the shorter forms elsewhere
+   instead of expanding them at the state's expense */
 table.overview .bubble.state-bubble,
 table.overview .state-cell .bubble {
   display: -webkit-inline-box;
+  /* Same height as the Health column's alert chips */
+  padding: 0.05rem 0.65rem;
+  font-size: 0.95rem;
+  line-height: 1.6;
   max-width: 17ch;
+  text-align: left;
   overflow: hidden;
-  border-radius: 12px;
+  /* Clip clamped lines at the text, so the top of a hidden third line (often
+     the SLA timer) can't peek into the bottom padding */
+  overflow: clip;
+  overflow-clip-margin: content-box;
+  border-radius: var(--radius);
   white-space: normal;
-  overflow-wrap: anywhere;
+  /* Break between words and at the "/" level breaks; split a word only when
+     it is longer than the bubble's maximum width */
+  overflow-wrap: break-word;
   vertical-align: middle;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -1298,16 +1343,29 @@ table.overview .state-cell .bubble {
 .health-alert-chip {
   padding: 0.05rem 0.5rem;
   border: 1px solid rgba(229, 62, 62, 0.35);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background-color: rgba(229, 62, 62, 0.08);
   color: var(--error);
   font-size: 0.9rem;
   font-weight: 500;
 }
 
+/* "Healthy" in place of alerts: an alert chip in success colors */
+.health-alert-chip.health-ok {
+  border-color: rgba(118, 185, 0, 0.45);
+  background-color: rgba(118, 185, 0, 0.1);
+  color: var(--success);
+}
+
 .health-alert-target {
   color: var(--text-secondary);
   font-size: 0.9rem;
+}
+
+/* ID targets read like the other targets, not as monospace IDs */
+.health-alert-target .machine_id {
+  font-family: inherit;
+  font-size: inherit;
 }
 
 /* Network device name; long names wrap after a "." first, anywhere as a last resort */
@@ -1328,6 +1386,7 @@ table.overview code.cell-chip {
   color: var(--text-secondary);
   font-size: 0.85rem;
   white-space: nowrap;
+  border-radius: var(--radius);
 }
 
 /* Exploration error: JSON toggle and Clear; the JSON opens below at a readable width */
@@ -1387,10 +1446,12 @@ pre.endpoint-error-detail {
   margin: 0;
 }
 
-.endpoint-error button[type="submit"] {
+/* JSON and Clear share one compact size */
+.endpoint-error button {
   margin: 0;
   padding: 0.15rem 0.65rem;
   font-size: 0.85rem;
+  line-height: 1.4;
 }
 
 /* Several values stacked in one cell, one per line. Lines share a fixed height so
@@ -1399,6 +1460,11 @@ table.overview .cell-lines > div {
   display: flex;
   align-items: center;
   min-height: 1.9rem;
+}
+
+/* An object's ID under its name is secondary, so smaller than MAC chips */
+table.overview code.cell-chip.cell-chip-id {
+  font-size: 0.8rem;
 }
 
 table.overview .cell-lines code.cell-chip {
@@ -1463,13 +1529,14 @@ dl.addr-list code.addr-mac {
   color: var(--text-secondary);
   font-size: 0.85rem;
   line-height: 1.25rem;
+  border-radius: var(--radius);
 }
 
 /* Details/Summary expandable sections */
 details {
   margin: 1rem 0;
   background-color: transparent;
-  border-radius: 8px;
+  border-radius: var(--radius);
   overflow: hidden;
 }
 
@@ -1477,7 +1544,7 @@ summary {
   cursor: pointer;
   padding: 0.75rem 1rem;
   background-color: var(--bg-tertiary);
-  border-radius: 8px;
+  border-radius: var(--radius);
   transition: all 0.2s ease;
   user-select: none;
   border: 1px solid var(--border-color);
@@ -1506,7 +1573,7 @@ details > *:not(summary) {
   background-color: var(--bg-card);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 1.5rem;
   margin-bottom: 2rem;
   box-shadow: var(--shadow);
@@ -1594,7 +1661,7 @@ table.data-table pre.cell-pre {
   padding: 0.4rem 0.6rem;
   overflow: auto;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   box-shadow: none;
   font-size: 0.8rem;
 }
@@ -1637,7 +1704,7 @@ table.redfish-requests button.cancel:hover:enabled {
   width: 260px;
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 1.25rem;
   box-shadow: var(--shadow-sm);
   display: flex;
@@ -1697,7 +1764,7 @@ table.redfish-requests button.cancel:hover:enabled {
   background-color: var(--bg-primary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-md);
   font-size: 0.9rem;
   line-height: 1.4;
@@ -1769,13 +1836,13 @@ table.redfish-requests button.cancel:hover:enabled {
 
 .action-card form input[type="submit"],
 .action-card form button {
-  width: 100%;
+  width: auto;
   margin: 0;
 }
 
-/* Buttons sit at the bottom of every card. The ID selectors outrank the
-   shared form layouts (power_control.html, bmc_reset.html, quarantine,
-   maintenance) defined above. */
+/* Buttons sit at the bottom right of every card, as wide as their label. The
+   ID selectors outrank the shared form layouts (power_control.html,
+   bmc_reset.html, quarantine, maintenance) defined above. */
 .action-card form > input[type="submit"],
 .action-card form > button[type="submit"],
 .action-card form > .action-card-buttons,
@@ -1783,16 +1850,14 @@ table.redfish-requests button.cancel:hover:enabled {
 .action-card #bmcreset_action > [type="submit"],
 .action-card #quarantine_action > [type="submit"],
 .action-card #maintenance_action > [type="submit"] {
+  align-self: flex-end;
   margin-top: auto;
 }
 
 .action-card-buttons {
   display: flex;
+  justify-content: flex-end;
   gap: 0.5rem;
-}
-
-.action-card-buttons > * {
-  flex: 1;
 }
 
 /* ------------------------------------------------------------------------
@@ -1922,7 +1987,7 @@ td > div {
 td > div > pre {
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1rem;
   margin: 0;
   box-shadow: var(--shadow-sm);
@@ -1933,7 +1998,7 @@ td > div > pre {
 pre:not(div[style*="overflow: auto"] > pre):not(td > div > pre) {
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1rem;
   margin: 0.5rem 0;
   box-shadow: var(--shadow-sm);
@@ -1986,7 +2051,7 @@ pre:not(div[style*="overflow: auto"] > pre):not(td > div > pre) {
   align-items: stretch;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   overflow: hidden;
   animation: toast-slide-in 0.3s ease;
@@ -2050,7 +2115,7 @@ pre:not(div[style*="overflow: auto"] > pre):not(td > div > pre) {
 
 .error-modal {
   background: var(--bg-primary);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 1.5rem 2rem;
   max-width: 620px;
   width: 90%;
@@ -2195,7 +2260,7 @@ div#json a#refresh-endpoint:hover {
 .entity-title code {
   padding: 0.35rem 0.75rem;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   color: var(--text-primary);
   font-size: 1.1rem;
   font-weight: 500;
@@ -2209,7 +2274,7 @@ div#json a#refresh-endpoint:hover {
   margin: 0;
   padding: 0.4rem;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background-color: transparent;
   color: var(--text-muted);
   box-shadow: none;
@@ -2267,7 +2332,7 @@ div#json a#refresh-endpoint:hover {
   margin-bottom: 1.5rem;
   background-color: var(--bg-table);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -2417,7 +2482,7 @@ div#json a#refresh-endpoint:hover {
 .run-status-facts dd {
   margin: 0.15rem 0 0;
   color: var(--text-primary);
-  font-weight: 500;
+  font-weight: 400;
   white-space: nowrap;
 }
 
@@ -2502,7 +2567,7 @@ div#json a#refresh-endpoint:hover {
   min-width: 0;
   padding: 0.35rem 0.65rem;
   border: 1px solid rgba(229, 62, 62, 0.4);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background-color: rgba(229, 62, 62, 0.06);
   color: var(--error);
   font-weight: 500;
@@ -2635,12 +2700,6 @@ table.data-table.history-table pre {
 /* Public keys are one long token: wrap them within the column */
 table.data-table.key-table td:last-child {
   width: 100%;
-}
-
-table.data-table.key-table code {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: 0.85rem;
 }
 
 /* Submit row along the bottom edge of a card */
@@ -2878,7 +2937,7 @@ table.data-table.key-table code {
 .health-report-templates button:hover:enabled:not(.tab-button) {
   margin: 0;
   padding: 0.3rem 0.85rem;
-  border-radius: 20px;
+  border-radius: var(--radius);
   font-size: 0.85rem;
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -2949,7 +3008,7 @@ table.data-table.key-table code {
 
 .alert-row-target {
   padding: 0.1rem 0.5rem;
-  border-radius: 4px;
+  border-radius: var(--radius);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   font-family: 'Consolas', 'Monaco', monospace;
@@ -2991,7 +3050,8 @@ table.data-table.key-table code {
 .alert-row div.health_alert_classification,
 .report-row div.health_alert_classification,
 .list-row div.health_alert_classification,
-.timeline-row div.health_alert_classification {
+.timeline-row div.health_alert_classification,
+table.overview div.health_alert_classification {
   margin: 0;
   padding: 0.25rem 0.8rem;
   font-size: 0.85rem;
@@ -3151,7 +3211,7 @@ table.data-table code.mac {
   display: inline-block;
   padding: 0.1rem 0.5rem;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   font-size: 0.9rem;
@@ -3281,7 +3341,7 @@ table.data-table.search-results td:last-child {
   display: inline-block;
   padding: 0.1rem 0.5rem;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   font-size: 0.9rem;
@@ -3324,7 +3384,7 @@ table.data-table.search-results td:last-child {
 .timeline-row {
   display: grid;
   grid-template-columns: 15rem minmax(0, 1fr) auto;
-  gap: 1.5rem;
+  gap: 0.5rem 1.5rem;
   align-items: start;
   padding: 0.9rem 1.5rem;
   border-bottom: 1px solid var(--border-color);
@@ -3376,7 +3436,7 @@ table.data-table.search-results td:last-child {
 /* Each record's alerts in a small bordered table */
 .timeline-what table.alert-table {
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   overflow: hidden;
 }
 
@@ -3405,12 +3465,45 @@ table.data-table.search-results td:last-child {
   overflow-wrap: anywhere;
 }
 
-.timeline-what > .alert-row-classifications {
+/* Raw values in a detail table cell, e.g. alert messages and public keys */
+table.data-table code.code-block {
+  display: block;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius);
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Health history: classifications under the time, in the left column */
+.timeline-when > .alert-row-classifications {
+  justify-content: flex-start;
+  margin-top: 0.6rem;
+}
+
+/* Classifications in a list table cell (DPU network status) */
+table.overview td > .alert-row-classifications {
   justify-content: flex-start;
 }
 
-.timeline-what > .alert-row-classifications br {
+/* The classification formatter separates pills with <br>; these layouts wrap
+   them in a row instead */
+.timeline-when > .alert-row-classifications br,
+table.overview td > .alert-row-classifications br {
   display: none;
+}
+
+/* Health history: the JSON toggle closes the row at the bottom right, and the
+   opened JSON spans the row */
+.timeline-row > .report-row-json {
+  grid-column: 1 / -1;
+}
+
+.timeline-row > .report-row-json > summary {
+  margin-left: auto;
 }
 
 .timeline-what pre.timeline-json {
@@ -3595,7 +3688,7 @@ table.data-table.search-results td:last-child {
   gap: 1rem;
   margin: 2rem 0;
   padding: 1rem 1.5rem;
-  border-radius: 12px;
+  border-radius: var(--radius);
   border: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
 }
@@ -3632,7 +3725,7 @@ a.page-link {
   justify-content: center;
   min-width: 2rem;
   padding: 0.35rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text-secondary);
@@ -3655,7 +3748,7 @@ span.page-link.active {
   justify-content: center;
   min-width: 2rem;
   padding: 0.35rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--text-on-accent);
@@ -3669,7 +3762,7 @@ span.page-link.disabled {
   justify-content: center;
   min-width: 2rem;
   padding: 0.35rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text-muted);
@@ -3714,7 +3807,7 @@ input.table-filter-input {
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
   transition: all 0.2s ease;
   box-shadow: var(--shadow-sm);
@@ -3814,7 +3907,7 @@ details.table-filters-enhanced .filter-container {
   margin: 0;
   padding: 0.5rem 0.75rem 0.5rem 2.3rem;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
 }
 
@@ -3895,7 +3988,7 @@ details.table-filters-enhanced .filter-container {
   overflow-y: auto;
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1.5rem 1.75rem;
 }
 
@@ -4015,7 +4108,7 @@ td.config-value pre {
   max-height: 20rem;
   overflow: auto;
   background-color: var(--bg-tertiary);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 0.8rem;
 }
 
@@ -4023,7 +4116,7 @@ td.config-value pre {
   display: inline-block;
   margin-left: 0.4rem;
   padding: 0.05rem 0.5rem;
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: 0.8rem;
   color: var(--info);
   background-color: rgba(49, 130, 206, 0.12);
@@ -4033,7 +4126,7 @@ td.config-value pre {
   display: inline-block;
   margin-left: 0.4rem;
   padding: 0.05rem 0.5rem;
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: 0.8rem;
   color: var(--accent-green-hover);
   background-color: var(--accent-green-light);
@@ -4119,8 +4212,20 @@ td.config-value pre {
 }
 
 /* ------------------------------------------------------------------------
-   Live Logs (api_logs.html)
+   Log viewers: Live Logs (api_logs.html) and machine console logs
+   (console_logs.html)
    ------------------------------------------------------------------------ */
+
+/* The page locks to the window and its last card fills the leftover height,
+   so only the console scrolls (no page-level wiggle) */
+body.page-fill-height { overflow: hidden; }
+body.page-fill-height main {
+  height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column;
+}
+body.page-fill-height .main-content {
+  flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column;
+}
+
 section.entity-summary.log-viewer {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
@@ -4134,10 +4239,10 @@ section.entity-summary.log-viewer {
    a raised white pill */
 .log-sources {
   display: inline-flex; gap: 2px; padding: 3px;
-  background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: var(--radius);
 }
 .log-sources button {
-  margin: 0; padding: .3rem .85rem; border-radius: 6px;
+  margin: 0; padding: .3rem .85rem; border-radius: var(--radius);
   color: var(--text-secondary); font-size: .9rem;
 }
 .log-sources button.active { background: var(--bg-primary); color: var(--text-primary); box-shadow: var(--shadow-sm); }
@@ -4155,12 +4260,18 @@ section.entity-summary.log-viewer {
 .log-spans { display: inline-flex; align-items: center; gap: .4rem; margin: 0; color: var(--text-secondary); font-size: .9rem; font-weight: 400; }
 .log-spans input { margin: 0; }
 
-#log-status { margin-left: auto; padding: .15rem .7rem; font-size: .85rem; }
+.log-status { margin-left: auto; padding: .15rem .7rem; font-size: .85rem; }
 
-/* Pause / Clear (.btn-secondary), same height as the search box */
+/* Pause / Follow / Clear (.btn-secondary), same height as the search box */
 .log-toolbar > button { height: 36px; margin: 0; padding: 0 1rem; font-size: .9rem; }
 
-#log-output {
+/* The console is always dark, so its scrollbar thumb is light in both themes */
+.log-console::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+.log-console {
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 12px; line-height: 1.45;
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable;

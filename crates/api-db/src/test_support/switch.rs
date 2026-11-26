@@ -141,7 +141,7 @@ pub async fn create_seeded_discovered(
     )
     .await?;
 
-    let admin_segments = network_segment::admin(txn).await?;
+    let admin_segments = network_segment::admin(&mut *txn).await?;
     machine_interface::create(
         txn,
         &admin_segments,
@@ -152,7 +152,7 @@ pub async fn create_seeded_discovered(
     )
     .await?;
 
-    let underlay = network_segment::find_by_name(txn, "UNDERLAY").await?;
+    let underlay = network_segment::find_by_name(&mut *txn, "UNDERLAY").await?;
     let bmc_interface = machine_interface::create(
         txn,
         std::slice::from_ref(&underlay),

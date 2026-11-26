@@ -27,7 +27,7 @@ use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::mock::{MockNvSwitchManager, MockSwitchMtlsCall};
 use component_manager::nv_switch_manager::{SwitchMtlsDisableJobStatus, SwitchMtlsDisableState};
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use librms::protos::rack_manager::SwitchService;
 use model::switch::{
     ConfigureCertificateState, ConfiguringState, DisableMtlsState, InitializingState,
@@ -119,7 +119,7 @@ async fn switch_in_state(
         .await
         .expect("failed to seed NVOS credentials");
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     if with_rack {
         set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
@@ -144,9 +144,7 @@ async fn run_iteration(env: &ControllerEnv, mock: &Arc<MockNvSwitchManager>) {
             credential_manager: env.test_credential_manager.clone(),
             switch_mtls_services: default_switch_mtls_services(),
             per_object_metrics_registry: env.per_object_metrics_registry.clone(),
-            redfish_client_pool: env.redfish_sim.clone(),
             bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
-            bmc_credential_ops: env.redfish_sim.clone(),
             bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::Bmc,
             ),
@@ -160,9 +158,7 @@ async fn controller_state(
     env: &ControllerEnv,
     switch_id: &SwitchId,
 ) -> TestResult<SwitchControllerState> {
-    let mut conn = env.pool.acquire().await?;
-
-    Ok(db_switch::find_by_id(&mut conn, switch_id)
+    Ok(db_switch::find_by_id(&env.pool, switch_id)
         .await?
         .expect("switch should exist")
         .controller_state
@@ -172,7 +168,7 @@ async fn controller_state(
 /// Parks a finished case's switch in `Error`, where the controller leaves it
 /// alone, so later cases sharing the database only see their own switch.
 async fn park_switch(env: &ControllerEnv, switch_id: &SwitchId) -> TestResult {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     transition_switch_controller_state(
         txn.as_mut(),

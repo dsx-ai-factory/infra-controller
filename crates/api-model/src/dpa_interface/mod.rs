@@ -360,19 +360,20 @@ impl DpaInterface {
         // If there is an instance, and the instance has SPX attachments,
         // and one of the attachments matches our mac address and has a non-zero partition ID,
         // then the DPA expected version should be the instance's SPX config version.
-        if let Some(instance) = instance
-            && instance
+        if let Some(instance) = instance {
+            let mac_address = self.mac_address.to_string();
+            if instance
                 .config
                 .spxconfig
                 .spx_attachments
                 .iter()
                 .any(|attachment| {
-                    attachment.mac_address.as_deref().unwrap_or_default()
-                        == self.mac_address.to_string()
+                    attachment.mac_address.as_deref().unwrap_or_default() == mac_address
                         && attachment.spx_partition_id != NULL_SPX_PARTITION_ID
                 })
-        {
-            dpa_expected_version = instance.spx_config_version;
+            {
+                dpa_expected_version = instance.spx_config_version;
+            }
         }
 
         for obs in spx_status_observation.spx_attachments.iter() {

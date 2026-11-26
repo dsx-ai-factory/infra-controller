@@ -71,7 +71,7 @@ pub async fn create(
         .bind(value.id)
         .bind(&config.metadata.name)
         .bind(&config.metadata.description)
-        .bind(config.tenant_organization_id.to_string())
+        .bind(&config.tenant_organization_id)
         .bind(config_version)
         .bind(sqlx::types::Json(&state))
         .fetch_one(txn)
@@ -270,6 +270,7 @@ mod tests {
     use tokio::sync::Barrier;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn concurrent_metadata_updates_require_current_version(pool: sqlx::PgPool) {
@@ -279,7 +280,7 @@ mod tests {
             id: NvLinkLogicalPartitionId,
             name: &str,
         ) -> ConditionalWrite<NvLinkLogicalPartitionId, LogicalPartitionNotCurrent> {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let partition = find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id))
                 .await
                 .unwrap()
@@ -299,7 +300,7 @@ mod tests {
             result
         }
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let partition = create(
             &NewLogicalPartition {
                 id: uuid::Uuid::new_v4().into(),
@@ -375,7 +376,7 @@ mod tests {
             .id
         }
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let referenced = create_logical(&mut txn, "referenced").await;
         let unreferenced = create_logical(&mut txn, "unreferenced").await;
         let unrequested = create_logical(&mut txn, "unrequested").await;
@@ -436,13 +437,13 @@ mod tests {
             .id
         }
 
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let referenced = create_logical(&mut setup, "referenced").await;
         let unreferenced = create_logical(&mut setup, "unreferenced").await;
         setup.commit().await.unwrap();
 
         // The insert holds its transaction open until the purge is blocked on it.
-        let mut inserting = pool.begin().await.unwrap();
+        let mut inserting = pool.txn_begin().await.unwrap();
         crate::nvl_partition::create(
             &model::nvl_partition::NewNvlPartition {
                 id: carbide_uuid::nvlink::NvLinkPartitionId::new(),
@@ -460,7 +461,7 @@ mod tests {
         let purge = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let deleted = final_delete_unreferenced(&[referenced, unreferenced], &mut txn)
                     .await
                     .unwrap();

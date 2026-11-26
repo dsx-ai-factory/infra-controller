@@ -4,8 +4,6 @@
 package spectrumxpartition
 
 import (
-	"fmt"
-
 	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 
@@ -30,7 +28,7 @@ func UpdateSpectrumXPartitionInventory(ctx workflow.Context, siteID string, sxpI
 
 	parsedSiteID, err := uuid.Parse(siteID)
 	if err != nil {
-		logger.Warn().Err(err).Msg(fmt.Sprintf("workflow triggered with invalid site ID: %s", siteID))
+		logger.Warn().Err(err).Msgf("workflow triggered with invalid site ID: %s", siteID)
 		return err
 	}
 

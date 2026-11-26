@@ -74,8 +74,9 @@ spec:
                   entry point
                 properties:
                   keepalived:
-                    description: Keepalived configures the keepalived that will be
-                      deployed for the cluster control-plane
+                    description: |-
+                      Keepalived configures the keepalived that will be deployed for the
+                      cluster control-plane
                     properties:
                       interface:
                         description: Interface specifies on which interface the VIP
@@ -86,7 +87,8 @@ spec:
                         additionalProperties:
                           type: string
                         description: |-
-                          NodeSelector is used to specify a subnet of control plane nodes to deploy keepalived instances.
+                          NodeSelector is used to specify a subnet of control plane nodes to
+                          deploy keepalived instances.
                           Note: keepalived instances are always deployed on control plane nodes
                         type: object
                       vip:
@@ -119,9 +121,12 @@ spec:
               type:
                 description: |-
                   Type of the cluster with few supported values
-                  static - existing cluster that is deployed by user. For DPUCluster of this type, the kubeconfig field must be set.
-                  kamaji - DPF managed cluster. The kamaji-cluster-manager will create a DPU cluster on behalf of this CR.
-                  $(others) - any string defined by ISVs, such type names must start with a prefix.
+                  static - existing cluster that is deployed by user. For DPUCluster of
+                  this type, the kubeconfig field must be set.
+                  kamaji - DPF managed cluster. The kamaji-cluster-manager will create a
+                  DPU cluster on behalf of this CR.
+                  $(others) - any string defined by ISVs, such type names must start with
+                  a prefix.
                 pattern: kamaji|static|[^/]+/.*
                 type: string
             required:
@@ -189,8 +194,9 @@ spec:
                   type: object
                 type: array
               etcdEncryptionAtRest:
-                description: EtcdEncryptionAtRest exposes the observed encryption-at-rest
-                  state for the cluster.
+                description: |-
+                  EtcdEncryptionAtRest exposes the observed encryption-at-rest state for
+                  the cluster.
                 properties:
                   provider:
                     description: Provider is the committed encryption-at-rest provider
@@ -205,7 +211,8 @@ spec:
                       activeKeyRef:
                         description: |-
                           ActiveKeyRef is the source Secret observed for the currently active key.
-                          This field is informational and must not be used by controllers to select desired key material.
+                          This field is informational and must not be used by controllers to
+                          select desired key material.
                         properties:
                           key:
                             description: Key is the key within the Secret data.

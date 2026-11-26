@@ -17,6 +17,8 @@
 
 //! Handler for RackState::Error.
 
+use std::fmt::Write;
+
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::detect_component_failure;
@@ -40,12 +42,14 @@ pub async fn handle_error(
         let activities_desc = if scope.activities.is_empty() {
             "all non-power activities".to_string()
         } else {
-            scope
-                .activities
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut description = String::new();
+            for (index, activity) in scope.activities.iter().enumerate() {
+                if index > 0 {
+                    description.push_str(", ");
+                }
+                write!(description, "{activity}").expect("writing to a String cannot fail");
+            }
+            description
         };
         if scope.is_full_rack() {
             tracing::info!(
@@ -63,11 +67,9 @@ pub async fn handle_error(
                 "Rack on-demand maintenance requested from Error state (partial: machines, switches, power shelves, activities), transitioning to Maintenance",
             );
         }
-        let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
-        })
-        .with_txn(txn));
+        }));
     }
 
     if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
@@ -76,13 +78,20 @@ pub async fn handle_error(
         )));
     }
 
-    if detect_component_failure(id, ctx).await?.is_none() {
+    let Some(current_cause) = detect_component_failure(id, ctx).await? else {
         tracing::info!(
             rack_id = %id,
             "No terminal component failure remains, transitioning rack from Error back to Ready",
         );
-        let txn = ctx.services.db_pool.begin().await?;
-        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
+        return Ok(StateHandlerOutcome::transition(RackState::Ready));
+    };
+
+    if current_cause != cause {
+        return Ok(StateHandlerOutcome::transition(RackState::Error {
+            cause: current_cause,
+            certificate_failure: None,
+            recovery_policy,
+        }));
     }
 
     Ok(StateHandlerOutcome::wait(format!(

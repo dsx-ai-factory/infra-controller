@@ -19,12 +19,12 @@ use db::ObjectColumnFilter;
 use model::dns::NewDomain;
 
 use crate as db;
-use crate::DatabaseError;
+use crate::{DatabaseError, TransactionVending as _};
 
 #[crate::sqlx_test]
 async fn create_delete_valid_domain(pool: sqlx::PgPool) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -55,7 +55,7 @@ async fn create_delete_valid_domain(pool: sqlx::PgPool) {
 async fn normalized_reverse_zone_names_are_unique(pool: sqlx::PgPool) {
     // Dotted and non-dotted names identify the same reverse zone, so the
     // database must reject a second live spelling through the partial index.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::dns::domain::persist(NewDomain::new("0.10.in-addr.arpa"), txn.as_mut())
         .await
         .unwrap();
@@ -80,7 +80,7 @@ async fn normalized_reverse_zone_names_are_unique(pool: sqlx::PgPool) {
 async fn reverse_zone_search_uses_normalized_identity(pool: sqlx::PgPool) {
     // Reverse-zone lookup accepts case and root-dot spelling differences, but
     // forward-domain lookup keeps its historical exact-name contract.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let reverse = db::dns::domain::persist(NewDomain::new("0.10.in-addr.arpa."), txn.as_mut())
         .await
         .unwrap();
@@ -117,7 +117,7 @@ async fn reverse_zone_search_uses_normalized_identity(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn create_invalid_domain_case(pool: sqlx::PgPool) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -133,7 +133,7 @@ async fn create_invalid_domain_case(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn create_invalid_domain_regex(pool: sqlx::PgPool) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -148,7 +148,7 @@ async fn create_invalid_domain_regex(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn find_domain(pool: sqlx::PgPool) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -161,7 +161,7 @@ async fn find_domain(pool: sqlx::PgPool) {
     assert!(domain.is_ok());
 
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -178,7 +178,7 @@ async fn find_domain(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn update_domain(pool: sqlx::PgPool) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -198,7 +198,7 @@ async fn update_domain(pool: sqlx::PgPool) {
     updated_domain.increment_serial();
 
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -213,7 +213,7 @@ async fn update_domain(pool: sqlx::PgPool) {
 async fn stale_domain_snapshot_cannot_overwrite_a_newer_update(pool: sqlx::PgPool) {
     // Even inside one transaction, the first write advances the optimistic
     // timestamp so a second write from the original snapshot is rejected.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let original_name = "0.10.in-addr.arpa";
     let original = db::dns::domain::persist(NewDomain::new(original_name), txn.as_mut())
         .await
@@ -238,7 +238,7 @@ async fn stale_domain_snapshot_cannot_overwrite_a_newer_update(pool: sqlx::PgPoo
 async fn stale_domain_snapshot_cannot_delete_a_newer_row(pool: sqlx::PgPool) {
     // Reverse-zone cleanup must not delete a row that changed after the caller
     // selected the snapshot used to acquire its lock.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let original = db::dns::domain::persist(NewDomain::new("3.10.in-addr.arpa"), txn.as_mut())
         .await
         .unwrap();
@@ -262,7 +262,7 @@ async fn stale_domain_snapshot_cannot_delete_a_newer_row(pool: sqlx::PgPool) {
 // being written by anything other than nico-api, while NULL stays allowed.
 #[crate::sqlx_test]
 async fn default_ttl_column_rejects_out_of_range_values(pool: sqlx::PgPool) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let domain = db::dns::domain::persist(NewDomain::new("ttl-check.example"), txn.as_mut())
         .await
         .unwrap();
@@ -270,7 +270,7 @@ async fn default_ttl_column_rejects_out_of_range_values(pool: sqlx::PgPool) {
     for out_of_range in [29, 86_401] {
         // A failed statement aborts its transaction, so run each attempt in
         // a savepoint that is rolled back before the next one.
-        let mut attempt = sqlx::Acquire::begin(&mut txn).await.unwrap();
+        let mut attempt = crate::Transaction::begin_inner(txn.as_mut()).await.unwrap();
         let error = sqlx::query("UPDATE domains SET default_ttl = $1 WHERE id = $2")
             .bind(out_of_range)
             .bind(domain.id)
@@ -306,7 +306,7 @@ async fn stored_serial(
 // two changes in one second still yield two distinct, increasing serials.
 #[crate::sqlx_test]
 async fn zone_serial_advances_with_zone_content(pool: sqlx::PgPool) {
-    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
     let zone = db::dns::domain::persist(NewDomain::new("serial.example"), txn.as_mut())
         .await
         .expect("create zone");
@@ -360,7 +360,7 @@ async fn zone_serial_advances_with_zone_content(pool: sqlx::PgPool) {
 // into a write-time error instead; a row without a serial key is unaffected.
 #[crate::sqlx_test]
 async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
-    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let mut txn = pool.txn_begin().await.expect("begin fixture transaction");
     let zone = db::dns::domain::persist(NewDomain::new("serial-max.example"), txn.as_mut())
         .await
         .expect("create zone");
@@ -370,7 +370,9 @@ async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
         .await
         .expect("the maximum serial is still in range");
 
-    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    let mut attempt = crate::Transaction::begin_inner(txn.as_mut())
+        .await
+        .expect("savepoint");
     let error = db::dns::domain::bump_serial(attempt.as_mut(), &[zone.id])
         .await
         .expect_err("a bump past the maximum is rejected");

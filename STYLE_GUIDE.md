@@ -734,9 +734,18 @@ or overlapping external work safe through fencing, idempotency, or reconciliatio
   OO-style methods on db-specific types. This allows the model types to live in a separate model crate, without the
   temptation for an OO-style database type to become a quasi-model unto itself.
 
-- Read vs Write: Prefer accepting a `impl DbReader` as a connection if your database function is read-only. This allows
-  callers to pass a `PgPool` and avoid needing boilerplate to begin a transaction and commit it just to call a
-  read-only function.
+### Read-only database queries
+
+If a database function only reads from the database, it does not need a transaction. Such functions should accept a
+`DbReader` instead of a `PgConnection` or `PgTransaction`. Use `impl DbReader<'_>` for a single use of the reader and
+`&mut DB` with the higher-ranked trait bound for repeated borrows. See the [`DbReader`
+documentation](crates/api-db/src/db_read.rs) for signatures and examples.
+
+For code paths which only call read-only database functions, pass a `&PgPool` if the function accepts `impl
+DbReader<'_>`, and use a `PgPoolReader` for functions that accept a `&mut DB`. Reuse an existing reader helper such as
+`Api::db_reader()` when available. If a code path mixes reads and writes, and you need to use a transaction, reborrow
+the existing transaction with `&mut *txn` or `txn.as_mut()` to call read-only functions. Use transactions where the
+operation requires them, such as writes, row locks, or a snapshot shared across queries.
 
 ## Background tasks
 

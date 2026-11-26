@@ -934,9 +934,11 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		expectedStatus                 *string
 		expectedVersion                *string
 		verifyChildSpanner             bool
+		wantTimestampChange            bool
 	}{
 		{
 			desc:                           "can update name",
+			wantTimestampChange:            true,
 			paramName:                      cutil.GetPtr("updatedName"),
 			paramDisplayName:               nil,
 			paramDescription:               nil,
@@ -952,6 +954,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                           "can update display_name",
+			wantTimestampChange:            true,
 			paramName:                      nil,
 			paramDisplayName:               cutil.GetPtr("updatedDisplayName"),
 			paramDescription:               nil,
@@ -966,6 +969,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                           "can update description",
+			wantTimestampChange:            true,
 			paramName:                      nil,
 			paramDisplayName:               nil,
 			paramDescription:               cutil.GetPtr("updatedDescription"),
@@ -980,6 +984,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                           "can update site_id",
+			wantTimestampChange:            true,
 			paramName:                      nil,
 			paramDisplayName:               nil,
 			paramDescription:               nil,
@@ -994,6 +999,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                "can update labels",
+			wantTimestampChange: true,
 			paramName:           nil,
 			paramDisplayName:    nil,
 			paramDescription:    nil,
@@ -1009,6 +1015,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                "can update status",
+			wantTimestampChange: true,
 			paramName:           nil,
 			paramDisplayName:    nil,
 			paramDescription:    nil,
@@ -1022,6 +1029,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                           "can multiple fields at once",
+			wantTimestampChange:            true,
 			paramName:                      cutil.GetPtr("name"),
 			paramDisplayName:               cutil.GetPtr("displayName"),
 			paramDescription:               cutil.GetPtr("description"),
@@ -1039,6 +1047,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 		},
 		{
 			desc:                           "no fields are updated",
+			wantTimestampChange:            false,
 			paramName:                      nil,
 			paramDisplayName:               nil,
 			paramDescription:               nil,
@@ -1056,6 +1065,9 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 
+			predecessor, getErr := itsd.GetByID(ctx, nil, it1.ID, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := itsd.Update(ctx, nil, InstanceTypeUpdateInput{
 				ID:                     it1.ID,
 				Name:                   tc.paramName,
@@ -1083,9 +1095,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, *tc.expectedStatus, got.Status)
 			assert.True(t, tc.expectedVersion == nil || got.Version == *tc.expectedVersion)
 
-			if got.Updated.String() == it1.Updated.String() {
-				t.Errorf("got.Updated = %v, want different value", got.Updated)
-			}
+			assert.Equal(t, tc.wantTimestampChange, !got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

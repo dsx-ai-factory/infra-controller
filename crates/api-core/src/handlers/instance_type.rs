@@ -556,12 +556,12 @@ pub(crate) async fn associate_machines(
     // Go through the requested machines and make sure they
     //actually meet the requirements of the instance type.
     for machine in machines.iter() {
-        let capabilities = machine
-            .to_capabilities()
-            .ok_or(CarbideError::InvalidArgument(format!(
+        let capabilities = machine.to_capabilities().ok_or_else(|| {
+            CarbideError::InvalidArgument(format!(
                 "capabilities of machine {} do not satisfy the requested InstanceType ({})",
                 machine.id, instance_type_id
-            )))?;
+            ))
+        })?;
 
         if !instance_types[0].matches_capability_set(&capabilities) {
             return Err(CarbideError::InvalidArgument(format!(

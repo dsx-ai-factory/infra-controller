@@ -388,11 +388,8 @@ pub trait K8sConfigRepository: Send + Sync {
         name: &str,
         namespace: &str,
     ) -> Result<Option<BTreeMap<String, Vec<u8>>>, DpfError>;
-    /// Create the Secret, or overwrite the data of an existing one. Callers
-    /// rewrite this Secret when the underlying credential rotates, so an
-    /// implementation that skips existing objects would silently pin the
-    /// cluster to the first value ever written.
-    async fn apply_secret(
+    /// Create a Secret once, retaining the existing value when it already exists.
+    async fn create_secret_if_absent(
         &self,
         name: &str,
         namespace: &str,
@@ -403,6 +400,13 @@ pub trait K8sConfigRepository: Send + Sync {
 /// Immutable per-device BMC credential Secrets.
 #[async_trait]
 pub trait BmcCredentialRepository: Send + Sync {
+    /// List credential Secrets matching a label selector in the namespace.
+    async fn list_bmc_credential_secrets(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> Result<Vec<k8s_openapi::api::core::v1::Secret>, DpfError>;
+
     /// Fetch the named Secret, returning `None` when it is absent from the namespace.
     async fn get_bmc_credential_secret(
         &self,

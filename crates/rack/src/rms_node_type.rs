@@ -402,8 +402,12 @@ mod tests {
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_VENDOR),
-            Some(&"NVIDIA".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_VENDOR)
+                .map(String::as_str),
+            Some("NVIDIA")
         );
     }
 
@@ -420,13 +424,21 @@ mod tests {
         assert_eq!(identity.legacy_node_type, None);
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_VENDOR),
-            Some(&"test-compute-vendor".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_VENDOR)
+                .map(String::as_str),
+            Some("test-compute-vendor")
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_PRODUCT_FAMILY),
-            Some(&"test-product-family".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_PRODUCT_FAMILY)
+                .map(String::as_str),
+            Some("test-product-family")
         );
     }
 
@@ -445,18 +457,30 @@ mod tests {
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_ROLE),
-            Some(&ROLE_COMPUTE.to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_ROLE)
+                .map(String::as_str),
+            Some(ROLE_COMPUTE)
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_VENDOR),
-            Some(&"NVIDIA".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_VENDOR)
+                .map(String::as_str),
+            Some("NVIDIA")
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_PRODUCT_FAMILY),
-            Some(&"gb200".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_PRODUCT_FAMILY)
+                .map(String::as_str),
+            Some("gb200")
         );
 
         assert_eq!(identity.node_descriptor.attributes.len(), 3);
@@ -472,18 +496,30 @@ mod tests {
         assert_eq!(identity.role, RmsNodeRole::Switch);
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_ROLE),
-            Some(&ROLE_SWITCH.to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_ROLE)
+                .map(String::as_str),
+            Some(ROLE_SWITCH)
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_VENDOR),
-            Some(&"test-switch-vendor".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_VENDOR)
+                .map(String::as_str),
+            Some("test-switch-vendor")
         );
 
         assert_eq!(
-            identity.node_descriptor.attributes.get(KEY_PRODUCT_FAMILY),
-            Some(&"gb300".to_string())
+            identity
+                .node_descriptor
+                .attributes
+                .get(KEY_PRODUCT_FAMILY)
+                .map(String::as_str),
+            Some("gb300")
         );
     }
 

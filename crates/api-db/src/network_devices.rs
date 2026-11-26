@@ -23,7 +23,7 @@ use model::hardware_info::LldpSwitchData;
 use model::network_devices::{
     DpuLocalPorts, DpuToNetworkDeviceMap, LldpError, NetworkDevice, NetworkTopologyData,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::{DatabaseError, ObjectFilter};
 use crate::db_read::DbReader;
@@ -45,16 +45,10 @@ fn get_port_data<'a>(
     data: &'a [LldpSwitchData],
     port: &DpuLocalPorts,
 ) -> Result<&'a LldpSwitchData, LldpError> {
-    let port_data = data
-        .iter()
-        .filter(|x| x.local_port == port.to_string())
-        .collect::<Vec<&LldpSwitchData>>();
-
-    let port_data = port_data
-        .first()
-        .ok_or(LldpError::MissingPort(port.to_string()))?;
-
-    Ok(*port_data)
+    let port: &str = port.as_ref();
+    data.iter()
+        .find(|entry| entry.local_port == port)
+        .ok_or_else(|| LldpError::MissingPort(port.to_owned()))
 }
 
 pub async fn find<DB>(
@@ -79,7 +73,7 @@ where
             .map_err(|e| DatabaseError::new("network_devices All", e)),
         ObjectFilter::One(id) => {
             query.push(" WHERE l.id = ");
-            query.push_bind(id.to_string());
+            query.push_bind(id);
             query
                 .build_query_as::<NetworkDevice>()
                 .fetch_all(&mut *txn)
@@ -87,9 +81,8 @@ where
                 .map_err(|e| DatabaseError::new("network_devices One", e))
         }
         ObjectFilter::List(list) => {
-            let str_list: Vec<String> = list.iter().map(|id| id.to_string()).collect();
             query.push(" WHERE l.id = ANY(");
-            query.push_bind(str_list);
+            query.push_bind(list);
             query.push(")");
             query
                 .build_query_as::<NetworkDevice>()
@@ -149,7 +142,9 @@ pub async fn get_or_create_network_device(
     create(txn, data).await
 }
 
-pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
+pub async fn lock_network_device_table(
+    txn: &mut crate::Transaction<'_>,
+) -> Result<(), DatabaseError> {
     let query = "LOCK TABLE network_device_lock IN EXCLUSIVE MODE";
     sqlx::query(query)
         .execute(txn.deref_mut())
@@ -162,7 +157,9 @@ pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<()
 /// port_to_network_device_map table. Problem with update is that it can create extra load on
 /// db as there are very few chances of port update. So this function is called only from
 /// delete port_to_network_device_map call.
-pub async fn cleanup_unused_switches(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
+pub async fn cleanup_unused_switches(
+    txn: &mut crate::Transaction<'_>,
+) -> Result<(), DatabaseError> {
     lock_network_device_table(txn).await?;
     let query = format!(
         "DELETE FROM network_devices
@@ -231,9 +228,9 @@ pub mod dpu_to_network_device_map {
     }
 
     pub async fn delete(
-        // Note: This is a PgTransaction, not a PgConnection, cleaning up switches locks a table,
+        // Note: This is a crate::Transaction, not a PgConnection, cleaning up switches locks a table,
         // which must happen inside a transaction.
-        txn: &mut PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         dpu_id: &MachineId,
     ) -> Result<(), DatabaseError> {
         // delete the association.
@@ -249,9 +246,9 @@ pub mod dpu_to_network_device_map {
     }
 
     pub async fn create_dpu_network_device_association(
-        // Note: This is a PgTransaction, not a PgConnection, because we lock the table, which must
+        // Note: This is a crate::Transaction, not a PgConnection, because we lock the table, which must
         // happen inside a transaction.
-        txn: &mut PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         device_data: &[LldpSwitchData],
         dpu_id: &MachineId,
     ) -> Result<(), DatabaseError> {
