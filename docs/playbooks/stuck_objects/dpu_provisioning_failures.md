@@ -59,6 +59,21 @@ Check:
 - DPF operator status.
 - `nico-dpu-agent` startup logs once the OS boots.
 
+When a `DPUInit` restart is deferred with controller power state `PoweringOn`,
+the host's retry error identifies the DPU, whether discovery completed since
+state entry, and the last recorded power request when available. Later substates
+can start after discovery has already completed. The libredfish backend maps
+both Redfish `Reset` and `PoweringOn` to this controller state.
+
+For a persistent stall, collect the raw Redfish `PowerState`, the BMC firmware
+version, `BootProgress` if available, and timestamped boot console output.
+The controller logs `trigger_location` with `DPU restart failed` or
+`DPU restart blocked`. In `DPUInitializing/Init`, once all DPUs have completed
+discovery, NICo checks each peer before the group restart on a multi-DPU host.
+If this check finds an unreadable BMC or a power state unsuitable for restart,
+the controller logs the blocking peer's ID and defers the entire restart.
+See [issue #9539](https://github.com/dsx-ai-factory/infra-controller/issues/9539).
+
 If an NVIDIA BlueField-2 DPU remains in `DPUInitializing/Init` and exposes
 `ib0` and `ib1` instead of Ethernet interfaces, use
 [Machine Stuck in DPUInitializing/Init During Ingestion](dpu_initializing_init.md).
