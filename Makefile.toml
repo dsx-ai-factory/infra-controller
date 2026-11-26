@@ -126,17 +126,28 @@ cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-adm
 
 [tasks.check-cli-docs]
 category = "Test"
-description = "Fail if docs/manuals/nico-admin-cli is stale or a command is missing a domain"
+description = "Check CLI reference freshness, uncommitted reference files, and command domains"
 workspace = false
-# Keeps the checked-in CLI reference honest as commands are added. First the
-# domain-mapping test fails CI if a new command is not categorized in
-# cli_domains.yaml; then we regenerate and fail if the result differs from
-# what is committed (regenerate locally with `cargo make gen-cli-docs`).
+# Check command/domain mappings, committed output, and local reference changes.
+# Regenerate a committed copy because the generator replaces `commands/`.
 script = '''
 cargo test -p nico-admin-cli cfg::cli_options::tests
 cargo test -p nico-admin-cli generate_docs::cmd::tests::man_conversion_preserves_apostrophes -- --ignored
-cargo run -p nico-admin-cli -- generate-cli-docs --out-dir docs/manuals/nico-admin-cli
-git diff --exit-code -- docs/manuals/nico-admin-cli
+reference_dir=docs/manuals/nico-admin-cli
+changes="$(git --no-optional-locks status --porcelain --untracked-files=all -- "$reference_dir")"
+if [ -n "$changes" ]; then
+    printf '%s\n' "$changes"
+fi
+scratch_dir="$(mktemp -d)"
+trap 'rm -rf "$scratch_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$scratch_dir/committed"
+GIT_INDEX_FILE="$scratch_dir/index" git --work-tree="$scratch_dir/committed" restore --source=HEAD --worktree -- "$reference_dir"
+cp -a "$scratch_dir/committed" "$scratch_dir/generated"
+TMPDIR="$scratch_dir" cargo run -p nico-admin-cli -- generate-cli-docs --out-dir "$scratch_dir/generated/$reference_dir"
+git diff --no-index --no-ext-diff --exit-code -- "$scratch_dir/committed/$reference_dir" "$scratch_dir/generated/$reference_dir"
+test -z "$changes"
 '''
 
 [tasks.build-cli]
