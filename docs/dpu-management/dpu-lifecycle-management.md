@@ -422,6 +422,12 @@ Key fields to check in the output:
 - **Last seen**: when the DPU last reported to NICo. A stale timestamp suggests the DPU agent has crashed or the DPU is offline.
 - **State SLA**: if the host has been in its current state longer than the SLA, the output shows `In State > SLA: true` with the breach reason.
 
+Over REST, `nicocli` lists the DPU's health reports, one entry per report source:
+
+```bash
+nicocli dpu-machine health-report list --site-id <site-id> <dpu-machine-id>
+```
+
 [Waiting for Network Configuration and DPU Health](../playbooks/stuck_objects/waiting_for_network_config.md) documents the full troubleshooting workflow. This workflow includes how to check logs using Grafana or Loki, verify DPU liveliness, restart the agent, and diagnose specific health probe alerts.
 
 ## DPU Reprovisioning

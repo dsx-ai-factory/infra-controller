@@ -1,6 +1,6 @@
 # Rebooting a machine
 
-An infrastructure provider administrator can request a restart of a managed host through the NVIDIA Infra Controller (NICo) REST API. For a data processing unit (DPU), use the direct Core procedure below.
+An infrastructure provider administrator can request a restart of a managed host through the NVIDIA Infra Controller (NICo) REST API. To restart a data processing unit (DPU), see [Restart an attached DPU](#restart-an-attached-dpu).
 
 Restarting an occupied host can interrupt the tenant's workload. For a tenant-requested reboot, follow [Rebooting an Instance](../configuration/tenant_management.md#rebooting-an-instance).
 
@@ -47,6 +47,19 @@ HTTP 202 means the device-facing power operation returned success to Core. The R
 ## Restart an attached DPU
 
 The REST Machine inventory contains hosts. A DPU ID normally returns HTTP 404 from the Machine power endpoint. Substituting the host ID targets the host.
+
+To restart a DPU through REST, use the DPU Machine power operation with the DPU's Machine ID and the ID of its Site. The action applies to the DPU only, but the host Machine loses its network while the DPU restarts.
+
+```bash
+DPU_MACHINE_ID='dpu-machine-id'
+SITE_ID='site-id'
+nicocli dpu-machine power update \
+  --site-id "$SITE_ID" \
+  --action GracefulRestart \
+  "$DPU_MACHINE_ID"
+```
+
+If an Instance is attached to the DPU's host Machine, or NICo has no record of that host Machine at the Site, add `--acknowledge-attached-instance true`. Without it, the request is rejected.
 
 A Site operator with [direct Core API access](../manuals/nico-admin-cli.md) can use [`nico-admin-cli bmc-machine admin-power-control`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/bmc-machine/bmc-machine-admin-power-control.md). Specify the DPU's own Core machine ID and choose a graceful or forced restart. Confirm the DPU restarted using a DPU boot event or its uptime.
 

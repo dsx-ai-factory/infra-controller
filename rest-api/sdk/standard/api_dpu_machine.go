@@ -25,6 +25,172 @@ import (
 // DPUMachineAPIService DPUMachineAPI service
 type DPUMachineAPIService service
 
+type ApiGetAllDpuMachineHealthReportRequest struct {
+	ctx          context.Context
+	ApiService   *DPUMachineAPIService
+	siteId       *string
+	org          string
+	dpuMachineId string
+}
+
+// ID of the Site
+func (r ApiGetAllDpuMachineHealthReportRequest) SiteId(siteId string) ApiGetAllDpuMachineHealthReportRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiGetAllDpuMachineHealthReportRequest) Execute() ([]MachineHealthReportEntry, *http.Response, error) {
+	return r.ApiService.GetAllDpuMachineHealthReportExecute(r)
+}
+
+/*
+GetAllDpuMachineHealthReport Retrieve all DPU Machine health reports
+
+Retrieve the health reports of a DPU Machine, one entry per report source. The aggregate of these reports is the `health` attribute of the DPU Machine.
+
+Health reports of a DPU Machine are read-only. Returns `404` when the ID does not identify a DPU Machine at the Site, including when it identifies a host Machine.
+
+User must have authorization role with `PROVIDER_ADMIN` suffix on the org that owns the Site.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param dpuMachineId ID of the DPU Machine
+	@return ApiGetAllDpuMachineHealthReportRequest
+*/
+func (a *DPUMachineAPIService) GetAllDpuMachineHealthReport(ctx context.Context, org string, dpuMachineId string) ApiGetAllDpuMachineHealthReportRequest {
+	return ApiGetAllDpuMachineHealthReportRequest{
+		ApiService:   a,
+		ctx:          ctx,
+		org:          org,
+		dpuMachineId: dpuMachineId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []MachineHealthReportEntry
+func (a *DPUMachineAPIService) GetAllDpuMachineHealthReportExecute(r ApiGetAllDpuMachineHealthReportRequest) ([]MachineHealthReportEntry, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []MachineHealthReportEntry
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DPUMachineAPIService.GetAllDpuMachineHealthReport")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/dpu/{dpuMachineId}/health-report"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"dpuMachineId"+"}", url.PathEscape(parameterValueToString(r.dpuMachineId, "dpuMachineId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetAllDpuMachinesRequest struct {
 	ctx        context.Context
 	ApiService *DPUMachineAPIService
@@ -346,6 +512,174 @@ func (a *DPUMachineAPIService) GetDpuMachineExecute(r ApiGetDpuMachineRequest) (
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiUpdateDpuMachinePowerRequest struct {
+	ctx                          context.Context
+	ApiService                   *DPUMachineAPIService
+	org                          string
+	dpuMachineId                 string
+	dpuMachinePowerUpdateRequest *DpuMachinePowerUpdateRequest
+}
+
+func (r ApiUpdateDpuMachinePowerRequest) DpuMachinePowerUpdateRequest(dpuMachinePowerUpdateRequest DpuMachinePowerUpdateRequest) ApiUpdateDpuMachinePowerRequest {
+	r.dpuMachinePowerUpdateRequest = &dpuMachinePowerUpdateRequest
+	return r
+}
+
+func (r ApiUpdateDpuMachinePowerRequest) Execute() (*MessageResponse, *http.Response, error) {
+	return r.ApiService.UpdateDpuMachinePowerExecute(r)
+}
+
+/*
+UpdateDpuMachinePower DPU Machine power control
+
+Execute a power control action on a DPU Machine. The action applies to the DPU itself, not to its host Machine, and can interrupt the network of the host Machine while the DPU restarts.
+
+`acknowledgeAttachedInstance` must be `true` when an Instance is attached to the DPU's host Machine, and also when the host Machine reported for the DPU is not known for the Site, because an attached Instance cannot be ruled out. Otherwise the request is rejected with `400`.
+
+Returns `404` when the ID does not identify a DPU Machine at the Site, including when it identifies a host Machine.
+
+User must have authorization role with `PROVIDER_ADMIN` suffix on the org that owns the Site.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param dpuMachineId ID of the DPU Machine
+	@return ApiUpdateDpuMachinePowerRequest
+*/
+func (a *DPUMachineAPIService) UpdateDpuMachinePower(ctx context.Context, org string, dpuMachineId string) ApiUpdateDpuMachinePowerRequest {
+	return ApiUpdateDpuMachinePowerRequest{
+		ApiService:   a,
+		ctx:          ctx,
+		org:          org,
+		dpuMachineId: dpuMachineId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return MessageResponse
+func (a *DPUMachineAPIService) UpdateDpuMachinePowerExecute(r ApiUpdateDpuMachinePowerRequest) (*MessageResponse, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPatch
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *MessageResponse
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DPUMachineAPIService.UpdateDpuMachinePower")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/dpu/{dpuMachineId}/power"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"dpuMachineId"+"}", url.PathEscape(parameterValueToString(r.dpuMachineId, "dpuMachineId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.dpuMachinePowerUpdateRequest == nil {
+		return localVarReturnValue, nil, reportError("dpuMachinePowerUpdateRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.dpuMachinePowerUpdateRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
