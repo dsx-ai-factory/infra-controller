@@ -442,11 +442,10 @@ name (`<device-id>-initial` or `<device-id>-v<version>`). NICo enforces these
 ownership checks itself; Kubernetes RBAC grants access throughout the namespace.
 
 <Note>
-With DPF 26.8.0 or later (excluding prereleases of 26.8.0), NICo registers each
-new DPUDevice with its own immutable, version-labeled BMC credential Secret
-containing the DPU's established ingestion password, including retained
-credentials. Registration preserves existing DPUDevice credential references.
-Older DPF versions continue to use the shared BMC password.
+On a NICo 2.5 site with DPF 30.0.0 or later, NICo registers each new DPUDevice
+with its own immutable, version-labeled BMC credential Secret containing the
+DPU's established ingestion password, including retained credentials.
+Registration preserves existing DPUDevice credential references.
 
 Reset, forced deletion, and decommissioning wait for the host's DPUNode,
 DPUDevices, and DPUs to drain before deleting its credential Secrets. Forced
@@ -459,10 +458,12 @@ and immutability match and it is not being deleted. A conflicting Secret blocks
 registration until you reset or force-delete the host and let credential Secret
 cleanup finish.
 
-With the same DPF version requirement, NICo uses DPF to rotate BMC root
-credentials for DPUs on DPF-ingested hosts when DPF is enabled. On BF4, DPF also
-applies the password to its `service` account when the BMC exposes that account
-through Redfish. The host BMC continues to use Redfish.
+With DPF enabled, NICo uses DPF to rotate BMC root credentials for DPUs on
+DPF-ingested hosts. On BF4, DPF applies the root password to the `service`
+account when the BMC exposes that account through Redfish. The separate
+`credential rotate --type=dpu-bmc-service` target applies to NICo-managed
+service-account rotation outside the DPF-managed host workflow. The host BMC
+continues to use Redfish.
 
 Force deletion can interrupt a versioned rotation. When DPF might have changed
 the root password, NICo preserves the recovery credentials and verifies the
@@ -1396,12 +1397,12 @@ integrity protection and a trusted boot mechanism such as Secure Boot.
 
 DPF provisions DPUs out-of-band over Redfish and needs the BMC password
 applied to the hardware. NICo uses the configured **site-wide BMC root**
-credential to create the `bmc-shared-password` Secret in the DPF operator
-namespace (`dpf-operator-system` by default). It retries every 60 seconds if
-bootstrap starts before the credential is available. NICo builds with shared
-Secret retention keep the original value across restarts and later site-wide
-rotations. Earlier builds copy a newly staged target password into the shared
-Secret even while DPUs still use the previous password. See the
+credential to create the `bmc-shared-password` Secret in `dpf-operator-system`.
+It retries every 60 seconds if bootstrap starts before the credential is
+available. NICo 2.5 keeps the original value across restarts and later
+site-wide rotations. Earlier Core builds can copy a newly staged target
+password into the shared Secret even while DPUs still use the previous
+password. See the
 [shared Secret retention change](https://github.com/dsx-ai-factory/infra-controller/pull/9649).
 
 Configure it through a watched Kubernetes Secret, through the API, or by seeding
@@ -1497,21 +1498,27 @@ The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lock
 #### Rotate a DPU that uses the shared Secret
 
 <Warning>
-Before staging a new target on a DPF-managed NICo 2.5 site, upgrade DPF to
-30.0.0 or later and roll out a NICo build with shared Secret retention to every
-API replica. Keep the site-wide target fixed until the rollout finishes.
+Before staging a new target, verify the DPF operator runs a supported release
+at or above 30.0.0 and every NICo API replica runs NICo 2.5. Keep the site-wide
+target fixed while upgrading these components.
 </Warning>
 
-If you upgrade DPF separately, restart the NICo API replicas after the DPF
-upgrade so they read the installed DPF version.
+For a separately managed DPF installation, follow your site's DPF upgrade
+procedure and verify that `DPFOperatorConfig.spec.deploymentMode` is
+`zero-trust` for Redfish provisioning. Use the
+[Core-only Helm upgrade](upgrade.md#core-only-helm-upgrade) to preserve the
+installed DPF release. Deploy or restart every NICo API replica after the DPF
+upgrade so Core reads the installed DPF version.
 
 Existing DPUDevices keep using `bmc-shared-password` until their next BMC
 credential rotation. After the updated NICo API replicas are running, stage
 the next site-wide target with
 [`credential rotate --type=bmc`](nico-admin-cli/commands/credential/credential-rotate.md).
 
-- With `bmc_rotation_enabled = true`, eligible DPUs converge automatically when
-  their hosts are idle in `Ready`.
+NICo starts rotation when the managed host is idle in `Ready`. A forced
+request for a DPU on an assigned host waits until the host returns to `Ready`.
+
+- With `bmc_rotation_enabled = true`, eligible DPUs converge automatically.
 - With `bmc_rotation_enabled = false` (the default), request convergence with
   [`credential force-bmc set`](nico-admin-cli/commands/credential/credential-force-bmc-set.md)
   using the DPU's BMC MAC address.

@@ -681,7 +681,9 @@ You can narrow an upgrade to particular components with the `--skip-*` flags. `-
 
 The prerequisite phases therefore run on every invocation. That is by design and is cheap: each one is idempotent, and a phase whose inputs have not changed reconciles to the same state and exits quickly.
 
-To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Update both together when moving to a new revision. Run from the **repository root**, matching what `setup.sh` itself executes:
+### Core-only Helm upgrade
+
+To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision. Update both together when moving to a new revision. Substitute your complete site-specific Core values file for the example path and run from the **repository root**. See the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration).
 
 ```bash
 helm upgrade --install nico ./helm \
@@ -695,8 +697,10 @@ helm upgrade --install nico ./helm \
 <Warning>
 This skips the MetalLB CRD handling, DPF management, the `imagepullsecret` upsert the migration Job depends on, and the other prereq phases. Only do this when you are certain those components do not need updating.
 
-**Do not use this command unchanged on a DPF-enabled site**. It omits the
-rendered `[dpf]` block and `nico-api.dpf.rbacCreate=true` values that `setup.sh`
-adds to the single Core deployment. From the repository root, use
-`helm-prereqs/setup.sh -y --skip-rest` instead.
+For a separately managed DPF installation, preserve `[dpf].enabled = true`,
+the existing credential source settings and mounts, and
+`nico-api.dpf.rbacCreate=true` when the Core chart manages the DPF RBAC.
+This Helm upgrade leaves the installed DPF operator release in place.
+The `setup.sh -y --skip-rest` reference workflow still runs phase 5b and
+applies its pinned DPF chart and operator image.
 </Warning>

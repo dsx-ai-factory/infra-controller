@@ -2194,12 +2194,9 @@ DPF enabled, Core requires local v0 before startup on both fresh and existing
 sites whenever v0 is current or the current target cannot be resolved. This
 prevents a rolling update from activating local ownership while an older
 replica can still register a DPU that uses the shared credential. On a transient
-rotation-target read failure, a present local v0 permits startup and retry. After
-accepting local v0, NICo retains that last shared value and logs an error if the
-entry disappears. To recover, restore the local value unchanged. Other BMC
-rotation targets follow the same retention rule when absent from their
-authoritative source. During background refresh, a transient source-read
-failure retains the last published Secret and is retried.
+rotation-target read failure, a present local v0 permits startup and retry.
+NICo keeps the original shared DPF Secret value once published. If the local v0
+entry disappears, restore the original value.
 The setting does not affect versioned site-wide BMC roots,
 per-device BMC credentials, or BMC rotation.
 

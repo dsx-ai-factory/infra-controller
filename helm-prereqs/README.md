@@ -854,10 +854,10 @@ under the default `nico-api.credentials.bmcSiteWideRootSource: local_first`.
 Set each password to the value in use, or leave `siteCredentials` disabled and
 keep the credentials where they are.
 
-The DPF bootstrap is unchanged: `NICO_DPF_BMC_ROOT_PASSWORD` still seeds the
-watched version-0 Secret, with the same rules as on a Vault site. Per-DPU
-credential delivery remains tracked in
-[#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147).
+On a Vault-free site, `NICO_DPF_BMC_ROOT_PASSWORD` seeds the watched version-0
+Secret using the same rules as on a Vault-backed site. See
+[DPF BMC credential rotation](../docs/manuals/dpf.md#rotate-a-dpu-that-uses-the-shared-secret)
+for per-DPU Secrets and shared credential retention.
 
 ### Admin CLI credential without Vault
 
