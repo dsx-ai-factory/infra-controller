@@ -98,6 +98,8 @@ phases="$(extract_section "${SETUP_SH}" \
 # Phase 5 calls _vault_consumers, which setup.sh gets from the sourced preflight.sh.
 vault_consumers_fn="$(sed -n '/^_vault_consumers()/,/^}/p' "${PREFLIGHT_SH}")"
 [[ -n "${vault_consumers_fn}" ]] || fail "could not extract _vault_consumers from preflight.sh"
+# It calls the Deployment probe that preflight.sh sources from vault-consumers.sh.
+vault_consumers_fn="$(cat "${SCRIPT_DIR}/../vault-consumers.sh")"$'\n'"${vault_consumers_fn}"
 printf 'set -euo pipefail\n%s\n%s\n' "${vault_consumers_fn}" "${phases}" > "${TEST_TMP_DIR}/phases.sh"
 # Surface the retention decision for the assertions below.
 cat >> "${TEST_TMP_DIR}/phases.sh" <<'TRAILER'
@@ -111,6 +113,9 @@ cat > "${TEST_TMP_DIR}/bin/kubectl" <<'FAKE_KUBECTL'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'kubectl %s\n' "$*" >> "${TEST_CALLS}"
+deployment() { # $1 name, $2 pod spec
+    printf '{"metadata":{"name":"%s"},"spec":{"template":{"spec":%s}}}' "$1" "$2"
+}
 case "$*" in
     'apply '*' -f -') cat >/dev/null ;;
     *'get statefulset vault --ignore-not-found -o jsonpath={.metadata.generation} {.status.observedGeneration}') printf '1 1' ;;
@@ -139,15 +144,18 @@ case "$*" in
             absent) echo 'Error from server (NotFound): secrets "nico-vault-token" not found' >&2; exit 1 ;;
             error) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
         esac ;;
-    'get deployments -n nico-system -o jsonpath={range .items[*]}'*)
-        # FAKE_CORE_ENV: the Deployments and their env names (vault: a renamed Core that
-        # references Vault; novault), none (absent), or a failed query (error).
+    'get deployments -n nico-system -o json')
+        # FAKE_CORE_ENV: the Deployments (vault: a renamed Core with the chart's Vault
+        # environment; novault), none (absent), or a failed query (error).
+        vault_pod='{"containers":[{"name":"nico-api","env":[{"name":"VAULT_TOKEN","valueFrom":{"secretKeyRef":{"name":"nico-vault-token","key":"token"}}},{"name":"VAULT_ADDR","valueFrom":{"configMapKeyRef":{"name":"vault-cluster-info","key":"VAULT_SERVICE"}}}]}]}'
+        plain_pod='{"containers":[{"name":"main","env":[{"name":"RUST_LOG","value":"info"}]}]}'
         case "${FAKE_CORE_ENV:-absent}" in
-            vault) printf 'carbide-api DATASTORE_USER,VAULT_ADDR,\nnico-bmc-proxy RUST_LOG,\n' ;;
-            novault) printf 'nico-api DATASTORE_USER,\n' ;;
-            absent) ;;
+            vault) items="$(deployment carbide-api "${vault_pod}"),$(deployment nico-bmc-proxy "${plain_pod}")" ;;
+            novault) items="$(deployment nico-api "${plain_pod}")" ;;
+            absent) items="" ;;
             error) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
-        esac ;;
+        esac
+        printf '{"apiVersion":"v1","kind":"List","items":[%s]}\n' "${items}" ;;
     'get certificates.cert-manager.io -A -o jsonpath='*)
         # FAKE_CERTS: Certificates and their issuers (vault: Flow's SPIFFE certificate still
         # from vault-nico-issuer; none), no cert-manager CRDs (nocrd), or a failed query (error).
@@ -259,7 +267,7 @@ assert_not_called "nico-vault-approle-tokens"
 assert_not_called "get secret nico-vault-token"
 # No Deployment and no Vault-issued Certificate exists, so nothing needs the Vault
 # resources: nico-prereqs renders without them.
-assert_called "kubectl get deployments -n nico-system -o jsonpath={range .items[*]}"
+assert_called "kubectl get deployments -n nico-system -o json"
 assert_called "kubectl get certificates.cert-manager.io -A -o jsonpath="
 assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false APPROLE=unset/unset TOKEN=unset]"
 assert_not_called "vault.configJob.enabled"

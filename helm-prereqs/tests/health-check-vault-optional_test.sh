@@ -20,8 +20,9 @@ export TEST_LOG="${TEST_TMP_DIR}/kubectl.log"
 
 mkdir -p "${TEST_TMP_DIR}/bin"
 # TEST_VAULT is installed, partial (namespace only), or absent; TEST_NICO_API is
-# the set of Deployments in the NICo namespace: vault (a renamed Core whose env
-# carries VAULT_ADDR), novault, or absent; TEST_CERTS is the cert-manager
+# the set of Deployments in the NICo namespace: vault (a renamed Core with the
+# chart's Vault environment), mounted (a Deployment that only mounts a Vault
+# Secret), novault, absent, or error (the query fails); TEST_CERTS is the cert-manager
 # Certificates: vault (Flow's still issued by vault-nico-issuer), none, nocrd
 # (cert-manager not installed), or error; TEST_VAULT_CONFIGMAP says whether
 # vault-cluster-info exists. Every other resource is missing, so the unrelated
@@ -30,6 +31,9 @@ cat > "${TEST_TMP_DIR}/bin/kubectl" <<'FAKE_KUBECTL'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${TEST_LOG}"
+deployment() { # $1 name, $2 pod spec
+    printf '{"metadata":{"name":"%s"},"spec":{"template":{"spec":%s}}}' "$1" "$2"
+}
 case "$*" in
     cluster-info) ;;
     'get configmap -A --field-selector metadata.name=nico-system-nico-database-config -o jsonpath={.items[0].metadata.namespace}')
@@ -49,13 +53,18 @@ case "$*" in
             nocrd) echo 'error: the server doesn'"'"'t have a resource type "certificates"' >&2; exit 1 ;;
             *) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
         esac ;;
-    'get deployments -n '*' -o jsonpath={range .items[*]}'*)
+    'get deployments -n '*' -o json')
+        vault_pod='{"containers":[{"name":"nico-api","env":[{"name":"VAULT_TOKEN","valueFrom":{"secretKeyRef":{"name":"nico-vault-token","key":"token"}}},{"name":"VAULT_ADDR","valueFrom":{"configMapKeyRef":{"name":"vault-cluster-info","key":"VAULT_SERVICE"}}}]}]}'
+        mounted_pod='{"containers":[{"name":"main"}],"volumes":[{"name":"vault","secret":{"secretName":"nico-vault-token"}}]}'
+        plain_pod='{"containers":[{"name":"main","env":[{"name":"RUST_LOG","value":"info"}]}]}'
         case "${TEST_NICO_API}" in
-            vault) printf 'carbide-api DATASTORE_USER,VAULT_ADDR,VAULT_PKI_ROLE_NAME,\nnico-bmc-proxy RUST_LOG,\n' ;;
-            novault) printf 'nico-api DATASTORE_USER,\n' ;;
-            absent) ;;
+            vault) items="$(deployment carbide-api "${vault_pod}"),$(deployment nico-bmc-proxy "${plain_pod}")" ;;
+            mounted) items="$(deployment nico-api "${plain_pod}"),$(deployment nico-tool "${mounted_pod}")" ;;
+            novault) items="$(deployment nico-api "${plain_pod}")" ;;
+            absent) items="" ;;
             *) exit 1 ;;
-        esac ;;
+        esac
+        printf '{"apiVersion":"v1","kind":"List","items":[%s]}\n' "${items}" ;;
     'get statefulset -n vault vault -o name')
         case "${TEST_VAULT}" in
             installed) printf 'statefulset.apps/vault\n' ;;
@@ -142,7 +151,7 @@ assert_output 'configmap/nico-system-nico-database-config[DB_HOST]'
 assert_called 'get statefulset -n vault vault -o name'
 assert_called 'get namespace vault'
 # Core is deployed, so its Deployment decides the integration; the ConfigMap is not consulted.
-assert_called 'get deployments -n nico-site -o jsonpath={range .items[*]}'
+assert_called 'get deployments -n nico-site -o json'
 assert_not_called 'get configmap -n nico-site vault-cluster-info -o name'
 assert_called 'get deployment -n nico-site nico-api -o jsonpath={.spec.replicas}'
 assert_not_called 'exec -n vault'
@@ -171,7 +180,7 @@ assert_no_output "${VAULT_UNUSED_WARN}"
 assert_not_called 'get namespace vault'
 assert_called 'exec -n vault vault-0 -c vault -- vault status'
 # The Deployments decided; the ConfigMap is not consulted for integration.
-assert_called 'get deployments -n nico-system -o jsonpath={range .items[*]}'
+assert_called 'get deployments -n nico-system -o json'
 assert_not_called 'get configmap -n nico-system vault-cluster-info -o name'
 
 CASE="Vault running after --skip-vault moved NICo off it"
@@ -265,3 +274,21 @@ assert_output 'WARN  could not query configmap/vault-cluster-info in nico-system
 assert_output 'WARN  vault: running; whether NICo still uses it could not be determined'
 assert_no_output "${VAULT_UNUSED_WARN}"
 assert_no_output '(--skip-vault was used)'
+
+# A Deployment that consumes a Vault Secret without the Vault environment keeps
+# NICo integrated: the Secret would be removed from under it otherwise.
+CASE="Vault gone while a Deployment still mounts a Vault Secret"
+run_health_check absent mounted none absent nico-system ""
+assert_output 'FAIL  statefulset/vault: not found, but NICo is configured to use Vault (deployment/nico-tool references secret/nico-vault-token)'
+assert_no_output "${VAULT_ABSENT_SKIP}"
+for line in "${INTEGRATION_SKIPS[@]}"; do assert_no_output "${line}"; done
+
+# A Deployment list that cannot be read is unknown too, and the ConfigMap is
+# consulted in its place.
+CASE="Vault running, the Deployment query fails: integration unknown"
+run_health_check installed error none absent nico-system nico-system
+assert_output 'WARN  could not inspect the Deployments in nico-system (kubectl failed or jq is not installed); Vault integration is decided from Certificates and vault-cluster-info alone'
+assert_output 'WARN  vault: running; whether NICo still uses it could not be determined'
+assert_no_output "${VAULT_UNUSED_WARN}"
+assert_no_output '(--skip-vault was used)'
+assert_called 'get configmap -n nico-system vault-cluster-info -o name'

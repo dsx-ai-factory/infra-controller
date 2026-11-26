@@ -11,8 +11,11 @@
 # before any mutation. Both --skip-vault errors block setup even with --ignore-preflight-errors.
 # Vault consumers that this run does not redeploy (Core with --skip-core, Flow
 # and the site-agent with --skip-rest, RMS with --skip-rms, Certificates outside
-# those releases) are listed in a warning that the Vault resources are kept.
-# No Python is needed: a fake python3 stands in for the checker.
+# those releases) are listed in a warning that the Vault resources are kept. A
+# Deployment is a consumer by every route to the nico-prereqs Vault Secrets and
+# ConfigMap, the rule in vault-consumers.sh that preflight.sh sources.
+# No Python is needed: a fake python3 stands in for the checker. The consumer
+# probe runs the real jq.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -289,8 +292,24 @@ unset -f kubectl
 # ---------------------------------------------------------------------------
 # 6. --skip-vault consumers this run does not redeploy are a warning that lists
 #    them: Core with --skip-core, Flow and the site-agent with --skip-rest, RMS
-#    with --skip-rms, and any Certificate outside those releases.
+#    with --skip-rms, and any Certificate outside those releases. A Deployment
+#    is a consumer by every route to the nico-prereqs Vault Secrets and
+#    ConfigMap, not only by VAULT_ADDR.
 # ---------------------------------------------------------------------------
+VAULT_CONSUMERS_SH="${SCRIPT_DIR}/../vault-consumers.sh"
+# preflight.sh loads the Deployment probe itself, from its own directory: its
+# lines up to the source line, run beside a copy of vault-consumers.sh from
+# another working directory, define the function.
+source_line="$(grep -nxF 'source "${SCRIPT_DIR}/vault-consumers.sh"' "${PREFLIGHT_SH}" | cut -d: -f1)"
+[[ "${source_line}" =~ ^[0-9]+$ ]] || fail "preflight.sh does not source vault-consumers.sh exactly once"
+mkdir -p "${TEST_TMP_DIR}/prefix"
+cp "${VAULT_CONSUMERS_SH}" "${TEST_TMP_DIR}/prefix/"
+sed -n "1,${source_line}p" "${PREFLIGHT_SH}" > "${TEST_TMP_DIR}/prefix/preflight.sh"
+(cd / && bash -c 'source "$1" && declare -F _vault_deployment_references >/dev/null' _ "${TEST_TMP_DIR}/prefix/preflight.sh") \
+    || fail "sourcing preflight.sh does not define _vault_deployment_references"
+
+# shellcheck source=../vault-consumers.sh
+source "${VAULT_CONSUMERS_SH}"
 for fn in _vault_consumers _check_skip_vault_consumers_not_redeployed; do
     eval "$(sed -n "/^${fn}()/,/^}/p" "${PREFLIGHT_SH}")"
     declare -f "${fn}" >/dev/null || fail "could not extract ${fn} from preflight.sh"
@@ -298,29 +317,58 @@ done
 consumers_call_line="$(grep -nxF '    _check_skip_vault_consumers_not_redeployed' "${PREFLIGHT_SH}" | cut -d: -f1)"
 [[ -n "${consumers_call_line}" && "${reachable_line}" -lt "${consumers_call_line}" ]] \
     || fail "the consumer warning is not called once inside the cluster-reachable section"
-# health-check.sh mirrors both consumer probes; keep the literals in step.
-for probe in '{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*].env[*]}{.name}{","}{end}{"\n"}{end}' \
-             '{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" "}{.spec.issuerRef.name}{"\n"}{end}' \
+# health-check.sh mirrors the Certificate probe; keep the literals in step.
+for probe in '{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" "}{.spec.issuerRef.name}{"\n"}{end}' \
              "doesn't have a resource type|no matches for kind|could not find the requested resource"; do
     { grep -Fq -- "${probe}" "${PREFLIGHT_SH}" && grep -Fq -- "${probe}" "${SCRIPT_DIR}/../health-check.sh"; } \
         || fail "preflight.sh and health-check.sh no longer share the consumer probe: ${probe}"
 done
+# The Deployment probe is not mirrored: both scripts call the one in
+# vault-consumers.sh, and neither lists the Deployments itself.
+for script in "${PREFLIGHT_SH}" "${SCRIPT_DIR}/../health-check.sh"; do
+    { grep -Fq '$(_vault_deployment_references "' "${script}" && ! grep -Fq 'get deployments -n' "${script}"; } \
+        || fail "${script##*/} does not take its Deployment probe from vault-consumers.sh"
+done
+
+# The nico-api Deployment as the chart renders it while nico-api.vault.enabled:
+# VAULT_ADDR and its companions come from the two Vault Secrets and the ConfigMap.
+CHART_VAULT_POD='{"containers":[{"name":"nico-api","env":[
+    {"name":"VAULT_ROLE_ID","valueFrom":{"secretKeyRef":{"name":"nico-vault-approle-tokens","key":"VAULT_ROLE_ID","optional":true}}},
+    {"name":"VAULT_TOKEN","valueFrom":{"secretKeyRef":{"name":"nico-vault-token","key":"token"}}},
+    {"name":"VAULT_ADDR","valueFrom":{"configMapKeyRef":{"name":"vault-cluster-info","key":"VAULT_SERVICE"}}},
+    {"name":"DATASTORE_USER","valueFrom":{"secretKeyRef":{"name":"nico-system.nico.nico-pg-cluster.credentials","key":"username"}}}]}]}'
+# A pod that uses the same routes for resources that have nothing to do with Vault.
+NO_VAULT_POD='{"containers":[{"name":"main","env":[
+    {"name":"RUST_LOG","value":"info"},
+    {"name":"DATASTORE_HOST","valueFrom":{"configMapKeyRef":{"name":"nico-system-nico-database-config","key":"DB_HOST"}}}]}],
+    "volumes":[{"name":"nico-roots","secret":{"secretName":"nico-roots"}}]}'
+deployment() { # $1 name, $2 pod spec
+    printf '{"metadata":{"name":"%s"},"spec":{"template":{"spec":%s}}}' "$1" "$2"
+}
+deployment_list() { # the Deployments, as `kubectl get deployments -o json` prints them
+    local IFS=,
+    printf '{"apiVersion":"v1","kind":"List","items":[%s]}\n' "$*"
+}
 
 kubectl() {
     printf '%s\n' "$*" >> "${KUBECTL_LOG}"
     case "${FAKE_CLUSTER}:$*" in
         error:*) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; return 1 ;;
-        consumers:'get deployments -n nico-system -o jsonpath='*)
-            printf 'carbide-api DATASTORE_USER,VAULT_ADDR,\nnico-bmc-proxy RUST_LOG,\n' ;;
+        consumers:'get deployments -n nico-system -o json')
+            deployment_list "$(deployment carbide-api "${CHART_VAULT_POD}")" "$(deployment nico-bmc-proxy "${NO_VAULT_POD}")" ;;
         consumers:'get certificates.cert-manager.io -A -o jsonpath='*)
             printf 'flow/flow-certificate vault-nico-issuer\nrack-manager/rms-api-server-certificate vault-nico-issuer\n'
             printf 'nico-system/nico-api-certificate vault-nico-issuer\nmonitoring/grafana-tls vault-nico-issuer\n'
             printf 'nico-rest/core-grpc-client-site-agent-certs site-issuer\n' ;;
-        none:'get deployments -n nico-system -o jsonpath='*) printf 'nico-api DATASTORE_USER,\n' ;;
+        none:'get deployments -n nico-system -o json') deployment_list "$(deployment nico-api "${NO_VAULT_POD}")" ;;
         none:'get certificates.cert-manager.io -A -o jsonpath='*) printf 'nico-system/nico-api-certificate site-issuer\n' ;;
+        nocrd:'get deployments -n nico-system -o json') deployment_list ;;
         nocrd:'get certificates.cert-manager.io -A -o jsonpath='*)
             echo 'error: the server doesn'"'"'t have a resource type "certificates"' >&2; return 1 ;;
-        nocrd:*) ;;
+        # route: the Deployment "consumer" has the pod spec under test; "bystander" references nothing of Vault.
+        route:'get deployments -n nico-system -o json')
+            deployment_list "$(deployment consumer "${FAKE_POD_SPEC}")" "$(deployment bystander "${NO_VAULT_POD}")" ;;
+        route:'get certificates.cert-manager.io -A -o jsonpath='*) printf 'nico-system/nico-api-certificate site-issuer\n' ;;
         *) ;;
     esac
 }
@@ -366,6 +414,36 @@ result="$(run_consumers_check false true true false error)"
     || fail "a failed consumer probe was not reported as a warning:" "${result}"
 result="$(run_consumers_check true true true false consumers)"
 [[ "${result}" == $'B: \nE: \nW: ' && ! -s "${KUBECTL_LOG}" ]] || fail "the Vault path probed or warned about consumers:" "${result}"
+
+# Every route to the nico-prereqs Vault Secrets and ConfigMap makes the Deployment
+# a consumer, and nothing else does. Each row is the pod spec of the Deployment
+# "consumer" and the references _vault_consumers lists for it; without references
+# it must not be listed. The chart's own Deployment, which has VAULT_ADDR beside
+# those references, is the carbide-api line of the cases above.
+while IFS='|' read -r name pod_spec references; do
+    result="$(FAKE_CLUSTER=route FAKE_POD_SPEC="${pod_spec}" _vault_consumers)" || fail "${name}: the consumer probe failed"
+    [[ "${result}" == "${references:+deployment/nico-system/consumer (${references})}" ]] \
+        || fail "${name}: listed '${result}', want the references '${references}'"
+done <<'CASES'
+env from a key of a Vault Secret|{"containers":[{"name":"main","env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"nico-vault-token","key":"token"}}}]}]}|secret/nico-vault-token
+env from a key of vault-cluster-info|{"containers":[{"name":"main","env":[{"name":"ADDRESS","valueFrom":{"configMapKeyRef":{"name":"vault-cluster-info","key":"VAULT_SERVICE"}}}]}]}|configmap/vault-cluster-info
+envFrom a Vault Secret|{"containers":[{"name":"main","envFrom":[{"secretRef":{"name":"nico-vault-approle-tokens"}}]}]}|secret/nico-vault-approle-tokens
+envFrom vault-cluster-info|{"containers":[{"name":"main","envFrom":[{"configMapRef":{"name":"vault-cluster-info"}}]}]}|configmap/vault-cluster-info
+a secret volume|{"containers":[{"name":"main"}],"volumes":[{"name":"vault","secret":{"secretName":"nico-vault-token"}}]}|secret/nico-vault-token
+a configMap volume|{"containers":[{"name":"main"}],"volumes":[{"name":"vault","configMap":{"name":"vault-cluster-info"}}]}|configmap/vault-cluster-info
+a projected volume with a Secret source|{"containers":[{"name":"main"}],"volumes":[{"name":"vault","projected":{"sources":[{"secret":{"name":"nico-vault-approle-tokens"}}]}}]}|secret/nico-vault-approle-tokens
+a projected volume with a ConfigMap source|{"containers":[{"name":"main"}],"volumes":[{"name":"vault","projected":{"sources":[{"serviceAccountToken":{"path":"token"}},{"configMap":{"name":"vault-cluster-info"}}]}}]}|configmap/vault-cluster-info
+an init container|{"initContainers":[{"name":"init","envFrom":[{"secretRef":{"name":"nico-vault-token"}}]}],"containers":[{"name":"main"}]}|secret/nico-vault-token
+several Vault resources, each listed once|{"containers":[{"name":"main","envFrom":[{"configMapRef":{"name":"vault-cluster-info"}}]},{"name":"sidecar","envFrom":[{"configMapRef":{"name":"vault-cluster-info"}}]}],"volumes":[{"name":"vault","secret":{"secretName":"nico-vault-token"}}]}|configmap/vault-cluster-info, secret/nico-vault-token
+other resources by the same routes, and the Vault names under the other kind|{"initContainers":[{"name":"init","envFrom":[{"secretRef":{"name":"nico-roots"}},{"configMapRef":{"name":"nico-vault-approle-tokens"}}]}],"containers":[{"name":"main","env":[{"name":"A","valueFrom":{"secretKeyRef":{"name":"vault-cluster-info","key":"k"}}},{"name":"B","valueFrom":{"configMapKeyRef":{"name":"nico-vault-token","key":"k"}}},{"name":"POD","valueFrom":{"fieldRef":{"fieldPath":"metadata.name"}}}]}],"volumes":[{"name":"a","secret":{"secretName":"vault-nicoca-issuer-token"}},{"name":"b","configMap":{"name":"nico-vault-token"}},{"name":"c","emptyDir":{}},{"name":"d","projected":{"sources":[{"downwardAPI":{"items":[]}},{"secret":{"name":"nico-roots"}},{"configMap":{"name":"nico-vault-approle-tokens"}}]}}]}|
+CASES
+
+# Without jq the probe fails and says why, instead of reporting no consumers.
+mkdir -p "${TEST_TMP_DIR}/no-jq"
+if result="$(PATH="${TEST_TMP_DIR}/no-jq"; FAKE_CLUSTER=consumers; _vault_deployment_references nico-system 2>"${TEST_TMP_DIR}/jq.err")"; then
+    fail "the Deployment probe succeeded without jq:" "${result}"
+fi
+grep -Fq 'jq not found in PATH' "${TEST_TMP_DIR}/jq.err" || fail "a missing jq was not named:" "$(cat "${TEST_TMP_DIR}/jq.err")"
 unset -f kubectl
 
 echo "preflight --skip-vault tests passed"
