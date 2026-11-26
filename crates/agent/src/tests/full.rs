@@ -1818,6 +1818,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         ipv6_interface_config: None,
         vpc_routing_profile: None,
         interface_routing_profile: None,
+        interface_roce_config: None,
         addresses: vec![],
     };
     assert_eq!(admin_interface.svi_ip, None);
@@ -1992,6 +1993,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         ipv6_interface_config: None,
         vpc_routing_profile: None,
         interface_routing_profile: None,
+        interface_roce_config: None,
         addresses: vec![],
     };
 
@@ -2172,6 +2174,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
                     ip_address: None,
                     ipv6_interface_config: None,
                     routing_profile: None,
+                    roce_config: None,
                 }],
                 #[allow(deprecated)]
                 auto: false,

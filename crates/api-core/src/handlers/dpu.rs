@@ -505,6 +505,7 @@ async fn service_interfaces_for_dpu(
             vpc_peer_vnis: resolved_vpc.vpc_peer_vnis.clone(),
             vpc_routing_profile: Some(vpc_routing_profile),
             interface_routing_profile: None,
+            interface_roce_config: None,
             network_security_group,
             mtu: Some(segment.config.mtu as u32),
             link_prefix: endpoint.link_prefix.to_string(),

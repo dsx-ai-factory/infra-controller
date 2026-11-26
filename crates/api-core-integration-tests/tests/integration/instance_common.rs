@@ -289,6 +289,7 @@ pub(super) fn single_interface_network_config(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -311,6 +312,7 @@ pub(super) fn single_interface_network_config_with_vfs(
         ip_address: None,
         ipv6_interface_config: None,
         routing_profile: None,
+        roce_config: None,
     }];
 
     interfaces.extend(
@@ -324,6 +326,7 @@ pub(super) fn single_interface_network_config_with_vfs(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }),
     );
 

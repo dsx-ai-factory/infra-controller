@@ -692,6 +692,7 @@ mod tests {
             vpc_peer_vnis: vec![],
             vpc_routing_profile: Some(rpc::RoutingProfile::default()),
             interface_routing_profile: None,
+            interface_roce_config: None,
             network_security_group: None,
             mtu: Some(9_000), // The fixed DPF and service-NAD contract must agree with HBN.
             link_prefix: link_prefix.to_string(),

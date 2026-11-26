@@ -685,6 +685,7 @@ pub(crate) async fn admin_network(
             })
             .transpose()?,
         interface_routing_profile: None,
+        interface_roce_config: None,
         addresses: vec![],
     };
     // Do not let an IPv6 VPC loopback create a canonical V6 entry by itself. The agent interprets
@@ -1031,6 +1032,10 @@ pub(crate) async fn tenant_network(
         ),
         vpc_routing_profile,
         interface_routing_profile,
+        interface_roce_config: iface
+            .roce_config
+            .as_ref()
+            .map(rpc::FlatInterfaceRoceConfig::from),
         addresses: vec![],
     };
     let ipv6_segment_prefix = ds.v6().map(|prefix| prefix.prefix.to_string());

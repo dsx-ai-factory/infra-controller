@@ -2089,6 +2089,7 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -4484,6 +4485,7 @@ fn automatic_rpc_network_config(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -8248,6 +8250,7 @@ fn dual_physical_network_config_with_vpc_prefixes(
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         )
         .collect();
@@ -8567,6 +8570,7 @@ async fn test_allocate_and_update_network_config_instance(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
             function_type: rpc::InterfaceFunctionType::Physical as i32,
             network_segment_id: None,
             network_details: Some(
@@ -8705,6 +8709,7 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -10256,6 +10261,7 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         };
     let initial_network = rpc::InstanceNetworkConfig {
         interfaces: vec![

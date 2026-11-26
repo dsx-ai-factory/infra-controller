@@ -106,6 +106,73 @@ func (irp *InterfaceInlineRoutingProfile) FromProto(proto *corev1.InstanceInterf
 	}
 }
 
+// InterfaceRoceConfig is the DB representation of RoCE runtime QoS parameters.
+type InterfaceRoceConfig struct {
+	TrustMode     *string `json:"trustMode"`
+	PfcPriorities []int   `json:"pfcPriorities"`
+	Tos           *int    `json:"tos"`
+}
+
+// ToProto converts this RoCE config into its Core proto representation.
+func (irc *InterfaceRoceConfig) ToProto() *corev1.InstanceInterfaceRoceConfig {
+	if irc == nil {
+		return nil
+	}
+	config := &corev1.InstanceInterfaceRoceConfig{
+		PfcPriorities: make([]uint32, 0, len(irc.PfcPriorities)),
+	}
+	for _, priority := range irc.PfcPriorities {
+		config.PfcPriorities = append(config.PfcPriorities, uint32(priority))
+	}
+	if irc.Tos != nil {
+		tos := uint32(*irc.Tos)
+		config.Tos = &tos
+	}
+	if irc.TrustMode != nil {
+		switch *irc.TrustMode {
+		case "Dscp":
+			mode := corev1.InstanceInterfaceRoceTrustMode_INSTANCE_INTERFACE_ROCE_TRUST_MODE_DSCP
+			config.TrustMode = &mode
+		case "Pcp":
+			mode := corev1.InstanceInterfaceRoceTrustMode_INSTANCE_INTERFACE_ROCE_TRUST_MODE_PCP
+			config.TrustMode = &mode
+		}
+	}
+	return config
+}
+
+// FromProto populates this RoCE config from its Core proto representation.
+func (irc *InterfaceRoceConfig) FromProto(proto *corev1.InstanceInterfaceRoceConfig) {
+	if proto == nil {
+		*irc = InterfaceRoceConfig{}
+		return
+	}
+	irc.PfcPriorities = make([]int, 0, len(proto.GetPfcPriorities()))
+	for _, priority := range proto.GetPfcPriorities() {
+		irc.PfcPriorities = append(irc.PfcPriorities, int(priority))
+	}
+	if proto.Tos != nil {
+		tos := int(*proto.Tos)
+		irc.Tos = &tos
+	} else {
+		irc.Tos = nil
+	}
+	if proto.TrustMode == nil {
+		irc.TrustMode = nil
+		return
+	}
+	switch *proto.TrustMode {
+	case corev1.InstanceInterfaceRoceTrustMode_INSTANCE_INTERFACE_ROCE_TRUST_MODE_DSCP:
+		mode := "Dscp"
+		irc.TrustMode = &mode
+	case corev1.InstanceInterfaceRoceTrustMode_INSTANCE_INTERFACE_ROCE_TRUST_MODE_PCP:
+		mode := "Pcp"
+		irc.TrustMode = &mode
+	default:
+		irc.TrustMode = nil
+	}
+}
+
 // Interface table maintains an Instance network association and its resolved state.
 type Interface struct {
 	bun.BaseModel `bun:"table:interface,alias:ifc"`
@@ -132,6 +199,7 @@ type Interface struct {
 	IPAddresses          []string                       `bun:"ip_addresses,type:text[]"`
 	IPPrefixes           []string                       `bun:"ip_prefixes,type:text[]"`
 	InlineRoutingProfile *InterfaceInlineRoutingProfile `bun:"inline_routing_profile,type:jsonb"`
+	RoceConfig           *InterfaceRoceConfig           `bun:"roce_config,type:jsonb"`
 	Status               string                         `bun:"status,notnull"`
 	Created              time.Time                      `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated              time.Time                      `bun:"updated,nullzero,notnull,default:current_timestamp"`
@@ -187,6 +255,18 @@ func (ifc Interface) EthernetInterfaceKey() string {
 			values.Add("inline_routing_prefix", prefix)
 		}
 	}
+	if ifc.RoceConfig != nil {
+		values.Set("has_roce_config", "true")
+		if ifc.RoceConfig.TrustMode != nil {
+			values.Set("roce_trust_mode", *ifc.RoceConfig.TrustMode)
+		}
+		if ifc.RoceConfig.Tos != nil {
+			values.Set("roce_tos", strconv.Itoa(*ifc.RoceConfig.Tos))
+		}
+		for _, priority := range ifc.RoceConfig.PfcPriorities {
+			values.Add("roce_pfc_priority", strconv.Itoa(priority))
+		}
+	}
 
 	return values.Encode()
 }
@@ -204,6 +284,7 @@ type InterfaceCreateInput struct {
 	VirtualFunctionID    *int
 	RequestedIpAddress   *string
 	InlineRoutingProfile *InterfaceInlineRoutingProfile
+	RoceConfig           *InterfaceRoceConfig
 	Status               string
 	CreatedBy            uuid.UUID
 }
@@ -222,6 +303,7 @@ type InterfaceUpdateInput struct {
 	VirtualFunctionID    *int
 	RequestedIpAddress   *string
 	InlineRoutingProfile *InterfaceInlineRoutingProfile
+	RoceConfig           *InterfaceRoceConfig
 	MacAddress           *string
 	IpAddresses          []string
 	IPPrefixes           []string // Nil preserves stored prefixes; an empty slice clears them.
@@ -252,6 +334,7 @@ type InterfaceClearInput struct {
 	SecondaryVpcPrefixID bool
 	RequestedIpAddress   bool
 	InlineRoutingProfile bool
+	RoceConfig           bool
 }
 
 var _ bun.BeforeAppendModelHook = (*Interface)(nil)
@@ -551,6 +634,10 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 		is.InlineRoutingProfile = input.InlineRoutingProfile
 		updatedFields = append(updatedFields, "inline_routing_profile")
 	}
+	if input.RoceConfig != nil {
+		is.RoceConfig = input.RoceConfig
+		updatedFields = append(updatedFields, "roce_config")
+	}
 	if input.MacAddress != nil {
 		is.MacAddress = input.MacAddress
 		updatedFields = append(updatedFields, "mac_address")
@@ -682,6 +769,7 @@ func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, input
 			VirtualFunctionID:    input.VirtualFunctionID,
 			RequestedIpAddress:   input.RequestedIpAddress,
 			InlineRoutingProfile: input.InlineRoutingProfile,
+			RoceConfig:           input.RoceConfig,
 			IsPhysical:           input.IsPhysical,
 			Status:               input.Status,
 			CreatedBy:            input.CreatedBy,
@@ -756,6 +844,10 @@ func (ifcd InterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Interfac
 	if input.InlineRoutingProfile {
 		i.InlineRoutingProfile = nil
 		updatedFields = append(updatedFields, "inline_routing_profile")
+	}
+	if input.RoceConfig {
+		i.RoceConfig = nil
+		updatedFields = append(updatedFields, "roce_config")
 	}
 
 	if len(updatedFields) > 0 {

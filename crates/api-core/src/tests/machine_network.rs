@@ -1544,6 +1544,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
+            roce_config: None,
         },
         &env.api.instrumentation,
     )
@@ -1586,6 +1587,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
+            roce_config: None,
         },
         &env.api.instrumentation,
     )
@@ -1809,6 +1811,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
             booturl: &None,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
+            roce_config: None,
         },
         &env.api.instrumentation,
     )
@@ -5357,6 +5360,7 @@ async fn test_managed_host_network_status(pool: sqlx::PgPool) {
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -5467,6 +5471,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,

@@ -4672,6 +4672,12 @@ message InstanceInterfaceConfig {
   // narrow prefix-list options that are already allowed by the owning VPC's
   // routing profile.
   optional InstanceInterfaceRoutingProfile routing_profile = 12;
+
+  // Optional RoCE runtime QoS parameters for this PF or VF. Matches NIC
+  // Configuration Operator `roceOptimized` runtime knobs (PFC / trust / ToS),
+  // not persistent firmware nvconfig. Values are accepted and persisted;
+  // host/DPU on-wire apply is a separate enforcement path.
+  optional InstanceInterfaceRoceConfig roce_config = 14;
 }
 
 // Automatic VPC-backed network selection for one instance interface.
@@ -4713,6 +4719,31 @@ message InstanceInterfaceRoutingProfile {
   // Every entry must be contained by an allowed_anycast_prefixes entry on the
   // owning VPC's routing profile.
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 1;
+}
+
+// RoCE runtime QoS knobs for an instance PF or VF, matching NIC Configuration
+// Operator `roceOptimized` runtime settings (`trust`, `pfc`, `tos`). These are
+// non-persistent and distinct from firmware nvconfig
+// (`ROCE_CC_PRIO_MASK_P*`, `CNP_DSCP_P*`, `CNP_802P_PRIO_P*`).
+message InstanceInterfaceRoceConfig {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  // QoS trust mode. Operator `roceOptimized` default is DSCP.
+  optional InstanceInterfaceRoceTrustMode trust_mode = 1;
+  // IEEE 802.1Q priorities (0-7) with PFC enabled. Operator `roceOptimized`
+  // enables priority 3. Entries must be unique.
+  repeated uint32 pfc_priorities = 2;
+  // IPv4 Type of Service octet (0-255). Operator `roceOptimized` default is 0.
+  optional uint32 tos = 3;
+}
+
+// Trust mode for RoCE runtime QoS classification on a NIC PF/VF.
+enum InstanceInterfaceRoceTrustMode {
+  INSTANCE_INTERFACE_ROCE_TRUST_MODE_UNSPECIFIED = 0;
+  // Differentiated Services Code Point trust (mlnx_qos `--trust dscp`).
+  INSTANCE_INTERFACE_ROCE_TRUST_MODE_DSCP = 1;
+  // Priority Code Point trust (mlnx_qos `--trust pcp`).
+  INSTANCE_INTERFACE_ROCE_TRUST_MODE_PCP = 2;
 }
 
 // The configuration that a customer desires for an instances IB interface
@@ -6391,6 +6422,10 @@ message FlatInterfaceConfig {
   // omits that value. At most one entry may contain tenant_vrf_loopback_ip.
   repeated InterfaceAddressConfig addresses = 22;
 
+  // RoCE runtime QoS parameters for this PF or VF representor. Mirrored from
+  // InstanceInterfaceConfig.roce_config for agent consumption.
+  optional FlatInterfaceRoceConfig interface_roce_config = 23;
+
   // The details of the network security group associated with
   // either the instance or its parent VPC.
   // Currently, source would either be INSTANCE or VPC.
@@ -6408,6 +6443,14 @@ message FlatInterfaceConfig {
 message FlatInterfaceRoutingProfile {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 1;
+}
+
+// Agent-facing RoCE runtime QoS parameters for a flat interface config.
+message FlatInterfaceRoceConfig {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  optional InstanceInterfaceRoceTrustMode trust_mode = 1;
+  repeated uint32 pfc_priorities = 2;
+  optional uint32 tos = 3;
 }
 
 // IPv6 configuration for an FNN interface that includes IPv6, sent from the

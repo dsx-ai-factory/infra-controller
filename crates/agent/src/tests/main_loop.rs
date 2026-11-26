@@ -542,6 +542,7 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
                 },
             ],
         }),
+        interface_roce_config: None,
         addresses: vec![rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V6.into(),
             ip: "2001:db8::1".to_string(),

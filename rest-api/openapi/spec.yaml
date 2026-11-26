@@ -27916,6 +27916,13 @@ components:
             - $ref: '#/components/schemas/InterfaceInlineRoutingProfile'
             - type: 'null'
           description: Inline interface-local routing profile options. Only valid for VPC-backed interfaces.
+        roceConfig:
+          oneOf:
+            - $ref: '#/components/schemas/InterfaceRoceConfig'
+            - type: 'null'
+          description: |-
+            RoCE runtime QoS parameters for this PF or VF
+            (NIC Configuration Operator `roceOptimized` runtime knobs).
         status:
           $ref: '#/components/schemas/InterfaceStatus'
           description: 'Status of the Interface'
@@ -27958,6 +27965,55 @@ components:
           items:
             type: string
             example: 192.0.2.0/24
+    InterfaceRoceTrustMode:
+      title: InterfaceRoceTrustMode
+      type: string
+      description: |-
+        QoS trust mode for RoCE runtime configuration on a PF or VF.
+        Matches NIC Configuration Operator / `mlnx_qos --trust` values.
+        Operator `roceOptimized` runtime default is `Dscp`.
+      enum:
+        - Dscp
+        - Pcp
+    InterfaceRoceConfig:
+      title: InterfaceRoceConfig
+      type: object
+      description: |-
+        RoCE runtime QoS parameters for an Instance PF or VF.
+        Matches NIC Configuration Operator `roceOptimized` runtime knobs (`trust`, `pfc`, `tos`).
+        These are non-persistent and distinct from firmware nvconfig
+        (`ROCE_CC_PRIO_MASK_P*`, `CNP_DSCP_P*`, `CNP_802P_PRIO_P*`).
+        Values are accepted and persisted; host/DPU on-wire apply may be incomplete depending on site tooling.
+      examples:
+        - trustMode: Dscp
+          pfcPriorities:
+            - 3
+          tos: 0
+      properties:
+        trustMode:
+          oneOf:
+            - $ref: '#/components/schemas/InterfaceRoceTrustMode'
+            - type: 'null'
+          description: QoS trust mode. Operator `roceOptimized` default is `Dscp`.
+        pfcPriorities:
+          type: array
+          description: |-
+            IEEE 802.1Q priorities (0-7) with PFC enabled.
+            Operator `roceOptimized` enables priority 3. Entries must be unique.
+          default: []
+          items:
+            type: integer
+            minimum: 0
+            maximum: 7
+            example: 3
+        tos:
+          type:
+            - integer
+            - 'null'
+          description: IPv4 Type of Service octet (0-255). Operator `roceOptimized` default is 0.
+          minimum: 0
+          maximum: 255
+          example: 0
     InterfaceCreateRequest:
       title: InterfaceCreateRequest
       type: object
@@ -28020,6 +28076,13 @@ components:
             - $ref: '#/components/schemas/InterfaceInlineRoutingProfile'
             - type: 'null'
           description: Inline interface-local routing profile options. It cannot be specified for Subnet-based interfaces.
+        roceConfig:
+          oneOf:
+            - $ref: '#/components/schemas/InterfaceRoceConfig'
+            - type: 'null'
+          description: |-
+            RoCE runtime QoS parameters for this PF or VF
+            (NIC Configuration Operator `roceOptimized` runtime knobs: trust, PFC priorities, ToS).
         isPhysical:
           type: boolean
           description: Specifies whether this network should be attached to the Instance over a physical interface.

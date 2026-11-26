@@ -41,6 +41,8 @@ type APIInterfaceCreateOrUpdateRequest struct {
 	IPAddress *string `json:"ipAddress"`
 	// InlineRoutingProfile narrows VPC routing-profile options for this Interface.
 	InlineRoutingProfile *APIInterfaceInlineRoutingProfile `json:"inlineRoutingProfile"`
+	// RoceConfig carries RoCE runtime QoS parameters for this PF or VF.
+	RoceConfig *APIInterfaceRoceConfig `json:"roceConfig"`
 	// Device is the device name of the Interface
 	Device *string `json:"device"`
 	// DeviceInstance is the ID of the DeviceInstance
@@ -55,6 +57,105 @@ type APIInterfaceCreateOrUpdateRequest struct {
 type APIInterfaceInlineRoutingProfile struct {
 	// AllowedAnycastPrefixes is the list of CIDR prefixes this interface may announce as anycast.
 	AllowedAnycastPrefixes []string `json:"allowedAnycastPrefixes"`
+}
+
+// APIInterfaceRoceTrustMode is the QoS trust mode for RoCE runtime configuration.
+type APIInterfaceRoceTrustMode string
+
+const (
+	// APIInterfaceRoceTrustModeDscp trusts Differentiated Services Code Point.
+	APIInterfaceRoceTrustModeDscp APIInterfaceRoceTrustMode = "Dscp"
+	// APIInterfaceRoceTrustModePcp trusts Priority Code Point.
+	APIInterfaceRoceTrustModePcp APIInterfaceRoceTrustMode = "Pcp"
+)
+
+// APIInterfaceRoceConfig captures RoCE runtime QoS parameters for a PF or VF.
+// Fields match NIC Configuration Operator `roceOptimized` runtime knobs.
+type APIInterfaceRoceConfig struct {
+	// TrustMode is the QoS trust mode. Operator default is Dscp.
+	TrustMode *APIInterfaceRoceTrustMode `json:"trustMode"`
+	// PfcPriorities lists IEEE 802.1Q priorities (0-7) with PFC enabled.
+	PfcPriorities []int `json:"pfcPriorities"`
+	// Tos is the IPv4 Type of Service octet (0-255). Operator default is 0.
+	Tos *int `json:"tos"`
+}
+
+// Validate ensures RoCE runtime fields are within operator-compatible bounds.
+func (rc *APIInterfaceRoceConfig) Validate() error {
+	if rc == nil {
+		return nil
+	}
+	if rc.PfcPriorities == nil {
+		rc.PfcPriorities = []int{}
+	}
+
+	errs := validation.Errors{}
+	if rc.TrustMode != nil {
+		switch *rc.TrustMode {
+		case APIInterfaceRoceTrustModeDscp, APIInterfaceRoceTrustModePcp:
+		default:
+			errs["trustMode"] = fmt.Errorf("invalid trustMode `%s`", *rc.TrustMode)
+		}
+	}
+
+	seen := map[int]struct{}{}
+	for _, priority := range rc.PfcPriorities {
+		if priority < 0 || priority > 7 {
+			errs["pfcPriorities"] = fmt.Errorf("pfcPriorities entry `%d` must be between 0 and 7", priority)
+			break
+		}
+		if _, ok := seen[priority]; ok {
+			errs["pfcPriorities"] = fmt.Errorf("pfcPriorities entry `%d` is duplicated", priority)
+			break
+		}
+		seen[priority] = struct{}{}
+	}
+
+	if rc.Tos != nil && (*rc.Tos < 0 || *rc.Tos > 255) {
+		errs["tos"] = errors.New("tos must be between 0 and 255")
+	}
+
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
+}
+
+// ToDB converts the API RoCE config into the DB model shape.
+func (rc *APIInterfaceRoceConfig) ToDB() *cdbm.InterfaceRoceConfig {
+	if rc == nil {
+		return nil
+	}
+	priorities := []int{}
+	if rc.PfcPriorities != nil {
+		priorities = append(priorities, rc.PfcPriorities...)
+	}
+	var trustMode *string
+	if rc.TrustMode != nil {
+		trustMode = cutil.GetPtr(string(*rc.TrustMode))
+	}
+	return &cdbm.InterfaceRoceConfig{
+		TrustMode:     trustMode,
+		PfcPriorities: priorities,
+		Tos:           rc.Tos,
+	}
+}
+
+// FromDB populates the API RoCE config from the DB model shape.
+func (rc *APIInterfaceRoceConfig) FromDB(dbConfig *cdbm.InterfaceRoceConfig) {
+	if rc == nil || dbConfig == nil {
+		return
+	}
+	priorities := []int{}
+	if dbConfig.PfcPriorities != nil {
+		priorities = append(priorities, dbConfig.PfcPriorities...)
+	}
+	rc.PfcPriorities = priorities
+	rc.Tos = dbConfig.Tos
+	if dbConfig.TrustMode != nil {
+		mode := APIInterfaceRoceTrustMode(*dbConfig.TrustMode)
+		rc.TrustMode = &mode
+	}
 }
 
 // Validate ensures the routing profile contains valid CIDR prefixes.
@@ -147,6 +248,7 @@ func (ifcr *APIInterfaceCreateOrUpdateRequest) Validate() error {
 			validation.When(ifcr.IPAddress != nil, validation.By(validateInterfaceRequestedIpAddressHostBit)),
 		),
 		validation.Field(&ifcr.InlineRoutingProfile),
+		validation.Field(&ifcr.RoceConfig),
 		validation.Field(&ifcr.DeviceInstance,
 			validation.Min(0).Error("deviceInstance must be equal or greater than 0")),
 		validation.Field(&ifcr.VirtualFunctionID,
@@ -328,6 +430,8 @@ type APIInterface struct {
 	RequestedIpAddress *string `json:"requestedIpAddress"`
 	// InlineRoutingProfile contains interface-local routing profile options.
 	InlineRoutingProfile *APIInterfaceInlineRoutingProfile `json:"inlineRoutingProfile"`
+	// RoceConfig contains RoCE runtime QoS parameters for this PF or VF.
+	RoceConfig *APIInterfaceRoceConfig `json:"roceConfig"`
 	// Status is the status of the Interface
 	Status string `json:"status"`
 	// Created is the date and time the entity was created
@@ -355,6 +459,11 @@ func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
 	if dbis.InlineRoutingProfile != nil {
 		apiInterface.InlineRoutingProfile = &APIInterfaceInlineRoutingProfile{}
 		apiInterface.InlineRoutingProfile.FromDB(dbis.InlineRoutingProfile)
+	}
+
+	if dbis.RoceConfig != nil {
+		apiInterface.RoceConfig = &APIInterfaceRoceConfig{}
+		apiInterface.RoceConfig.FromDB(dbis.RoceConfig)
 	}
 
 	if dbis.Instance != nil {

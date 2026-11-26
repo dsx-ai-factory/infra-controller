@@ -97,6 +97,7 @@ pub fn add_inband_interfaces_to_config(
             requested_ip_addr: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
             vpc_id: Some(vpc_id),
         });
     }

@@ -77,6 +77,37 @@ func testInterfaceSetupSchema(t *testing.T, dbSession *db.Session) {
 	assert.Nil(t, err)
 }
 
+func TestInterfaceRoceConfig_ToProtoFromProto(t *testing.T) {
+	var nilConfig *InterfaceRoceConfig
+	assert.Nil(t, nilConfig.ToProto())
+
+	dscp := "Dscp"
+	tos := 0
+	config := &InterfaceRoceConfig{
+		TrustMode:     &dscp,
+		PfcPriorities: []int{3},
+		Tos:           &tos,
+	}
+	protoConfig := config.ToProto()
+	require.NotNil(t, protoConfig)
+	require.NotNil(t, protoConfig.TrustMode)
+	assert.Equal(t, corev1.InstanceInterfaceRoceTrustMode_INSTANCE_INTERFACE_ROCE_TRUST_MODE_DSCP, *protoConfig.TrustMode)
+	assert.Equal(t, []uint32{3}, protoConfig.PfcPriorities)
+	require.NotNil(t, protoConfig.Tos)
+	assert.Equal(t, uint32(0), *protoConfig.Tos)
+
+	var roundTrip InterfaceRoceConfig
+	roundTrip.FromProto(protoConfig)
+	assert.Equal(t, "Dscp", *roundTrip.TrustMode)
+	assert.Equal(t, []int{3}, roundTrip.PfcPriorities)
+	assert.Equal(t, 0, *roundTrip.Tos)
+
+	roundTrip.FromProto(nil)
+	assert.Nil(t, roundTrip.TrustMode)
+	assert.Nil(t, roundTrip.PfcPriorities)
+	assert.Nil(t, roundTrip.Tos)
+}
+
 func TestInterfaceInlineRoutingProfile_ToProtoFromProto(t *testing.T) {
 	var nilProfile *InterfaceInlineRoutingProfile
 	assert.Nil(t, nilProfile.ToProto())

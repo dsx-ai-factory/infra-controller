@@ -89,6 +89,7 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
@@ -100,6 +101,7 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         ],
         #[allow(deprecated)]
@@ -477,6 +479,7 @@ fn dual_physical_network_config_with_vpc_prefixes(
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         )
         .collect();
@@ -506,6 +509,7 @@ fn interface_network_config_with_devices(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         })
         .collect();
     rpc::InstanceNetworkConfig {
