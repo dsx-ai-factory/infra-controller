@@ -459,12 +459,13 @@ func buildFirmwareUpgradeRule() *OperationRule {
 				{
 					ComponentType: devicetypes.ComponentTypeCompute,
 					Stage:         1,
-					MaxParallel:   0,
+					MaxParallel:   4, // Limit concurrency to avoid overwhelming BMC HMC proxies
 					Timeout:       45 * time.Minute,
 					RetryPolicy: &RetryPolicy{
-						MaxAttempts:        2,
+						MaxAttempts:        5, // Retry transient errors over several minutes
 						InitialInterval:    30 * time.Second,
-						BackoffCoefficient: 1.5,
+						BackoffCoefficient: 2.0,
+						MaxInterval:        5 * time.Minute,
 					},
 					MainOperation: ActionConfig{
 						Name: ActionFirmwareControl,
@@ -478,12 +479,13 @@ func buildFirmwareUpgradeRule() *OperationRule {
 				{
 					ComponentType: devicetypes.ComponentTypeNVSwitch,
 					Stage:         2,
-					MaxParallel:   0,
+					MaxParallel:   2, // NVSwitch trays typically fewer, limit to 2
 					Timeout:       45 * time.Minute,
 					RetryPolicy: &RetryPolicy{
-						MaxAttempts:        2,
+						MaxAttempts:        5,
 						InitialInterval:    30 * time.Second,
-						BackoffCoefficient: 1.5,
+						BackoffCoefficient: 2.0,
+						MaxInterval:        5 * time.Minute,
 					},
 					MainOperation: ActionConfig{
 						Name: ActionFirmwareControl,
