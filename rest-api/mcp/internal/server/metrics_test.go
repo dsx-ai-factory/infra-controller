@@ -255,13 +255,16 @@ func TestMetrics_instrumentHTTP(t *testing.T) {
 func TestNewMetricsServer(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		method     string
 		path       string
 		wantStatus int
+		wantAllow  string
 		wantBody   []string
 	}{
 		{
 			// Rejection series exist at zero so alerts have a baseline before the first rejection.
 			name:       "metrics path serves the registry",
+			method:     http.MethodGet,
 			path:       metricsPath,
 			wantStatus: http.StatusOK,
 			wantBody: []string{
@@ -272,19 +275,31 @@ func TestNewMetricsServer(t *testing.T) {
 			},
 		},
 		// The metrics port must not become a second way to reach MCP tools.
-		{name: "MCP path is not served", path: "/mcp", wantStatus: http.StatusNotFound},
+		{name: "MCP path is not served", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusNotFound},
+		// Other methods are refused before the registry is gathered.
+		{
+			name:       "POST to metrics path is rejected",
+			method:     http.MethodPost,
+			path:       metricsPath,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  "GET, HEAD",
+			wantBody:   []string{"Method Not Allowed\n"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(newMetricsServer("", NewMetrics()).Handler)
 			defer ts.Close()
 
-			resp, err := http.Get(ts.URL + tc.path)
+			req, err := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 
 			require.Equal(t, tc.wantStatus, resp.StatusCode)
+			require.Equal(t, tc.wantAllow, resp.Header.Get("Allow"))
 			for _, want := range tc.wantBody {
 				require.Contains(t, string(body), want)
 			}

@@ -290,6 +290,7 @@ jobs:
           - db
           - flow
           - ipam
+          - mcp
           - nvswitch-manager
           - powershelf-manager
           - proto
