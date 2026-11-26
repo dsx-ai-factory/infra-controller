@@ -24,6 +24,10 @@
 mod catalog;
 mod check;
 mod checklists;
+mod collaterals;
+mod derived;
+#[cfg(test)]
+mod fixture;
 mod gate;
 mod harness;
 mod register;
@@ -35,7 +39,10 @@ mod setup_cmd;
     reason = "schema fields are read by checklists that have not landed yet"
 )]
 mod sitedef;
+mod sitedef_template;
+mod sizing;
 mod template;
+mod toml_keys;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -52,7 +59,7 @@ use crate::register::Register;
     name = "nico-pre",
     version,
     about = "Pre-flight checks for a NICo site, one checklist per deployment step",
-    long_about = "Every checklist first validates the site definition (exit 3 with the offending rows \
+    long_about = "Every checklist first validates the site definition (exit 3 with the offending checks \
                   when it fails), then runs its own checks. Exit 0: every check passed; 1: warnings \
                   only; 2: at least one check blocks; 3: the tool could not run a check."
 )]
@@ -83,6 +90,9 @@ enum Command {
     Validate(ValidateArgs),
     /// The decision register: list it, or write the `decisions` section of a site definition
     Decisions(DecisionsArgs),
+    /// Write a complete site definition to fill in: every key with its meaning, REQUIRED where a value is due
+    #[command(name = "site-def")]
+    SiteDef(SiteDefArgs),
     /// The check catalogue: every registered check by id, implemented or not
     Checks(ChecksArgs),
     /// Print the tool version
@@ -97,19 +107,28 @@ struct ChecklistArgs {
     /// Output format
     #[arg(short = 'o', long = "output", value_enum, default_value_t = Output::Text)]
     output: Output,
+    /// Columns for the text report; default: `COLUMNS` from the environment, else 100
+    #[arg(long, value_name = "COLS")]
+    width: Option<usize>,
+    /// Text report: passed and skipped checks as full paragraphs too
+    #[arg(short, long)]
+    verbose: bool,
     /// Run only these check ids (comma-separated); the gate always runs
     #[arg(long, value_delimiter = ',', value_name = "ID")]
     only: Vec<String>,
     /// Skip these check ids (comma-separated); the gate always runs
     #[arg(long, value_delimiter = ',', value_name = "ID")]
     skip: Vec<String>,
-    /// Directory for the raw material behind rows. Only checks that keep evidence
+    /// Directory for the raw material behind checks. Only checks that keep evidence
     /// write there; none of the implemented checks does yet, so it stays empty.
     #[arg(long, value_name = "DIR")]
     evidence: Option<PathBuf>,
     /// Where the result file goes; default: the site definition's `results`
     #[arg(long, value_name = "DIR")]
     results: Option<PathBuf>,
+    /// A sizing table to judge the control plane by, instead of the built-in `register/sizing.yaml`
+    #[arg(long, value_name = "PATH")]
+    sizing_table: Option<PathBuf>,
 }
 
 #[derive(Args, Clone)]
@@ -120,6 +139,12 @@ struct ValidateArgs {
     /// Output format
     #[arg(short = 'o', long = "output", value_enum, default_value_t = Output::Text)]
     output: Output,
+    /// Columns for the text report; default: `COLUMNS` from the environment, else 100
+    #[arg(long, value_name = "COLS")]
+    width: Option<usize>,
+    /// Text report: passed and skipped checks as full paragraphs too
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Args, Clone)]
@@ -128,6 +153,16 @@ struct DecisionsArgs {
     #[arg(long)]
     template: bool,
     /// Carry this site definition's current decisions into the template
+    #[arg(long = "site-def", value_name = "PATH")]
+    site_def: Option<PathBuf>,
+}
+
+#[derive(Args, Clone)]
+struct SiteDefArgs {
+    /// Write the template (the only mode today; present for symmetry with `decisions`)
+    #[arg(long)]
+    template: bool,
+    /// Carry this site definition's values into the fresh template
     #[arg(long = "site-def", value_name = "PATH")]
     site_def: Option<PathBuf>,
 }
@@ -147,8 +182,20 @@ enum CatalogFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Output {
+    /// The report: what needs attention as paragraphs, what passed as one line each
     Text,
+    /// One row per check with the expected, observed and fix columns
+    Table,
     Json,
+}
+
+/// The text report's layout: `--width`, else `COLUMNS`, else 100 columns.
+fn layout(width: Option<usize>, verbose: bool) -> report::Layout {
+    let width = width
+        .or_else(|| std::env::var("COLUMNS").ok()?.trim().parse().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(100);
+    report::Layout { width, verbose }
 }
 
 fn main() -> std::process::ExitCode {
@@ -176,6 +223,7 @@ fn main() -> std::process::ExitCode {
         Command::Ingest(a) => run_checklist(Checklist::Ingest, &a),
         Command::Validate(a) => validate(&a),
         Command::Decisions(a) => decisions(&a),
+        Command::SiteDef(a) => site_def_template(&a),
         Command::Checks(a) => {
             print!(
                 "{}",
@@ -212,6 +260,12 @@ fn expand_alias(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
 fn run_checklist(checklist: Checklist, args: &ChecklistArgs) -> ExitCode {
     let started = Utc::now();
     let reg = Register::builtin();
+    if let Some(path) = &args.sizing_table
+        && let Err(e) = sizing::load_override(path)
+    {
+        eprintln!("nico-pre: --sizing-table: {e:#}");
+        return ExitCode::ToolFailure;
+    }
     let (site, rows, gate_blocked, results_dir) = match sitedef::load(&args.site_def) {
         Err(e) => (
             String::from("?"),
@@ -263,7 +317,11 @@ fn run_checklist(checklist: Checklist, args: &ChecklistArgs) -> ExitCode {
     }
 
     match args.output {
-        Output::Text => print!("{}", report::text(&result)),
+        Output::Text => print!(
+            "{}",
+            report::text(&result, &layout(args.width, args.verbose))
+        ),
+        Output::Table => print!("{}", report::table(&result)),
         Output::Json => match report::json(&result) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -411,7 +469,11 @@ fn validate(args: &ValidateArgs) -> ExitCode {
         .started_at(started)
         .with_exit(exit);
     match args.output {
-        Output::Text => print!("{}", report::text(&result)),
+        Output::Text => print!(
+            "{}",
+            report::text(&result, &layout(args.width, args.verbose))
+        ),
+        Output::Table => print!("{}", report::table(&result)),
         Output::Json => match report::json(&result) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -440,6 +502,51 @@ fn decisions(args: &DecisionsArgs) -> ExitCode {
         },
     };
     print!("{}", template::decisions_section(&current, reg));
+    ExitCode::Pass
+}
+
+/// `nico-pre site-def --template`: the whole file to fill in, on stdout; with `--site-def`,
+/// an existing definition's values carried into it.
+fn site_def_template(args: &SiteDefArgs) -> ExitCode {
+    if !args.template {
+        eprintln!("nico-pre: site-def writes a template; pass --template");
+        return ExitCode::ToolFailure;
+    }
+    let reg = Register::builtin();
+    let (existing, decisions) = match &args.site_def {
+        None => (None, indexmap::IndexMap::new()),
+        Some(path) => {
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("nico-pre: reading {}: {e}", path.display());
+                    return ExitCode::ToolFailure;
+                }
+            };
+            // The values are carried as written, so a file that does not parse yet (one
+            // still being filled in) can be re-templated; its decisions are read on their
+            // own, so none it states is lost.
+            let value: serde_yaml::Value = match serde_yaml::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("nico-pre: {} is not yaml: {e}", path.display());
+                    return ExitCode::ToolFailure;
+                }
+            };
+            let decisions = match sitedef::decisions_of(&value) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("nico-pre: {}: {e:#}", path.display());
+                    return ExitCode::ToolFailure;
+                }
+            };
+            (Some(value), decisions)
+        }
+    };
+    print!(
+        "{}",
+        sitedef_template::site_def(existing.as_ref(), &decisions, reg)
+    );
     ExitCode::Pass
 }
 

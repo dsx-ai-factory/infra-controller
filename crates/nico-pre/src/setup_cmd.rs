@@ -35,6 +35,7 @@ pub(crate) struct SetupCommand {
     /// `setup.env` entries that select components when no switch does.
     env_skip_dpf: bool,
     env_skip_rms: bool,
+    env_skip_vault: bool,
     env_observability: bool,
     env_contour: bool,
     /// What the shell would refuse in `setup.command`: an unterminated quote, backtick,
@@ -51,6 +52,15 @@ pub(crate) struct SetupCommand {
     /// Whether any simple command on the line runs `setup.sh`; when none does (a developer
     /// site deployed by other scripts) the command decides nothing.
     runs_setup_sh: bool,
+    /// The `setup.sh` word of the command that runs it, as written (`./setup.sh`,
+    /// `/opt/nico/helm-prereqs/setup.sh`): its directory is where the script's default
+    /// values files live.
+    pub(crate) script: Option<String>,
+    /// A `cd` anywhere on the line, inner `bash -c` strings included: a relative operand
+    /// is then read from a directory the line does not fix.
+    changes_dir: bool,
+    /// The assignments and `env` controls around the invocation, outermost first.
+    layers: Vec<Layer>,
 }
 
 /// One token of a command line.
@@ -80,15 +90,33 @@ impl Token {
     }
 }
 
+/// `NAME=value` as the shell passes it: the value with quotes and escapes resolved, and
+/// whether it holds a `$` or backtick the shell expands (one that was quoted or escaped is
+/// literal text).
+#[derive(Clone, Debug)]
+struct Assignment {
+    name: String,
+    value: String,
+    expands: bool,
+    /// The variable the value names when it is one bare reference (`$X`, `"${X}"`), read
+    /// from the token text, where the quoting marks still bound the name.
+    reference: Option<String>,
+}
+
 /// What the words before a command's program do to the environment it inherits:
 /// assignments before `env` are in the inherited environment, `env -i` and `env -u` take
 /// from it, assignments on the `env` line itself are added after that.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Layer {
-    pre: Vec<(String, String)>,
+    pre: Vec<Assignment>,
     clear: bool,
     unset: Vec<String>,
-    own: Vec<(String, String)>,
+    own: Vec<Assignment>,
+    /// The shell that expands this layer's words: 0 for the command line, one more for
+    /// each `bash -c` string around the command. The shell expands an assignment before
+    /// any `env` of the same shell runs, so a reference in it is resolved among the
+    /// layers of the shells outside.
+    shell: u8,
 }
 
 impl Layer {
@@ -97,11 +125,16 @@ impl Layer {
     /// layer of its own, so `env A=1 env -u A cmd` removes `A` in the inner layer after
     /// the outer one set it.
     fn stack(prefix: &[&str]) -> Vec<Layer> {
-        let assignments = |ws: &[&str]| -> Vec<(String, String)> {
+        let assignments = |ws: &[&str]| -> Vec<Assignment> {
             ws.iter()
                 .filter(|w| is_assignment(w))
                 .filter_map(|w| w.split_once('='))
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| Assignment {
+                    name: k.to_string(),
+                    value: unescape(v),
+                    expands: expands(v),
+                    reference: reference(v).map(str::to_string),
+                })
                 .collect()
         };
         let env_at: Vec<usize> = prefix
@@ -143,43 +176,80 @@ impl Layer {
     /// an `env`-line assignment wins; a removal or a cleared environment ends the search;
     /// an inherited assignment is next; the outer layers follow, then `setup.env`, whose
     /// secret-sourced values the gate cannot read.
-    fn resolve<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Resolved<'a> {
-        let last = |list: &'a [(String, String)]| {
-            list.iter()
-                .rev()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.as_str())
-        };
-        for layer in layers.iter().rev() {
-            if let Some(v) = last(&layer.own) {
-                return Resolved::Plain(v);
+    /// A variable as the program sees it, with the index of the layer that supplied the
+    /// value; `None` when it came from `setup.env` or nowhere. The shell expands an
+    /// assignment in the environment outside its layer, so that index is where a
+    /// reference in the value is followed.
+    fn resolve_at<'a>(
+        layers: &'a [Layer],
+        name: &str,
+        setup: &'a Setup,
+    ) -> (Resolved<'a>, Option<Found<'a>>) {
+        let last =
+            |list: &'a [Assignment]| list.iter().enumerate().rev().find(|(_, a)| a.name == name);
+        for (i, layer) in layers.iter().enumerate().rev() {
+            if let Some((_, a)) = last(&layer.own) {
+                return (
+                    Resolved::Plain(&a.value),
+                    Some(Found {
+                        layer: i,
+                        pre: None,
+                        expands: a.expands,
+                        bare: a.reference.as_deref(),
+                    }),
+                );
             }
             if layer.clear || layer.unset.iter().any(|u| u == name) {
-                return Resolved::Absent;
+                return (Resolved::Absent, None);
             }
-            if let Some(v) = last(&layer.pre) {
-                return Resolved::Plain(v);
+            if let Some((j, a)) = last(&layer.pre) {
+                return (
+                    Resolved::Plain(&a.value),
+                    Some(Found {
+                        layer: i,
+                        pre: Some(j),
+                        expands: a.expands,
+                        bare: a.reference.as_deref(),
+                    }),
+                );
             }
         }
-        match setup.env.get(name) {
+        let from_env = match setup.env.get(name) {
             Some(EnvValue::Plain(v)) => Resolved::Plain(v.as_str()),
             Some(EnvValue::Secret(_)) => Resolved::Secret,
             None => Resolved::Absent,
-        }
+        };
+        (from_env, None)
     }
+}
+
+/// Where `resolve_at` found a value: the layer, and the index among its leading
+/// assignments when it was one of those (an `env`-line assignment has none).
+#[derive(Clone, Copy)]
+struct Found<'a> {
+    layer: usize,
+    pre: Option<usize>,
+    /// The value holds a `$` or backtick the shell expands.
+    expands: bool,
+    /// The variable the value names when it is one bare reference.
+    bare: Option<&'a str>,
 }
 
 /// What a variable resolves to for the program.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Resolved<'a> {
+pub(crate) enum Resolved<'a> {
     Plain(&'a str),
-    /// Named in `setup.env` with a `{from: …}` source: set at run time, unreadable here.
+    /// Named in `setup.env` with a `{from: …}` source: present at run time, value unknown.
     Secret,
+    /// Assigned a shell expression on the command line (`$(…)`, `${X:-}`): neither the value
+    /// nor its presence is known here.
+    Expression,
     Absent,
 }
 
 /// The variable a value made of one bare reference names (`$NAME`, `${NAME}`).
 fn reference(v: &str) -> Option<&str> {
+    let v = v.trim_start_matches(DQUOTED).trim_end_matches(BOUNDARY);
     let name = v
         .strip_prefix("${")
         .and_then(|r| r.strip_suffix('}'))
@@ -210,6 +280,199 @@ fn basename(p: &str) -> &str {
 /// Unquoted control operators and parentheses are words of their own, while a `$(…)`
 /// substitution stays inside its word; redirections and their targets are dropped. No expansion, no execution. An unterminated quote or a
 /// redirection without a target returns what was read so far and the error.
+/// Marks, in token text, an expansion the outer shell performed with a value this reading
+/// cannot see (`expand_outer`): whatever quotes the inner shell puts around it, the text is
+/// an expression here, never a value, and no inner assignment stands in for it.
+const UNKNOWN: char = '\u{E000}';
+/// Marks, in token text, a `$` the shell expands inside double quotes: the expansion is one
+/// word, not split on whitespace as an unquoted one is.
+const DQUOTED: char = '\u{E001}';
+/// Marks, in token text, where a double-quoted span holding an expansion closed: `"$X"s`
+/// names `X`, not `Xs`.
+const BOUNDARY: char = '\u{E002}';
+
+/// Whether token text holds a `$` or backtick the shell expands: `shell_words` keeps a
+/// quoted or escaped one as `\$` or `` \` `` (and a literal backslash as `\\`), so the
+/// unescaped ones are the shell's; an outer expansion marked unknown always does.
+fn expands(text: &str) -> bool {
+    if text.contains(UNKNOWN) {
+        return true;
+    }
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '$' | '`' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Token text as the shell passes it: the escapes `shell_words` keeps resolved, and the
+/// quoting mark dropped (the unknown mark stays: the text is no value).
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next().unwrap_or('\\')),
+            DQUOTED | BOUNDARY => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The fields an unquoted expansion splits into under bash's default `IFS`: space, tab
+/// and newline, not every Unicode space.
+fn fields(v: &str) -> impl Iterator<Item = &str> {
+    v.split([' ', '\t', '\n']).filter(|s| !s.is_empty())
+}
+
+/// Whether a word ending in `$` ends in one the shell expands, not an escaped `\$`.
+fn dollar_expands(word: &str) -> bool {
+    word.strip_suffix('$')
+        .is_some_and(|s| (s.len() - s.trim_end_matches('\\').len()) % 2 == 0)
+}
+
+/// The length of the `$(…)` substitution `s` starts with, its body opaque: nested
+/// parentheses, quotes and escapes are honoured; an unterminated one runs to the end.
+fn substitution_len(s: &str) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut it = s.char_indices();
+    while let Some((i, c)) = it.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                it.next();
+            }
+            (Some(_), _) => {}
+            (None, '\\') => {
+                it.next();
+            }
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    s.len()
+}
+
+/// The length of the backtick substitution `s` starts with, up to and including the
+/// closing backtick (escapes honoured); an unterminated one runs to the end.
+fn backtick_len(s: &str) -> usize {
+    let mut it = s.char_indices().skip(1);
+    while let Some((i, c)) = it.next() {
+        match c {
+            '\\' => {
+                it.next();
+            }
+            '`' => return i + 1,
+            _ => {}
+        }
+    }
+    s.len()
+}
+
+/// A `bash -c` string as the inner shell receives it: the outer shell has expanded every
+/// `$NAME` and `${NAME}` it holds unquoted or in double quotes, in its own environment
+/// (`layers`, then `setup.env`), and passed quoted or escaped text as written. A plain
+/// value is substituted and re-read by the inner shell, as the shell does; an absent
+/// variable expands to nothing; a secret or an expression is unknown here and stays so
+/// through the inner reading, whatever the inner layers assign to the name. A command
+/// substitution is opaque: its body is passed as written for the inner reading to see as
+/// an expression. Anything else (`${X:-}`, `$1`) stays as written.
+fn expand_outer(script: &str, layers: &[Layer], setup: &Setup) -> String {
+    let mut out = String::with_capacity(script.len());
+    let mut rest = script;
+    while let Some(i) = rest.find(['\\', '$', '`', DQUOTED, BOUNDARY]) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        // The outer quoting marks mean nothing to the inner shell, which reads its own.
+        if let Some(after) = rest.strip_prefix([DQUOTED, BOUNDARY]) {
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('\\') {
+            let mut chars = after.chars();
+            if let Some(c) = chars.next() {
+                out.push(c);
+            }
+            rest = chars.as_str();
+            continue;
+        }
+        // The outer shell runs a substitution and passes its output, unknown here: marked
+        // so, whatever quotes the inner shell puts around it.
+        if rest.starts_with("$(") || rest.starts_with('`') {
+            let len = if rest.starts_with('`') {
+                backtick_len(rest)
+            } else {
+                substitution_len(rest)
+            };
+            out.push(UNKNOWN);
+            out.push_str(&rest[..len]);
+            rest = &rest[len..];
+            continue;
+        }
+        let after = &rest[1..];
+        let (name, len) = if let Some(inner) = after.strip_prefix('{') {
+            match inner.find('}') {
+                Some(end) => (&inner[..end], end + 3),
+                None => ("", 0),
+            }
+        } else {
+            let end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            (&after[..end], end + 1)
+        };
+        match reference(&format!("${name}")) {
+            Some(name) => {
+                match Layer::resolve_at(layers, name, setup).0 {
+                    Resolved::Plain(v) => out.push_str(v),
+                    Resolved::Absent => {}
+                    Resolved::Secret | Resolved::Expression => {
+                        out.push(UNKNOWN);
+                        out.push_str(&rest[..len]);
+                    }
+                }
+                rest = &rest[len..];
+            }
+            None => {
+                // `${X:-v}`, `$1`, `$?` and the like: the outer shell expands them to a
+                // value not known here; a `$` that begins no expansion is text.
+                let len = if let Some(inner) = after.strip_prefix('{') {
+                    inner.find('}').map_or(after.len(), |e| e + 2)
+                } else if after.starts_with(|c: char| c.is_ascii_digit() || "?@*#!$-".contains(c)) {
+                    1
+                } else {
+                    0
+                };
+                if len > 0 {
+                    out.push(UNKNOWN);
+                    out.push_str(&rest[..len + 1]);
+                    rest = &rest[len + 1..];
+                } else {
+                    out.push('$');
+                    rest = after;
+                }
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
     /// Reads a parenthesised body verbatim into `word` up to and including the `)` that
     /// closes it, honouring nested parentheses, quotes and backslash escapes, as in
@@ -337,6 +600,14 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
             '\\' => match chars.next() {
                 // A continuation joins the lines; it is not part of any word.
                 Some('\n') => {}
+                // An escaped `$`, backtick or backslash is literal text, kept escaped so
+                // the readers tell it from one the shell expands (`expands`, `unescape`).
+                Some(next @ ('$' | '`' | '\\')) => {
+                    in_word = true;
+                    word_quoted = true;
+                    word.push('\\');
+                    word.push(next);
+                }
                 Some(next) => {
                     in_word = true;
                     word_quoted = true;
@@ -416,7 +687,7 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                 drop_next_word = true;
             }
             // `$(…)` is part of its word, nesting included; it is kept verbatim, unexpanded.
-            '(' if in_word && word.ends_with('$') => {
+            '(' if in_word && dollar_expands(&word) => {
                 word.push('(');
                 if !read_balanced(&mut chars, &mut word) {
                     error.get_or_insert_with(|| "unterminated command substitution".to_string());
@@ -467,6 +738,10 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                         closed = true;
                         break;
                     }
+                    // Literal text: a `$`, backtick or backslash is kept escaped.
+                    if matches!(q, '$' | '`' | '\\') {
+                        word.push('\\');
+                    }
                     word.push(q);
                 }
                 if !closed {
@@ -477,14 +752,22 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                 in_word = true;
                 word_quoted = true;
                 let mut closed = false;
+                // An expansion inside the quotes ends where they close: `"$X"s` names `X`.
+                let mut expanded_inside = false;
                 while let Some(q) = chars.next() {
                     match q {
                         '"' => {
+                            if expanded_inside {
+                                word.push(BOUNDARY);
+                            }
                             closed = true;
                             break;
                         }
-                        // A backtick substitution inside the quotes is kept verbatim too.
+                        // A backtick substitution inside the quotes is kept verbatim too,
+                        // marked as quoted like any expansion here.
                         '`' => {
+                            expanded_inside = true;
+                            word.push(DQUOTED);
                             word.push('`');
                             if !read_backticks(&mut chars, &mut word) {
                                 error.get_or_insert_with(|| {
@@ -492,8 +775,11 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                                 });
                             }
                         }
-                        // A substitution keeps its own quotes; it is kept verbatim.
+                        // A substitution keeps its own quotes; it is kept verbatim, marked
+                        // as quoted like any expansion here.
                         '$' if chars.peek() == Some(&'(') => {
+                            expanded_inside = true;
+                            word.push(DQUOTED);
                             word.push('$');
                             word.extend(chars.next());
                             if !read_balanced(&mut chars, &mut word) {
@@ -506,13 +792,28 @@ pub(crate) fn shell_words(line: &str) -> (Vec<Token>, Option<String>) {
                         // `"`, `\` and the newline; elsewhere it is kept as text.
                         '\\' => match chars.next() {
                             Some('\n') => {}
-                            Some(next @ ('$' | '`' | '"' | '\\')) => word.push(next),
+                            Some('"') => word.push('"'),
+                            // An escaped `$`, backtick or backslash is literal text, kept
+                            // escaped; before any other character the backslash stays,
+                            // itself literal.
+                            Some(next @ ('$' | '`' | '\\')) => {
+                                word.push('\\');
+                                word.push(next);
+                            }
                             Some(next) => {
+                                word.push('\\');
                                 word.push('\\');
                                 word.push(next);
                             }
                             None => word.push('\\'),
                         },
+                        // A `$` the shell expands inside the quotes: marked, so the
+                        // expansion is read as one word.
+                        '$' => {
+                            expanded_inside = true;
+                            word.push(DQUOTED);
+                            word.push('$');
+                        }
                         other => word.push(other),
                     }
                 }
@@ -674,12 +975,33 @@ impl SetupCommand {
             };
             match does {
                 Interpreter::Runs(skip, script) => {
-                    let (inner, err) = shell_words(script);
+                    // The string the inner shell reads. A token the outer shell expands
+                    // in double quotes, or not at all, is that expansion. An unquoted
+                    // bare reference is split by the outer shell: its first word is the
+                    // string, passed as written (the inner shell expands what it holds),
+                    // the rest `$0` and positional parameters. An unquoted word mixing a
+                    // reference with other text splits in ways not modelled here, as does
+                    // a value this reading cannot see: the string is then unknown.
+                    let script: String = if script.contains(DQUOTED) || !expands(script) {
+                        expand_outer(script, &outer_layers, setup)
+                    } else if let Some(name) = reference(script)
+                        && let Resolved::Plain(v) = Layer::resolve_at(&outer_layers, name, setup).0
+                    {
+                        fields(v).next().unwrap_or("").to_string()
+                    } else {
+                        UNKNOWN.to_string()
+                    };
+                    let (inner, err) = shell_words(&script);
                     if parse_error.is_none() {
                         parse_error = err;
                     }
                     let mut layers = outer_layers;
-                    layers.extend(Layer::stack(&prefix));
+                    let shell = layers.last().map_or(0, |l| l.shell + 1);
+                    layers.extend(
+                        Layer::stack(&prefix)
+                            .into_iter()
+                            .map(|l| Layer { shell, ..l }),
+                    );
                     expanded.truncate(start);
                     let mut at_segment_start = true;
                     for t in inner {
@@ -711,13 +1033,27 @@ impl SetupCommand {
                 }
             }
         }
+        // A `cd` in command position (the first word of a simple command after its
+        // assignments), anywhere on the line, inner shells included; an argument spelled
+        // `cd` changes nothing.
+        let mut at_command = true;
+        let mut changes_dir = false;
+        for t in &expanded {
+            match t {
+                Token::Op(_) => at_command = true,
+                Token::Inherits(_) => {}
+                Token::Word(w) if at_command && is_assignment(w) => {}
+                Token::Word(w) if at_command => {
+                    changes_dir |= w == "cd";
+                    at_command = false;
+                }
+                Token::Word(_) => {}
+            }
+        }
         /// A simple command on the line that names setup.sh.
         struct Naming {
             layers: Vec<Layer>,
-            /// How many of `layers` the command inherits from the shells around it; the
-            /// rest are its own line. The shell expands the command's arguments in the
-            /// inherited environment.
-            inherited: usize,
+            script: String,
             args: Vec<String>,
             invokes: bool,
         }
@@ -729,11 +1065,15 @@ impl SetupCommand {
                     .iter()
                     .position(|w| !is_assignment(w) && basename(w) == "setup.sh")?;
                 let before = non_assignments(&words[..at]);
-                let inherited = layers.len();
-                layers.extend(Layer::stack(&words[..at]));
+                let shell = layers.last().map_or(0, |l| l.shell + 1);
+                layers.extend(
+                    Layer::stack(&words[..at])
+                        .into_iter()
+                        .map(|l| Layer { shell, ..l }),
+                );
                 Some(Naming {
                     layers,
-                    inherited,
+                    script: unescape(words[at]),
                     args: words[at + 1..].iter().map(|w| w.to_string()).collect(),
                     invokes: is_invocation(&before),
                 })
@@ -747,28 +1087,33 @@ impl SetupCommand {
         let runs_setup_sh = segment.is_some();
         // A variable as setup.sh will see it, through every layer of assignments and `env`
         // controls around it, then `setup.env`.
-        let source = |name: &str| {
-            segment.map_or(Resolved::Absent, |n| Layer::resolve(&n.layers, name, setup))
-        };
+        let source =
+            |name: &str| segment.map_or(Resolved::Absent, |n| follow(&n.layers, name, setup));
         // The shell expands the words after setup.sh before setup.sh reads them, in the
-        // shell's own environment: what the shells around the command hand it (an outer
-        // `env` around a `bash -c`), then `setup.env`. A bare reference to a plain value
-        // becomes the words an unquoted expansion yields, none for an empty value, so an
-        // option takes the operand setup.sh will see. Any other expression stays a word of
-        // its own: as an operand it is the value as written; in switch position it is
-        // reported below as not readable, not refused.
+        // shell's own environment: the layers of the shells outside this command's (an
+        // outer `env` around a `bash -c`), then `setup.env`. A bare reference to a plain
+        // value becomes the words an unquoted expansion yields, none for an empty value,
+        // so an option takes the operand setup.sh will see. Any other expression stays a
+        // word of its own: as an operand it is the value as written; in switch position it
+        // is reported below as not readable, not refused.
         let shell_env = |name: &str| {
             segment.map_or(Resolved::Absent, |n| {
-                Layer::resolve(&n.layers[..n.inherited], name, setup)
+                follow(outside_of(&n.layers, n.layers.len() - 1), name, setup)
             })
         };
-        let mut words: Vec<String> = Vec::new();
+        // Each word as setup.sh receives it, with whether the shell would still expand
+        // something in it.
+        let mut words: Vec<(String, bool)> = Vec::new();
         for w in segment.map(|n| n.args.as_slice()).unwrap_or_default() {
             match reference(w).map(shell_env) {
-                Some(Resolved::Plain(v)) if !v.contains(['$', '`']) => {
-                    words.extend(v.split_whitespace().map(String::from));
+                // A double-quoted expansion is one word, whatever it holds.
+                Some(Resolved::Plain(v)) if w.contains(DQUOTED) => {
+                    words.push((v.to_string(), false));
                 }
-                _ => words.push(w.clone()),
+                Some(Resolved::Plain(v)) => {
+                    words.extend(fields(v).map(|w| (w.to_string(), false)));
+                }
+                _ => words.push((unescape(w).replace(UNKNOWN, ""), expands(w))),
             }
         }
         let plain = |name: &str| match source(name) {
@@ -784,19 +1129,24 @@ impl SetupCommand {
                 || plain("NICO_INSTALL_DPF") == Some("false"),
             env_skip_rms: plain("NICO_SKIP_RMS") == Some("true")
                 || plain("NICO_INSTALL_RMS") == Some("false"),
+            env_skip_vault: plain("NICO_SKIP_VAULT") == Some("true")
+                || plain("NICO_INSTALL_VAULT") == Some("false"),
             env_observability: plain("WITH_OBSERVABILITY") == Some("true"),
             env_contour: plain("NICO_INSTALL_CONTOUR") == Some("true"),
             parse_error,
             env_error: None,
             switch_error: None,
             unexpanded: Vec::new(),
+            script: segment.map(|n| n.script.clone()),
             runs_setup_sh,
+            changes_dir,
+            layers: segment.map(|n| n.layers.clone()).unwrap_or_default(),
         };
         let mut i = 0;
         while i < words.len() {
-            let w = words[i].clone();
+            let (w, unexpanded) = words[i].clone();
             let w = w.as_str();
-            let value = words.get(i + 1).cloned();
+            let value = words.get(i + 1).map(|(v, _)| v.clone());
             let takes_value = value.is_some();
             match w {
                 "--core-values" => {
@@ -827,7 +1177,7 @@ impl SetupCommand {
                 | "--debug" => c.switches.push(w.to_string()),
                 // An expression the shell would expand that the expansion above could not
                 // read: what it adds is unknown, so it is reported, not refused.
-                _ if w.contains(['$', '`']) => c.unexpanded.push(w.to_string()),
+                _ if unexpanded => c.unexpanded.push(w.to_string()),
                 // setup.sh's usage arm exits 1 on any other word, a misspelled switch
                 // included.
                 _ => {
@@ -885,13 +1235,15 @@ impl SetupCommand {
             let secret = |name: &str, switches: &[&str], settles: Option<(&str, &str)>| {
                 let decided = switches.iter().any(|s| c.has(s))
                     || settles.is_some_and(|(var, value)| plain(var) == Some(value));
-                (matches!(source(name), Resolved::Secret) && !decided).then(|| {
-                    format!(
-                        "{name} comes from a secret source the gate cannot read; set a plain \
+                (matches!(source(name), Resolved::Secret | Resolved::Expression) && !decided).then(
+                    || {
+                        format!(
+                            "{name} comes from a secret source the gate cannot read; set a plain \
                          value or decide it with {}",
-                        switches.join("/")
-                    )
-                })
+                            switches.join("/")
+                        )
+                    },
+                )
             };
             c.env_error = CONTROLS
                 .iter()
@@ -919,6 +1271,91 @@ impl SetupCommand {
         self.runs_setup_sh
     }
 
+    /// Whether a `cd` anywhere on the line, inner shells included, moves where a relative
+    /// operand is read from.
+    pub(crate) fn changes_dir(&self) -> bool {
+        self.changes_dir
+    }
+
+    /// A variable as `setup.sh` sees it: through the assignments and `env` controls around
+    /// the invocation, then `setup.env`.
+    pub(crate) fn variable<'a>(&'a self, name: &str, setup: &'a Setup) -> Resolved<'a> {
+        follow(&self.layers, name, setup)
+    }
+}
+
+/// The layers of the shells outside the one that expands layer `at`.
+fn outside_of(layers: &[Layer], at: usize) -> &[Layer] {
+    let shell = layers[at].shell;
+    let first = layers.iter().position(|l| l.shell == shell).unwrap_or(0);
+    &layers[..first]
+}
+
+/// A variable as `setup.sh` sees it through `layers`, with a reference assigned on the
+/// command line followed where the shell expands it.
+fn follow<'a>(layers: &'a [Layer], name: &str, setup: &'a Setup) -> Resolved<'a> {
+    match Layer::resolve_at(layers, name, setup) {
+        (Resolved::Plain(_), Some(at)) if at.expands => follow_reference(layers, at, setup, 0),
+        (r, _) => r,
+    }
+}
+
+/// A value assigned at `at` that the shell expands, followed where it expands it.
+/// `NAME="${OTHER}"` on the command line is expanded by the shell before the command,
+/// every `env` of that shell included, runs: a bare reference is followed in the
+/// environment the shell itself had (the earlier assignments of the same command, then
+/// the layers of the shells outside, then `setup.env`), which is also where a
+/// self-reference (`TAG="$TAG"`) takes the inherited value from; an assignment found there
+/// that is itself a reference is followed from its own place in turn. Any other expression
+/// is unreadable here. A `setup.env` value is a literal and is never expanded, and so is a
+/// quoted or escaped `$` (`'$X'`, `\$X`): the shell passes it as text, and the comparison
+/// that reads it sees that text.
+fn follow_reference<'a>(
+    layers: &'a [Layer],
+    at: Found<'a>,
+    setup: &'a Setup,
+    depth: usize,
+) -> Resolved<'a> {
+    // Each step moves backward or outward, so a chain ends; the bound guards the reading
+    // all the same.
+    let Some(other) = at.bare.filter(|_| depth < 32) else {
+        return Resolved::Expression;
+    };
+    // An earlier assignment of the same command applies first
+    // (`TAG=inner NICO_CORE_IMAGE_TAG=$TAG ./setup.sh`).
+    let earlier = at.pre.and_then(|j| {
+        layers[at.layer].pre[..j]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, a)| a.name == other)
+    });
+    match earlier {
+        Some((j, a)) if a.expands => follow_reference(
+            layers,
+            Found {
+                layer: at.layer,
+                pre: Some(j),
+                expands: true,
+                bare: a.reference.as_deref(),
+            },
+            setup,
+            depth + 1,
+        ),
+        Some((_, a)) => Resolved::Plain(&a.value),
+        None => {
+            let outer = outside_of(layers, at.layer);
+            match Layer::resolve_at(outer, other, setup) {
+                (Resolved::Plain(_), Some(f)) if f.expands => {
+                    follow_reference(outer, f, setup, depth + 1)
+                }
+                (r, _) => r,
+            }
+        }
+    }
+}
+
+impl SetupCommand {
     /// `setup.sh` installs DPF and RMS unless a switch or a variable says otherwise.
     /// The last of two opposing switches wins, as `setup.sh` applies them in argument
     /// order; the variables decide only when neither switch is given.
@@ -938,6 +1375,9 @@ impl SetupCommand {
     }
     pub(crate) fn installs_rms(&self) -> bool {
         self.last_of("--skip-rms", "--install-rms", self.env_skip_rms)
+    }
+    pub(crate) fn installs_vault(&self) -> bool {
+        self.last_of("--skip-vault", "--install-vault", self.env_skip_vault)
     }
     pub(crate) fn with_observability(&self) -> bool {
         self.has("--with-observability") || self.env_observability
@@ -1111,6 +1551,12 @@ mod tests {
             !c.installs_rms(),
             "a guard naming the script is not the command that runs it"
         );
+        let c = cmd("test -x /a/setup.sh && /b/setup.sh -y");
+        assert_eq!(
+            c.script.as_deref(),
+            Some("/b/setup.sh"),
+            "the script word is the invocation's, not the guard's"
+        );
         let c = cmd("(cd helm-prereqs && ./setup.sh --skip-rms)");
         assert!(
             !c.installs_rms(),
@@ -1269,7 +1715,7 @@ mod tests {
         );
         let c = cmd("sh -- ./setup.sh --skip-rms");
         assert!(!c.installs_rms(), "`--` ends the interpreter's options");
-        let c = cmd("python3 tools/nico-dev/deploy-dev-nico.py --site dc1/dev1");
+        let c = cmd("python3 tools/deploy-site.py --site dc1");
         assert!(!c.runs_setup_sh(), "another deployer decides nothing");
         assert!(c.switches.is_empty(), "{:?}", c.switches);
         let c = cmd("./setup.sh --skip-rms && echo --skip-dpf");
@@ -1523,6 +1969,109 @@ mod tests {
         );
     }
 
+    /// A reference assigned on the command line is expanded where it stands: through the
+    /// layers around it, then `setup.env`; a self-reference passes the inherited value on.
+    #[test]
+    fn a_reference_on_the_command_line_is_expanded_where_it_stands() {
+        let setup = |command: &str, env: &[(&str, &str)]| Setup {
+            command: command.to_string(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), EnvValue::Plain(v.to_string())))
+                .collect(),
+        };
+        let s = setup(
+            "env TAG=v2 bash -c 'NICO_CORE_IMAGE_TAG=$TAG ./setup.sh --skip-dpf --skip-rms'",
+            &[("TAG", "v1"), ("NICO_CORE_IMAGE_TAG", "v0")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v2")
+            ),
+            "the outer `env` layer is the environment the reference expands in"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=\"${NICO_CORE_IMAGE_TAG}\" ./setup.sh",
+            &[("NICO_CORE_IMAGE_TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "a self-reference passes the inherited value through"
+        );
+        let s = setup("NICO_CORE_IMAGE_TAG=$(date) ./setup.sh", &[]);
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Expression
+            ),
+            "any other expression is unreadable here"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=$TAG env TAG=v2 ./setup.sh",
+            &[("TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "the shell expands the assignment before `env` sets TAG"
+        );
+        let s = setup(
+            "NICO_CORE_IMAGE_TAG=\"$NICO_CORE_IMAGE_TAG\" env ./setup.sh",
+            &[("NICO_CORE_IMAGE_TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "a self-reference through a bare `env` still reads the inherited value"
+        );
+        let s = setup(
+            "env TAG=v2 env NICO_CORE_IMAGE_TAG=$TAG ./setup.sh",
+            &[("TAG", "v1")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v1")
+            ),
+            "the shell expands every assignment before either `env` runs"
+        );
+        let s = setup(
+            "TAG=inner NICO_CORE_IMAGE_TAG=$TAG ./setup.sh",
+            &[("TAG", "outer")],
+        );
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("inner")
+            ),
+            "an earlier assignment of the same command applies first"
+        );
+        let s = setup(
+            "NICO_SKIP_DPF=$SKIP ./setup.sh --skip-rms",
+            &[("SKIP", "true")],
+        );
+        assert!(
+            !SetupCommand::parse(&s).installs_dpf(),
+            "a control assigned through a reference is read as setup.sh will see it"
+        );
+        let s = setup("./setup.sh", &[("NICO_CORE_IMAGE_TAG", "v$1")]);
+        assert!(
+            matches!(
+                SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+                Resolved::Plain("v$1")
+            ),
+            "a setup.env value is a literal, never expanded"
+        );
+    }
+
     #[test]
     fn install_variables_must_be_true_or_false_unless_overridden() {
         let with_env = |command: &str, pairs: &[(&str, &str)]| {
@@ -1592,9 +2141,410 @@ mod tests {
         assert_eq!(c.metallb_config.as_deref(), Some(r#"a"b"#));
     }
 
+    fn plain_setup(command: &str, env: &[(&str, &str)]) -> Setup {
+        Setup {
+            command: command.to_string(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), EnvValue::Plain(v.to_string())))
+                .collect(),
+        }
+    }
+
+    /// A quoted or escaped `$` is text the shell passes as written: it is not followed,
+    /// and a path holding one reads back as written.
+    #[test]
+    fn a_quoted_dollar_is_literal_text() {
+        let s = plain_setup("NICO_CORE_IMAGE_TAG='$TAG' ./setup.sh", &[("TAG", "v2")]);
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("$TAG"),
+            "single quotes pass the dollar sign through"
+        );
+        let s = plain_setup(
+            r#"NICO_CORE_IMAGE_TAG="\$TAG" ./setup.sh"#,
+            &[("TAG", "v2")],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("$TAG")
+        );
+        let s = plain_setup(r#"NICO_CORE_IMAGE_TAG="$TAG" ./setup.sh"#, &[("TAG", "v2")]);
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("v2"),
+            "double quotes expand"
+        );
+        let c = cmd("./setup.sh --core-values 'values/a$b.yaml' --skip-rms");
+        assert_eq!(c.core_values.as_deref(), Some("values/a$b.yaml"));
+        assert!(c.unexpanded.is_empty(), "{:?}", c.unexpanded);
+    }
+
+    /// The outer shell expands a double-quoted `bash -c` string before the inner shell
+    /// reads it, in the outer shell's environment; a single-quoted one reaches the inner
+    /// shell as written, and so does an escaped `$`.
+    #[test]
+    fn a_double_quoted_bash_c_string_is_expanded_by_the_outer_shell() {
+        let s = plain_setup(
+            r#"env TAG=v2 bash -c "NICO_CORE_IMAGE_TAG=$TAG ./setup.sh --skip-dpf --skip-rms""#,
+            &[("TAG", "v1")],
+        );
+        let c = SetupCommand::parse(&s);
+        assert_eq!(
+            c.variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("v1"),
+            "the outer shell expanded $TAG before env set it"
+        );
+        assert!(!c.installs_dpf() && !c.installs_rms());
+        let s = plain_setup(
+            "env TAG=v2 bash -c 'NICO_CORE_IMAGE_TAG=$TAG ./setup.sh --skip-dpf --skip-rms'",
+            &[("TAG", "v1")],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("v2")
+        );
+        let s = plain_setup(
+            r#"env FLAGS=--skip-dpf bash -c "./setup.sh $FLAGS""#,
+            &[("FLAGS", "--skip-rms")],
+        );
+        let c = SetupCommand::parse(&s);
+        assert!(
+            c.installs_dpf() && !c.installs_rms(),
+            "the outer shell's FLAGS is the one expanded"
+        );
+        let s = plain_setup(
+            r#"bash -c "NICO_CORE_IMAGE_TAG=\$TAG ./setup.sh""#,
+            &[("TAG", "v1")],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("v1"),
+            "an escaped dollar reaches the inner shell, which expands it"
+        );
+    }
+
+    /// An outer value this reading cannot see stays unknown through the inner shell: the
+    /// inner `env` does not stand in for it. A substitution in the string is opaque.
+    #[test]
+    fn an_unreadable_outer_expansion_stays_unknown_inside_bash_c() {
+        let c = with(
+            r#"env FLAGS=--skip-dpf bash -c "./setup.sh $FLAGS""#,
+            &[("FLAGS", secret())],
+        );
+        assert!(
+            c.installs_dpf(),
+            "the outer shell expanded a value this reading cannot see; the inner FLAGS is not it"
+        );
+        assert!(!c.unexpanded.is_empty(), "{:?}", c.unexpanded);
+        assert!(
+            c.unexpanded.iter().all(|w| !w.contains(UNKNOWN)),
+            "the mark is not shown: {:?}",
+            c.unexpanded
+        );
+        // Inside inner single quotes the expanded value is still the outer shell's, unknown
+        // here: not the literal text the quotes would make of a `$`.
+        let s = Setup {
+            command: r#"bash -c "NICO_IMAGE_REGISTRY='$REGISTRY' ./setup.sh""#.to_string(),
+            env: [("REGISTRY".to_string(), secret())].into_iter().collect(),
+        };
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_IMAGE_REGISTRY", &s),
+            Resolved::Expression
+        );
+        let c = with(
+            "env FLAGS=--skip-dpf bash -c './setup.sh $FLAGS'",
+            &[("FLAGS", secret())],
+        );
+        assert!(!c.installs_dpf(), "the inner shell expands the inner FLAGS");
+        let c = with(
+            r#"bash -c "./setup.sh --core-values $(printf '%s' 'values/$SITE.yaml') --skip-rms""#,
+            &[("SITE", EnvValue::Plain("a'b".into()))],
+        );
+        assert!(c.parse_error.is_none(), "{:?}", c.parse_error);
+        assert!(!c.installs_rms());
+        assert!(
+            c.core_values
+                .as_deref()
+                .is_some_and(|v| v.contains("$(printf '%s' 'values/$SITE.yaml')")),
+            "the substitution is the operand, passed as written: {:?}",
+            c.core_values
+        );
+    }
+
+    /// A double-quoted expansion is one word, as the shell passes it; an unquoted one is
+    /// split on whitespace.
+    #[test]
+    fn a_double_quoted_expansion_is_one_word() {
+        let c = with(
+            r#"env VALUES="$PATH_ALIAS" bash -c './setup.sh --core-values "$VALUES" --skip-rms'"#,
+            &[("PATH_ALIAS", EnvValue::Plain("values/my site.yaml".into()))],
+        );
+        assert_eq!(c.core_values.as_deref(), Some("values/my site.yaml"));
+        assert!(!c.installs_rms());
+        assert!(c.switch_error.is_none(), "{:?}", c.switch_error);
+        let c = with(
+            "./setup.sh \"$FLAGS\"",
+            &[("FLAGS", EnvValue::Plain("--skip-dpf --skip-rms".into()))],
+        );
+        assert!(
+            c.switch_error.is_some(),
+            "one word `--skip-dpf --skip-rms` is not a switch: {:?}",
+            c.switches
+        );
+    }
+
+    /// A quoted expansion ends where its quotes close: `"$CMD"s` is `$CMD` and `s`, a word
+    /// this reading does not follow, never `$CMDs`. An outer substitution's output is
+    /// unknown here, inner single quotes or not.
+    #[test]
+    fn a_quoted_expansion_ends_at_its_closing_quote() {
+        let c = with(
+            r#"bash -c "$CMD"s"#,
+            &[
+                ("CMD", EnvValue::Plain("./setup.sh --skip-rm".into())),
+                ("CMDs", EnvValue::Plain("./setup.sh --skip-dpf".into())),
+            ],
+        );
+        assert!(
+            c.runs_setup_sh() && !c.installs_rms() && c.installs_dpf(),
+            "`$CMD` then `s` is `./setup.sh --skip-rms`, as the shell reads it: {:?}",
+            c.switches
+        );
+        let s = plain_setup(
+            r#"NICO_CORE_IMAGE_TAG="$T"x ./setup.sh"#,
+            &[("T", "v"), ("Tx", "v2")],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Expression
+        );
+        let s = plain_setup(
+            r#"bash -c "NICO_CORE_IMAGE_TAG='$(printf v2)' ./setup.sh""#,
+            &[],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Expression,
+            "the outer substitution's output is not the literal source"
+        );
+    }
+
+    /// An outer `${X:-v}` is a value this reading does not know, inner quotes or not; an
+    /// unquoted expansion splits on bash's own separators, so a no-break space joins.
+    #[test]
+    fn complex_outer_expansions_are_unknown_and_fields_split_as_bash_does() {
+        let s = plain_setup(
+            r#"bash -c "NICO_CORE_IMAGE_TAG='${TAG:-v2}' ./setup.sh""#,
+            &[],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Expression
+        );
+        let c = with(
+            "./setup.sh $FLAGS",
+            &[(
+                "FLAGS",
+                EnvValue::Plain("--skip-dpf\u{A0}--skip-rms".into()),
+            )],
+        );
+        assert!(
+            c.switch_error.is_some() && c.installs_dpf(),
+            "one field, not two switches: {:?}",
+            c.switches
+        );
+    }
+
+    /// A `cd` changes the directory in command position only: as an argument it is a word
+    /// like any other.
+    #[test]
+    fn cd_counts_in_command_position_only() {
+        assert!(!cmd("echo cd; ./setup.sh").changes_dir());
+        assert!(cmd("cd /srv && ./setup.sh").changes_dir());
+        assert!(cmd("X=1 cd /srv; ./setup.sh").changes_dir());
+        assert!(cmd("bash -c 'cd /srv && ./setup.sh'").changes_dir());
+    }
+
+    /// An unquoted `bash -c $COMMAND` is split by the shell: the first word is the string
+    /// to run, the rest `$0` and positional parameters; a double-quoted one is the string.
+    #[test]
+    fn an_unquoted_bash_c_expansion_is_split_before_the_string_is_read() {
+        let command = EnvValue::Plain("./setup.sh --skip-dpf".into());
+        let c = with("bash -c $COMMAND", &[("COMMAND", command.clone())]);
+        assert!(
+            c.runs_setup_sh() && c.installs_dpf(),
+            "--skip-dpf is $0, not a switch"
+        );
+        let c = with(r#"bash -c "$COMMAND""#, &[("COMMAND", command)]);
+        assert!(c.runs_setup_sh() && !c.installs_dpf());
+        // The first word is passed as written: the inner shell, not the outer, expands
+        // what it holds, which this reading does not follow into a word.
+        let c = with(
+            "env FLAGS=' --skip-dpf' bash -c $COMMAND",
+            &[("COMMAND", EnvValue::Plain("./setup.sh$FLAGS".into()))],
+        );
+        assert!(
+            !c.runs_setup_sh(),
+            "a word the inner shell expands and splits is not read as setup.sh"
+        );
+        // A word mixing the reference with other text splits in ways not modelled: the
+        // string is unknown rather than read as the whole value.
+        let c = with(
+            "bash -c $COMMAND';'",
+            &[("COMMAND", EnvValue::Plain("./setup.sh --skip-dpf".into()))],
+        );
+        assert!(!c.runs_setup_sh(), "{:?}", c.switches);
+    }
+
+    /// A chain of bare references is followed assignment by assignment, each from where
+    /// the shell expands it.
+    #[test]
+    fn chained_references_are_followed() {
+        let c = with(
+            "ALIAS=$SOURCE NICO_INSTALL_DPF=$ALIAS ./setup.sh",
+            &[("SOURCE", EnvValue::Plain("false".into()))],
+        );
+        assert!(
+            !c.installs_dpf(),
+            "ALIAS=$SOURCE resolves to false, then NICO_INSTALL_DPF=$ALIAS"
+        );
+        assert!(c.env_error.is_none(), "{:?}", c.env_error);
+        let s = plain_setup(
+            "A=$SRC B=$A NICO_CORE_IMAGE_TAG=$B ./setup.sh",
+            &[("SRC", "v1")],
+        );
+        assert_eq!(
+            SetupCommand::parse(&s).variable("NICO_CORE_IMAGE_TAG", &s),
+            Resolved::Plain("v1"),
+            "each reference reads the assignments before it, then the environment"
+        );
+    }
+
     #[test]
     fn an_unterminated_quote_is_reported() {
         let c = cmd(r#"./setup.sh "--skip-dpf"#);
         assert_eq!(c.parse_error.as_deref(), Some("unterminated double quote"));
+    }
+}
+
+/// The environment variables `setup.sh` reads: every `${NAME:-default}` input of the script
+/// (`helm-prereqs/setup.sh`), the undefaulted ones it requires, and `KUBECONFIG`, which
+/// kubectl reads for it. A variable outside this list is one setup.sh ignores, so a
+/// misspelling in `setup.env` would pass silently; `config.setup.env` warns on it. A test
+/// keeps the list equal to the script's.
+pub(crate) const SETUP_SH_VARIABLES: &[&str] = &[
+    "CERT_MANAGER_NS",
+    "KEYCLOAK_NS",
+    "KUBECONFIG",
+    "NICO_CORE_IMAGE_TAG",
+    "NICO_DPF_BMC_ROOT_PASSWORD",
+    "NICO_DPF_CP_LABEL_VALUE",
+    "NICO_DPF_DHCP_SERVER_CHART_VERSION",
+    "NICO_DPF_DPU_AGENT_CHART_VERSION",
+    "NICO_DPF_DPU_CLUSTER_VIP",
+    "NICO_DPF_DPU_INTERFACE",
+    "NICO_DPF_FMDS_CHART_VERSION",
+    "NICO_DPF_HELM_REPO_CARBIDE",
+    "NICO_DPF_HELM_REPO_HTTPS",
+    "NICO_DPF_HELM_REPO_OCI",
+    "NICO_DPF_IMAGE_PULL_SECRET",
+    "NICO_DPF_IMAGE_REPO",
+    "NICO_DPF_IMAGE_TAG",
+    "NICO_DPF_K8S_API_PORT",
+    "NICO_DPF_K8S_API_VIP",
+    "NICO_DPF_METALLB_POOL",
+    "NICO_DPF_NGC_API_KEY",
+    "NICO_DPF_NICO_NGC_API_KEY",
+    "NICO_DPF_OTEL_CHART_VERSION",
+    "NICO_DPF_SRC",
+    "NICO_IMAGE_REGISTRY",
+    "NICO_INSTALL_CONTOUR",
+    "NICO_INSTALL_DPF",
+    "NICO_INSTALL_RMS",
+    "NICO_INSTALL_VAULT",
+    "NICO_KMIP_CLIENT_DIR",
+    "NICO_MANAGE_DEFAULT_STORAGE_CLASS",
+    "NICO_ORG",
+    "NICO_REST_DIR",
+    "NICO_REST_HELM_DIR",
+    "NICO_REST_IMAGE_TAG",
+    "NICO_RMS_CHART",
+    "NICO_RMS_IMAGE_REPO",
+    "NICO_RMS_IMAGE_TAG",
+    "NICO_RMS_NGC_API_KEY",
+    "NICO_SERVICEMONITORS",
+    "NICO_SITE_NAME",
+    "NICO_SITE_UUID",
+    "NICO_SKIP_DPF",
+    "NICO_SKIP_RMS",
+    "NICO_SKIP_VAULT",
+    "NICO_STORAGE_CLASS",
+    "REGISTRY_PULL_SECRET",
+    "REGISTRY_PULL_USERNAME",
+    "VAULT_NS",
+    "WITH_OBSERVABILITY",
+];
+
+#[cfg(test)]
+mod variable_tests {
+    use super::SETUP_SH_VARIABLES;
+
+    const SETUP_SH: &str = include_str!("../../../helm-prereqs/setup.sh");
+
+    /// Variables the script defaults with `${NAME:-...}` but assigns itself before reading,
+    /// so the environment cannot set them.
+    const INTERNAL: &[&str] = &["CORE_VALUES"];
+
+    /// The names the script defaults from the environment: `${NAME:-`, `${NAME:=` or
+    /// `${NAME:?` with an upper-case name not starting with `_`.
+    fn defaulted_in_script() -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (i, _) in SETUP_SH.match_indices("${") {
+            let rest = &SETUP_SH[i + 2..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            let after = &rest[name.len()..];
+            if !name.is_empty()
+                && !name.starts_with('_')
+                && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && (after.starts_with(":-") || after.starts_with(":=") || after.starts_with(":?"))
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Every variable the script defaults from the environment is in the list, and every
+    /// listed variable is one the script mentions: the list follows setup.sh, both ways.
+    #[test]
+    fn the_list_follows_setup_sh() {
+        let missing: Vec<String> = defaulted_in_script()
+            .into_iter()
+            .filter(|n| {
+                !INTERNAL.contains(&n.as_str()) && !SETUP_SH_VARIABLES.contains(&n.as_str())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "setup.sh reads these; add them to SETUP_SH_VARIABLES: {missing:?}"
+        );
+        let stale: Vec<&&str> = SETUP_SH_VARIABLES
+            .iter()
+            .filter(|n| {
+                !SETUP_SH.contains(&format!("${{{n}"))
+                    && !SETUP_SH.contains(&format!("${n}"))
+                    && !SETUP_SH.contains(**n)
+            })
+            .collect();
+        assert!(stale.is_empty(), "setup.sh no longer mentions: {stale:?}");
+        let mut sorted = SETUP_SH_VARIABLES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, SETUP_SH_VARIABLES, "keep the list sorted");
     }
 }

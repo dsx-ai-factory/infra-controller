@@ -100,14 +100,14 @@ pub(crate) const CHECKS: &[Check] = &[
         detail: "Reads: the `evpn-overlay-peering` decision; on the DPU over `dpuSsh` or from \
                  media, FRR `show bgp l2vpn evpn summary json` and the type 5 route count; the \
                  route servers from the TOML.\n\
-                 Pass: `Option 1`: an EVPN session Established to each ToR with type 5 routes \
-                 received; `Option 2`: each route server Established over multiple hops, at least \
+                 Pass: `ToR peering`: an EVPN session Established to each ToR with type 5 routes \
+                 received; `Route servers`: each route server Established over multiple hops, at least \
                  two servers; observed per peer.\n\
                  Fail: a peer not Established, zero type 5 routes, fewer than two route servers; \
                  fix: the peer config.\n\
                  Skip: when `no DPU` without an overlay.\n\
-                 Test: fixture JSON per option; cases: `Option 1` with both ToRs Established \
-                 passes; one Idle fails; `Option 2` with two servers passes; one server fails \
+                 Test: fixture JSON per option; cases: `ToR peering` with both ToRs Established \
+                 passes; one Idle fails; `Route servers` with two servers passes; one server fails \
                  naming the count.",
         run: None,
     },
@@ -164,7 +164,7 @@ pub(crate) const CHECKS: &[Check] = &[
         expected: "site-zone forward and reverse lookups and apiHostname resolve from the admin and a BMC segment",
         detail: "Reads: from `hosts.probeHosts.admin` and `hosts.bmcProbeHost` (or the controller \
                  from media): forward and reverse lookups in `site.dnsZone` through `nameServer`; \
-                 `apiHostname` against the API VIP (`kubernetes.apiVip` or the pinned \
+                 `apiHostname` against the API VIP (`kubernetes.apiVip` or \
                  `serviceVips.api`); with `External DNS`, every `.forge` name through the \
                  external resolver.\n\
                  Pass: every lookup answers the expected record within the timeout; observed \
@@ -197,7 +197,7 @@ pub(crate) const CHECKS: &[Check] = &[
         id: "fabric.dhcp.relay",
         expected: "a discover from each BMC and hostInband segment reaches the planned DHCP VIP with Option 82, and no other server answers",
         detail: "Reads: the BMC and hostInband segments; the planned nico-dhcp VIP \
-                 (`serviceVips.dhcp` or derived), held on a site controller or the probe host for \
+                 (`serviceVips.dhcp`), held on a site controller or the probe host for \
                  the check; a DHCPDISCOVER sent from `hosts.bmcProbeHost` and each \
                  `hosts.probeHosts.hostInband[]` entry.\n\
                  Pass: the discover arrives at the VIP from every segment with Option 82 (circuit \

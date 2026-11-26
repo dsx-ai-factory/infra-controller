@@ -23,7 +23,8 @@ pub(crate) const CHECKS: &[Check] = &[
     Check {
         id: "platform.kubernetes.version",
         expected: "the cluster at the Kubernetes baseline",
-        detail: "Reads: through the KUBECONFIG in `setup.env`: the server version, each node's \
+        detail: "Reads: through the KUBECONFIG in `setup.env`, or kubectl's default when it is \
+                 unset: the server version, each node's \
                  kubelet and containerd versions, the CNI, ingress controller and CoreDNS images; \
                  `versions.kubernetesBaseline` and the supported-versions manifest (the \
                  quick-start baseline until the provider guide lands).\n\
@@ -172,7 +173,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Fail: a node where a pull fails (TLS, 401, 404); observed names the node, the \
                  image and the error; fix per error.\n\
                  Skip: the RMS and DPF images per their decisions.\n\
-                 Test: a kind cluster with a local registry in CI, fixtures otherwise; cases: all \
+                 Test: a kind cluster with a registry container in CI, fixtures otherwise; cases: all \
                  pull passes; an untrusted CA on one node fails naming it; a missing tag fails \
                  naming the image.",
         run: None,
