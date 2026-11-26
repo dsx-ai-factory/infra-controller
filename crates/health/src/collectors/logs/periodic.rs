@@ -25,6 +25,10 @@
 //! Scans retain member URIs and numeric IDs temporarily, process one entry body at
 //! a time, and persist only the highest entry's identity. Failed scans preserve
 //! the saved anchor, but records already accepted by a sink can replay on retry.
+//!
+//! A partial discovery pass keeps cached services it could not reach, accepts the
+//! services it did find, and leaves discovery due so the next poll retries. Services
+//! are removed only after a complete pass.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -34,10 +38,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use nv_redfish::ServiceRoot;
 use nv_redfish::core::{Bmc, EntityTypeRef, FilterQuery, ODataETag, ODataId, ReferenceLeaf};
 use nv_redfish::log_service::LogService;
 use nv_redfish::schema::log_entry::LogEntry;
+use nv_redfish::{Error as RedfishError, ServiceRoot};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -64,7 +68,8 @@ pub struct LogsCollectorConfig {
     /// Checkpoint path for this endpoint. Its parent directory must exist.
     pub state_file_path: PathBuf,
 
-    /// Interval between discovery refreshes; anchor checks run on every poll.
+    /// Interval between complete discovery refreshes; anchor checks run on every
+    /// poll. An incomplete discovery pass retries on the next poll.
     pub service_refresh_interval: Duration,
 
     /// Destination for collected records. `None` still advances collection state.
@@ -168,10 +173,49 @@ struct ServiceRef {
     filtered_count_is_unreliable: bool,
 }
 
+/// One discovery pass. `complete` is false when any navigation request failed,
+/// so services the pass could not reach must survive until a complete pass.
+struct Discovery {
+    services: Vec<ServiceRef>,
+    complete: bool,
+}
+
 struct LogsCollectorState {
     discovered_services: Vec<ServiceRef>,
-    last_service_refresh: Instant,
+
+    /// When the last complete discovery finished; `None` means discovery is due,
+    /// including after an incomplete pass that must retry on the next poll.
+    last_service_refresh: Option<Instant>,
+
     persistent: PersistentState,
+}
+
+impl LogsCollectorState {
+    /// A complete pass replaces the cached list so removed services stop
+    /// collecting. A partial pass accepts what it found and retains cached
+    /// services it could not reach, leaving discovery due for the next poll.
+    fn apply_discovery(&mut self, discovery: Discovery) {
+        if discovery.complete {
+            self.discovered_services = discovery.services;
+            self.last_service_refresh = Some(Instant::now());
+            return;
+        }
+
+        let found: HashSet<_> = discovery
+            .services
+            .iter()
+            .map(|service| service.id.clone())
+            .collect();
+
+        let retained = self
+            .discovered_services
+            .iter()
+            .filter(|service| !found.contains(&service.id))
+            .cloned();
+
+        self.discovered_services = discovery.services.into_iter().chain(retained).collect();
+        self.last_service_refresh = None;
+    }
 }
 
 /// Collects retained logs from a single BMC endpoint and checkpoints each service.
@@ -317,81 +361,148 @@ impl<B: Bmc + 'static> LogsCollector<B> {
         service_is_excluded(&self.exclude_services, service_id)
     }
 
-    async fn discover_log_services(&self) -> Result<Vec<ServiceRef>, HealthError> {
+    async fn discover_log_services(&self) -> Result<Discovery, HealthError> {
         let service_root = ServiceRoot::new(self.bmc.clone()).await?;
 
         let mut services = Vec::new();
         let mut seen_ids = HashSet::new();
         let mut excluded_count = 0usize;
+        let mut complete = true;
 
-        let consider = |service: LogService<B>,
-                        services: &mut Vec<ServiceRef>,
-                        seen_ids: &mut HashSet<ODataId>,
-                        excluded_count: &mut usize| {
-            let raw = service.raw();
+        if let Some(manager_collection) =
+            log_navigation(service_root.managers().await, "managers", &mut complete).flatten()
+        {
+            let managers = log_navigation(
+                manager_collection.members().await,
+                "manager members",
+                &mut complete,
+            );
 
-            if self.is_excluded(&raw.odata_id.to_string()) {
-                *excluded_count += 1;
-                return;
-            }
-
-            if seen_ids.insert(raw.odata_id.clone())
-                && let Some(entries) = &raw.entries
-            {
-                services.push(ServiceRef {
-                    id: raw.odata_id.clone(),
-                    entries: entries.id().clone(),
-                    filtered_count_is_unreliable: service.filtered_entries_count_is_unreliable(),
-                });
-            }
-        };
-
-        if let Ok(Some(manager_collection)) = service_root.managers().await {
-            for manager in manager_collection.members().await.iter().flatten() {
-                if let Ok(Some(log_services)) = manager.log_services().await {
-                    for service in log_services {
-                        consider(service, &mut services, &mut seen_ids, &mut excluded_count);
-                    }
-                }
+            for manager in managers.into_iter().flatten() {
+                self.consider_log_services(
+                    manager.log_services().await,
+                    &mut services,
+                    &mut seen_ids,
+                    &mut excluded_count,
+                    &mut complete,
+                );
             }
         }
 
-        if let Ok(Some(chassis_collection)) = service_root.chassis().await {
-            for chassis in chassis_collection.members().await.iter().flatten() {
-                if let Ok(Some(log_services)) = chassis.log_services().await {
-                    for service in log_services {
-                        consider(service, &mut services, &mut seen_ids, &mut excluded_count);
-                    }
-                }
+        if let Some(chassis_collection) =
+            log_navigation(service_root.chassis().await, "chassis", &mut complete).flatten()
+        {
+            let chassis_members = log_navigation(
+                chassis_collection.members().await,
+                "chassis members",
+                &mut complete,
+            );
+
+            for chassis in chassis_members.into_iter().flatten() {
+                self.consider_log_services(
+                    chassis.log_services().await,
+                    &mut services,
+                    &mut seen_ids,
+                    &mut excluded_count,
+                    &mut complete,
+                );
             }
         }
 
-        if let Ok(Some(system_collection)) = service_root.systems().await {
-            for system in system_collection.members().await.iter().flatten() {
-                if let Ok(Some(log_services)) = system.log_services().await {
-                    for service in log_services {
-                        consider(service, &mut services, &mut seen_ids, &mut excluded_count);
-                    }
-                }
+        if let Some(system_collection) =
+            log_navigation(service_root.systems().await, "systems", &mut complete).flatten()
+        {
+            let system_members = log_navigation(
+                system_collection.members().await,
+                "system members",
+                &mut complete,
+            );
+
+            for system in system_members.into_iter().flatten() {
+                self.consider_log_services(
+                    system.log_services().await,
+                    &mut services,
+                    &mut seen_ids,
+                    &mut excluded_count,
+                    &mut complete,
+                );
             }
         }
 
-        tracing::info!(
-            service_count = services.len(),
-            excluded_service_count = excluded_count,
-            rack_id = self.event_context.rack_id().map(tracing::field::display),
-            "Discovered distinct log services"
-        );
+        if complete {
+            tracing::info!(
+                service_count = services.len(),
+                excluded_service_count = excluded_count,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
+                "Discovered distinct log services"
+            );
+        } else {
+            tracing::warn!(
+                discovered_service_count = services.len(),
+                excluded_service_count = excluded_count,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
+                "Log service discovery incomplete; retaining cached services and retrying next poll"
+            );
+        }
 
-        Ok(services)
+        Ok(Discovery { services, complete })
+    }
+
+    /// Records log services from one entity, marking the pass incomplete when
+    /// its log-service collection could not be read.
+    fn consider_log_services(
+        &self,
+        log_services: Result<Option<Vec<LogService<B>>>, RedfishError<B>>,
+        services: &mut Vec<ServiceRef>,
+        seen_ids: &mut HashSet<ODataId>,
+        excluded_count: &mut usize,
+        complete: &mut bool,
+    ) {
+        match log_services {
+            Ok(Some(log_services)) => {
+                for service in log_services {
+                    self.consider_service(service, services, seen_ids, excluded_count);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                *complete = false;
+                tracing::warn!(error = ?error, "Failed to read log services");
+            }
+        }
+    }
+
+    fn consider_service(
+        &self,
+        service: LogService<B>,
+        services: &mut Vec<ServiceRef>,
+        seen_ids: &mut HashSet<ODataId>,
+        excluded_count: &mut usize,
+    ) {
+        let raw = service.raw();
+
+        if self.is_excluded(&raw.odata_id.to_string()) {
+            *excluded_count += 1;
+            return;
+        }
+
+        if seen_ids.insert(raw.odata_id.clone())
+            && let Some(entries) = &raw.entries
+        {
+            services.push(ServiceRef {
+                id: raw.odata_id.clone(),
+                entries: entries.id().clone(),
+                filtered_count_is_unreliable: service.filtered_entries_count_is_unreliable(),
+            });
+        }
     }
 
     async fn run_collection_iteration(&mut self) -> Result<IterationResult, HealthError> {
-        let needs_refresh = self
-            .state
-            .as_ref()
-            .map(|s| s.last_service_refresh.elapsed() > self.service_refresh_interval)
-            .unwrap_or(true);
+        let needs_refresh = self.state.as_ref().is_none_or(|state| {
+            state
+                .last_service_refresh
+                .is_none_or(|last| last.elapsed() > self.service_refresh_interval)
+        });
 
         let mut refresh_triggered = false;
 
@@ -402,25 +513,38 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             );
 
             match self.discover_log_services().await {
-                Ok(services) => {
-                    tracing::info!(
-                        service_count = services.len(),
-                        rack_id = self.event_context.rack_id().map(tracing::field::display),
-                        "Log service discovery complete"
-                    );
+                Ok(discovery) => {
+                    let complete = discovery.complete;
 
-                    if let Some(state) = &mut self.state {
-                        state.discovered_services = services;
-                        state.last_service_refresh = Instant::now();
-                    } else {
+                    if self.state.is_none() {
                         let persistent = self.load_persistent_state().await?;
 
                         self.state = Some(LogsCollectorState {
-                            discovered_services: services,
-                            last_service_refresh: Instant::now(),
+                            discovered_services: Vec::new(),
+                            last_service_refresh: None,
                             persistent,
                         });
                     }
+
+                    // A partial pass retains cached services, so report the
+                    // merged list rather than the services this pass found.
+                    let service_count = {
+                        let state = self
+                            .state
+                            .as_mut()
+                            .expect("log collector state initialized above");
+
+                        state.apply_discovery(discovery);
+
+                        state.discovered_services.len()
+                    };
+
+                    tracing::info!(
+                        service_count,
+                        complete,
+                        rack_id = self.event_context.rack_id().map(tracing::field::display),
+                        "Log service discovery applied"
+                    );
 
                     refresh_triggered = true;
                 }
@@ -785,6 +909,23 @@ impl<B: Bmc + 'static> LogsCollector<B> {
         };
 
         Ok((saved, emitted))
+    }
+}
+
+/// Returns a navigation result when the request succeeded, marking the pass
+/// incomplete when it failed. An absent collection is a complete result.
+fn log_navigation<T, E: std::fmt::Debug>(
+    result: Result<T, E>,
+    label: &'static str,
+    complete: &mut bool,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            *complete = false;
+            tracing::warn!(label, error = ?error, "Log service discovery navigation failed");
+            None
+        }
     }
 }
 
@@ -1162,16 +1303,24 @@ mod tests {
                 "@odata.id": "/redfish/v1", "Id": "Root", "Name": "Root",
                 "Vendor": source.vendor,
                 "Links": {"Sessions": {"@odata.id": "/sessions"}},
-                "Managers": {
+                "Managers": {"@odata.id": "/managers"},
+            }))
+            .into_response(),
+            "/managers" => {
+                if source.fail == Some("managers") {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+
+                Json(json!({
                     "@odata.id": "/managers",
                     "@odata.type": "#ManagerCollection.ManagerCollection", "Name": "Managers",
                     "Members": [{
                         "@odata.id": "/manager", "Id": "BMC", "Name": "BMC",
                         "LogServices": {"@odata.id": "/services"},
                     }],
-                },
-            }))
-            .into_response(),
+                }))
+                .into_response()
+            }
             "/services" => Json(json!({
                 "@odata.id": "/services",
                 "@odata.type": "#LogServiceCollection.LogServiceCollection", "Name": "Logs",
@@ -1375,6 +1524,15 @@ mod tests {
                 "{scenario}"
             );
         }
+
+        /// Makes the next poll refresh log service discovery.
+        fn expire_discovery(&mut self) {
+            self.collector
+                .state
+                .as_mut()
+                .expect("collect at least once before expiring discovery")
+                .last_service_refresh = None;
+        }
     }
 
     impl Drop for Rig {
@@ -1385,6 +1543,108 @@ mod tests {
 
     fn entry(id: impl std::fmt::Display, body: &str) -> Value {
         json!({"@odata.id":format!("/entries/{id}"), "Id":id.to_string(), "Name":"Entry", "EntryType":"Event", "Message":body})
+    }
+
+    fn service_ref(id: &str) -> ServiceRef {
+        ServiceRef {
+            id: ODataId::from(id.to_string()),
+            entries: ODataId::from(format!("{id}/entries")),
+            filtered_count_is_unreliable: false,
+        }
+    }
+
+    #[test]
+    fn partial_discovery_merges_cached_services_and_complete_discovery_replaces() {
+        let mut state = LogsCollectorState {
+            discovered_services: vec![service_ref("/a"), service_ref("/b")],
+            last_service_refresh: Some(Instant::now()),
+            persistent: PersistentState::default(),
+        };
+
+        // A partial pass replaces the services it found, adds new ones, and
+        // retains cached services it could not reach.
+        state.apply_discovery(Discovery {
+            services: vec![service_ref("/b"), service_ref("/c")],
+            complete: false,
+        });
+
+        assert_eq!(
+            state
+                .discovered_services
+                .iter()
+                .map(|service| service.id.to_string())
+                .collect::<Vec<_>>(),
+            ["/b", "/c", "/a"]
+        );
+        assert!(state.last_service_refresh.is_none());
+
+        // Only a complete pass drops services that are no longer discovered.
+        state.apply_discovery(Discovery {
+            services: vec![service_ref("/c")],
+            complete: true,
+        });
+
+        assert_eq!(
+            state
+                .discovered_services
+                .iter()
+                .map(|service| service.id.to_string())
+                .collect::<Vec<_>>(),
+            ["/c"]
+        );
+        assert!(state.last_service_refresh.is_some());
+    }
+
+    #[tokio::test]
+    async fn incomplete_discovery_retains_cached_services_and_retries() {
+        let mut rig = Rig::new(false);
+
+        rig.collect(&[(1, "baseline")], Some(1), &["baseline"])
+            .await;
+
+        // Fail the Managers collection while the cached service and its Entries
+        // URLs remain readable.
+        rig.expire_discovery();
+        rig.source.lock().unwrap().fail = Some("managers");
+
+        let result = rig
+            .collect(
+                &[(1, "baseline"), (2, "during failure")],
+                Some(2),
+                &["during failure"],
+            )
+            .await;
+
+        assert!(result.refresh_triggered);
+
+        {
+            let state = rig.collector.state.as_ref().unwrap();
+            assert_eq!(
+                state.discovered_services.len(),
+                1,
+                "cached service retained"
+            );
+            assert!(
+                state.last_service_refresh.is_none(),
+                "incomplete discovery stays due"
+            );
+        }
+
+        // The next poll retries discovery without waiting out the interval.
+        rig.source.lock().unwrap().fail = None;
+
+        let result = rig
+            .collect(&[(1, "baseline"), (2, "during failure")], Some(2), &[])
+            .await;
+
+        assert!(result.refresh_triggered);
+
+        let state = rig.collector.state.as_ref().unwrap();
+        assert_eq!(state.discovered_services.len(), 1);
+        assert!(
+            state.last_service_refresh.is_some(),
+            "complete discovery resets the interval"
+        );
     }
 
     #[tokio::test]
