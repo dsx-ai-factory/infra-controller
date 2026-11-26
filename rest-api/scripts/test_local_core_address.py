@@ -12,12 +12,14 @@ import unittest
 class LocalCoreAddressTest(unittest.TestCase):
     def test_configure_local_core_site_agent(self):
         cases = [
-            ("IPv6", "2001:db8::10", "", "[2001:db8::10]:1079"),
-            ("bracketed IPv6", "[2001:db8::10]", "", "[2001:db8::10]:1079"),
-            ("hostname fallback", "nico.example.test", "", "nico.example.test:1079"),
-            ("preferred IPv4", "nico.example.test", "192.0.2.10", "192.0.2.10:1079"),
+            ("IPv6", "2001:db8::10", "", "", "[2001:db8::10]:1079"),
+            ("bracketed IPv6", "[2001:db8::10]", "", "", "[2001:db8::10]:1079"),
+            ("hostname fallback", "nico.example.test", "", "198.51.100.1", "nico.example.test:1079"),
+            ("preferred IPv4", "host.docker.internal", "192.0.2.10", "198.51.100.1", "192.0.2.10:1079"),
+            ("Linux gateway fallback", "host.docker.internal", "", "198.51.100.1", "198.51.100.1:1079"),
+            ("no IPv4 gateway", "host.docker.internal", "", "invalid IP", "host.docker.internal:1079"),
         ]
-        for name, host, resolved_ipv4, expected in cases:
+        for name, host, resolved_ipv4, gateway, expected in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 fixture = Path(directory)
                 for certificate in ("ca.crt", "client.crt", "client.key"):
@@ -28,6 +30,7 @@ class LocalCoreAddressTest(unittest.TestCase):
                     'case "$1" in\n'
                     "  ps) echo control-plane ;;\n"
                     '  exec) [ -z "$RESOLVED_IPV4" ] || printf "%s STREAM\\n" "$RESOLVED_IPV4" ;;\n'
+                    '  inspect) printf "%s \\n" "$GATEWAY" ;;\n'
                     "  *) exit 1 ;;\n"
                     "esac\n"
                 )
@@ -58,6 +61,7 @@ class LocalCoreAddressTest(unittest.TestCase):
                         **os.environ,
                         "PATH": f"{fixture}:{os.environ['PATH']}",
                         "RESOLVED_IPV4": resolved_ipv4,
+                        "GATEWAY": gateway,
                         "PATCH_FILE": str(patch_file),
                     },
                     capture_output=True, text=True, timeout=15,
