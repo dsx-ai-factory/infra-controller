@@ -69,6 +69,93 @@ pub(in crate::tests) mod tests {
         config
     }
 
+    #[crate::sqlx_test]
+    async fn nras_verdict_controls_the_persisted_device_state(pool: sqlx::PgPool) {
+        let appraisal_status =
+            std::sync::Arc::new(std::sync::Mutex::new(nras::EarStatus::Affirming));
+        let appraisal_error_details = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                nras_appraisal_status: Some(appraisal_status.clone()),
+                nras_appraisal_error_details: Some(appraisal_error_details.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let machine_id: MachineId = create_managed_host(&env).await.host().id.into();
+        let device_id = "HGX_IRoT_GPU_0".to_string();
+
+        // Exercise the controller's acceptance policy through persisted state,
+        // leaving JWT signature and claim decoding coverage in the NRAS crate.
+        for (verdict, error_details, expected_state) in [
+            (
+                nras::EarStatus::Affirming,
+                None,
+                SpdmAttestationState::ApplyAppraisalPolicy,
+            ),
+            (
+                nras::EarStatus::Warning,
+                Some(serde_json::json!({"reason": "test appraisal warning"})),
+                SpdmAttestationState::Failed(format!(
+                    "NRAS verification failed for {device_id}: overall=Warning, device=Warning; details={{\"reason\":\"test appraisal warning\"}}; result=simulated-token",
+                )),
+            ),
+            (
+                nras::EarStatus::Contraindicated,
+                None,
+                SpdmAttestationState::Failed(format!(
+                    "NRAS verification failed for {device_id}: overall=Contraindicated, device=Contraindicated; details=no appraisal details were provided; result=simulated-token",
+                )),
+            ),
+        ] {
+            let response = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            let job_id = uuid::Uuid::try_from(response.job_id.unwrap()).unwrap();
+            let load = || async {
+                let mut connection = env.pool.acquire().await.unwrap();
+                db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut connection,
+                    &machine_id,
+                    &device_id,
+                    &job_id,
+                )
+                .await
+                .unwrap()
+            };
+            let mut before = load().await;
+            for _ in 0..10 {
+                if before.state == SpdmAttestationState::NrasVerification {
+                    break;
+                }
+                env.run_spdm_controller_iteration_no_requeue().await;
+                before = load().await;
+            }
+            assert_eq!(before.state, SpdmAttestationState::NrasVerification);
+
+            *appraisal_status.lock().unwrap() = verdict;
+            *appraisal_error_details.lock().unwrap() = error_details;
+            env.run_spdm_controller_iteration_no_requeue().await;
+            let after = load().await;
+            assert_eq!(after.state, expected_state, "{verdict:?}");
+            assert_ne!(after.state_version, before.state_version, "{verdict:?}");
+
+            // Finish this job before starting the next case on the same devices.
+            for _ in 0..2 {
+                env.run_spdm_controller_iteration_no_requeue().await;
+            }
+        }
+    }
+
     /// The fixture seeds a profile for the mock host's class, and creation
     /// rejects a duplicate class, so seeding unconditionally would panic the
     /// moment a test built a second environment on one pool. Nothing else

@@ -57,7 +57,7 @@ pub mod spdm {
 
     use config_version::ConfigVersion;
     use itertools::Itertools;
-    use nras::{NrasError, NrasVerifierClient, ProcessedAttestationOutcome, RawAttestationOutcome};
+    use nras::{EarClaims, NrasError, NrasVerifierClient, VerifierResponseJwt};
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
     use sqlx::Row;
@@ -375,11 +375,12 @@ pub mod spdm {
     #[async_trait::async_trait]
     pub trait Verifier: std::fmt::Debug + Send + Sync + 'static {
         fn client(&self, nras_config: nras::Config) -> Box<dyn nras::VerifierClient>;
+        /// Validates the signed response and returns its appraisal claims, including negative verdicts.
         async fn parse_attestation_outcome(
             &self,
             nras_config: &nras::Config,
-            state: &RawAttestationOutcome,
-        ) -> Result<ProcessedAttestationOutcome, NrasError>;
+            state: &VerifierResponseJwt,
+        ) -> Result<EarClaims, NrasError>;
     }
 
     #[derive(Debug)]
@@ -405,13 +406,12 @@ pub mod spdm {
         async fn parse_attestation_outcome(
             &self,
             nras_config: &nras::Config,
-            state: &RawAttestationOutcome,
-        ) -> Result<ProcessedAttestationOutcome, NrasError> {
-            // now create a KeyStore to validate those tokens
+            state: &VerifierResponseJwt,
+        ) -> Result<EarClaims, NrasError> {
+            // Fetch the signing keys before validating the single EAR token.
             let nras_keystore =
                 nras::NrasKeyStore::new_with_config(nras_config, &self.instrumentation).await?;
-            let parser = nras::Parser::new_with_config(nras_config);
-            parser.parse_attestation_outcome(state, &nras_keystore)
+            state.validate_and_parse(&nras_keystore, nras_config.validate_jwt_expiry)
         }
     }
 }
