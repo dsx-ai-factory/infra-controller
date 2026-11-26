@@ -1599,7 +1599,9 @@ impl PreingestionManagerStatic {
         // On Lenovo, a power drain above has already AC power cycled the host and retried
         // the power-on until the BMC answered. Other vendors' drains do not AC power cycle,
         // so they still need the fixed-delay cycle to activate the firmware.
-        let drain_did_ac_power_cycle = power_drains_needed.is_some() && bmc_vendor.is_lenovo();
+        // `last_power_drain_operation` is set only after a drain step ran.
+        let drain_did_ac_power_cycle =
+            last_power_drain_operation.is_some() && bmc_vendor.is_lenovo();
         if !drain_did_ac_power_cycle
             && (*upgrade_type == FirmwareComponentType::HGXBmc
                 || *upgrade_type == FirmwareComponentType::Gpu)
