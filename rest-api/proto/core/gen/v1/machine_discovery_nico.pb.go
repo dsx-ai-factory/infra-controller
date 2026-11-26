@@ -914,13 +914,15 @@ func (x *DmiData) GetSysVendor() string {
 }
 
 type PciDeviceProperties struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Vendor        string                 `protobuf:"bytes,1,opt,name=vendor,proto3" json:"vendor,omitempty"`
-	Device        string                 `protobuf:"bytes,2,opt,name=device,proto3" json:"device,omitempty"`
-	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
-	NumaNode      int32                  `protobuf:"zigzag32,4,opt,name=numa_node,json=numaNode,proto3" json:"numa_node,omitempty"`
-	Description   *string                `protobuf:"bytes,5,opt,name=description,proto3,oneof" json:"description,omitempty"`
-	Slot          *string                `protobuf:"bytes,6,opt,name=slot,proto3,oneof" json:"slot,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Vendor      string                 `protobuf:"bytes,1,opt,name=vendor,proto3" json:"vendor,omitempty"`
+	Device      string                 `protobuf:"bytes,2,opt,name=device,proto3" json:"device,omitempty"`
+	Path        string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	NumaNode    int32                  `protobuf:"zigzag32,4,opt,name=numa_node,json=numaNode,proto3" json:"numa_node,omitempty"`
+	Description *string                `protobuf:"bytes,5,opt,name=description,proto3,oneof" json:"description,omitempty"`
+	Slot        *string                `protobuf:"bytes,6,opt,name=slot,proto3,oneof" json:"slot,omitempty"`
+	// PCI device id, e.g. "0xa2dc" (BlueField-3) or "0x2330" (H100).
+	DeviceId      *string `protobuf:"bytes,7,opt,name=device_id,json=deviceId,proto3,oneof" json:"device_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -993,6 +995,13 @@ func (x *PciDeviceProperties) GetDescription() string {
 func (x *PciDeviceProperties) GetSlot() string {
 	if x != nil && x.Slot != nil {
 		return *x.Slot
+	}
+	return ""
+}
+
+func (x *PciDeviceProperties) GetDeviceId() string {
+	if x != nil && x.DeviceId != nil {
+		return *x.DeviceId
 	}
 	return ""
 }
@@ -1381,9 +1390,13 @@ type Gpu struct {
 	TotalMemory    string                 `protobuf:"bytes,6,opt,name=total_memory,json=totalMemory,proto3" json:"total_memory,omitempty"`
 	Frequency      string                 `protobuf:"bytes,7,opt,name=frequency,proto3" json:"frequency,omitempty"`
 	PciBusId       string                 `protobuf:"bytes,8,opt,name=pci_bus_id,json=pciBusId,proto3" json:"pci_bus_id,omitempty"`
-	PlatformInfo   *GpuPlatformInfo       `protobuf:"bytes,9,opt,name=platform_info,json=platformInfo,proto3" json:"platform_info,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// PCI device id (upper 16 bits of nvidia-smi `pci.device_id`), e.g. "0x2330".
+	// Declared before platform_info on purpose: scout deserializes nvidia-smi CSV
+	// output positionally, so field order must match the --query-gpu order.
+	PciDeviceId   string           `protobuf:"bytes,10,opt,name=pci_device_id,json=pciDeviceId,proto3" json:"pci_device_id,omitempty"`
+	PlatformInfo  *GpuPlatformInfo `protobuf:"bytes,9,opt,name=platform_info,json=platformInfo,proto3" json:"platform_info,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Gpu) Reset() {
@@ -1468,6 +1481,13 @@ func (x *Gpu) GetFrequency() string {
 func (x *Gpu) GetPciBusId() string {
 	if x != nil {
 		return x.PciBusId
+	}
+	return ""
+}
+
+func (x *Gpu) GetPciDeviceId() string {
+	if x != nil {
+		return x.PciDeviceId
 	}
 	return ""
 }
@@ -1686,16 +1706,19 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\tbios_date\x18\a \x01(\tR\bbiosDate\x12!\n" +
 	"\fproduct_name\x18\b \x01(\tR\vproductName\x12\x1d\n" +
 	"\n" +
-	"sys_vendor\x18\t \x01(\tR\tsysVendor\"\xcf\x01\n" +
+	"sys_vendor\x18\t \x01(\tR\tsysVendor\"\xff\x01\n" +
 	"\x13PciDeviceProperties\x12\x16\n" +
 	"\x06vendor\x18\x01 \x01(\tR\x06vendor\x12\x16\n" +
 	"\x06device\x18\x02 \x01(\tR\x06device\x12\x12\n" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1b\n" +
 	"\tnuma_node\x18\x04 \x01(\x11R\bnumaNode\x12%\n" +
 	"\vdescription\x18\x05 \x01(\tH\x00R\vdescription\x88\x01\x01\x12\x17\n" +
-	"\x04slot\x18\x06 \x01(\tH\x01R\x04slot\x88\x01\x01B\x0e\n" +
+	"\x04slot\x18\x06 \x01(\tH\x01R\x04slot\x88\x01\x01\x12 \n" +
+	"\tdevice_id\x18\a \x01(\tH\x02R\bdeviceId\x88\x01\x01B\x0e\n" +
 	"\f_descriptionB\a\n" +
-	"\x05_slot\"\xa8\x03\n" +
+	"\x05_slotB\f\n" +
+	"\n" +
+	"_device_id\"\xa8\x03\n" +
 	"\x0eLldpSwitchData\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x02id\x18\x02 \x01(\tB\x02\x18\x01R\x02id\x12 \n" +
@@ -1738,7 +1761,7 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\ahost_id\x18\x04 \x01(\rR\x06hostId\x12\x1b\n" +
 	"\tmodule_id\x18\x05 \x01(\rR\bmoduleId\x12\x1f\n" +
 	"\vfabric_guid\x18\x06 \x01(\tR\n" +
-	"fabricGuid\"\xce\x02\n" +
+	"fabricGuid\"\xf2\x02\n" +
 	"\x03Gpu\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06serial\x18\x02 \x01(\tR\x06serial\x12%\n" +
@@ -1748,7 +1771,9 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\ftotal_memory\x18\x06 \x01(\tR\vtotalMemory\x12\x1c\n" +
 	"\tfrequency\x18\a \x01(\tR\tfrequency\x12\x1c\n" +
 	"\n" +
-	"pci_bus_id\x18\b \x01(\tR\bpciBusId\x12G\n" +
+	"pci_bus_id\x18\b \x01(\tR\bpciBusId\x12\"\n" +
+	"\rpci_device_id\x18\n" +
+	" \x01(\tR\vpciDeviceId\x12G\n" +
 	"\rplatform_info\x18\t \x01(\v2\".machine_discovery.GpuPlatformInfoR\fplatformInfo\"e\n" +
 	"\fMemoryDevice\x12\x1c\n" +
 	"\asize_mb\x18\x01 \x01(\rH\x00R\x06sizeMb\x88\x01\x01\x12\x1e\n" +

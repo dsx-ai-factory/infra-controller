@@ -869,6 +869,77 @@ func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 	}
 }
 
+// TestMachine_DeviceIdJSON proves the wire contract of deviceId on GPU, network
+// and InfiniBand metadata entries along the Machine GET path: stored metadata is
+// decoded with the same codec as the DB column, rendered with includeMetadata,
+// and each deviceId is always present, as null when the Site did not report it.
+func TestMachine_DeviceIdJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		stored  string
+		wantGPU string
+		wantNIC string
+		wantIB  string
+	}{
+		{
+			name: "renders the reported device ids",
+			stored: `{"status": {"discoveryInfo": {
+				"gpus": [{"name": "NVIDIA H100 PCIe", "pciDeviceId": "0x2331"}],
+				"networkInterfaces": [{"macAddress": "02:00:00:00:01:b0", "pciProperties": {"deviceId": "0xa2dc"}}],
+				"infinibandInterfaces": [{"guid": "1070fd0300bd43ac", "pciProperties": {"deviceId": "0x101b"}}]
+			}}}`,
+			wantGPU: `"0x2331"`,
+			wantNIC: `"0xa2dc"`,
+			wantIB:  `"0x101b"`,
+		},
+		{
+			name: "renders null when not reported",
+			stored: `{"status": {"discoveryInfo": {
+				"gpus": [{"name": "NVIDIA H100 PCIe"}],
+				"networkInterfaces": [{"macAddress": "02:00:00:00:01:b0", "pciProperties": {}}],
+				"infinibandInterfaces": [{"guid": "1070fd0300bd43ac", "pciProperties": {}}]
+			}}}`,
+			wantGPU: `null`,
+			wantNIC: `null`,
+			wantIB:  `null`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stored := &cdbm.SiteControllerMachine{}
+			require.NoError(t, stored.UnmarshalJSON([]byte(tc.stored)))
+
+			apim := NewAPIMachine(&cdbm.Machine{Metadata: stored}, nil, nil, nil, nil, true, true)
+			encoded, err := json.Marshal(apim)
+			require.NoError(t, err)
+
+			var response struct {
+				Metadata struct {
+					GPUs                 []map[string]json.RawMessage `json:"gpus"`
+					NetworkInterfaces    []map[string]json.RawMessage `json:"networkInterfaces"`
+					InfiniBandInterfaces []map[string]json.RawMessage `json:"infinibandInterfaces"`
+				} `json:"metadata"`
+			}
+			require.NoError(t, json.Unmarshal(encoded, &response))
+
+			for section, tt := range map[string]struct {
+				entries []map[string]json.RawMessage
+				want    string
+			}{
+				"gpus":                 {response.Metadata.GPUs, tc.wantGPU},
+				"networkInterfaces":    {response.Metadata.NetworkInterfaces, tc.wantNIC},
+				"infinibandInterfaces": {response.Metadata.InfiniBandInterfaces, tc.wantIB},
+			} {
+				require.Len(t, tt.entries, 1, section)
+				deviceId, found := tt.entries[0]["deviceId"]
+				require.True(t, found, "%s must render deviceId", section)
+				assert.JSONEq(t, tt.want, string(deviceId), section)
+			}
+		})
+	}
+}
+
 func TestMachine_NewAPIMachineSummary(t *testing.T) {
 	mID := uuid.NewString()
 	dbm := &cdbm.Machine{

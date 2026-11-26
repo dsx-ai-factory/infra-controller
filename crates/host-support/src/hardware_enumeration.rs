@@ -115,6 +115,7 @@ impl TryFrom<&Device> for PciDevicePropertiesExt {
             Some(parent) => convert_property_to_string(PCI_SLOT_NAME, "", &parent)?.to_string(),
             None => String::new(),
         };
+        let device_id = convert_property_to_string(PCI_DEVICE_ID, "", device)?.to_string();
 
         Ok(PciDevicePropertiesExt {
             sub_class: convert_property_to_string(PCI_SUBCLASS, "", device)?.to_string(),
@@ -128,8 +129,9 @@ impl TryFrom<&Device> for PciDevicePropertiesExt {
                     convert_property_to_string(PCI_MODEL, "NO_PCI_MODEL", device)?.to_string(),
                 ),
                 slot: Some(slot),
+                device_id: Some(device_id.clone()),
             },
-            device_id: convert_property_to_string(PCI_DEVICE_ID, "", device)?.to_string(),
+            device_id,
         })
     }
 }

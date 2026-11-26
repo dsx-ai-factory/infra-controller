@@ -31,8 +31,8 @@ JSON file containing GPU info. It should contain an array of JSON
 objects like this: { "name": "string", "serial": "string",
 "driver_version": "string", "vbios_version": "string",
 "inforom_version": "string", "total_memory": "string", "frequency":
-"string", "pci_bus_id": "string" } Pass an empty array if you want to
-remove GPUs.
+"string", "pci_bus_id": "string", "pci_device_id": "string (optional)" }
+Pass an empty array if you want to remove GPUs.
 
 `--extended`
 
