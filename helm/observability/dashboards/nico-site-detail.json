@@ -6574,18 +6574,6 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_nvlink_partition_monitor_nvlink_info_mismatches{forge_site=~\"$site\"})",
-          "legendFormat": "info mismatches",
-          "range": true,
-          "instant": false,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
           "expr": "max(${metric_prefix}_nvlink_partition_monitor_stale_partitions_deleted{forge_site=~\"$site\"})",
           "legendFormat": "stale partitions deleted",
           "range": true,
