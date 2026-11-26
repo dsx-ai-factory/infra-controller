@@ -182,16 +182,24 @@ func (s *PostgresStore) ListTasks(
 	options *taskcommon.TaskListOptions,
 	pagination *dbquery.Pagination,
 ) ([]*taskdef.Task, int32, error) {
-	taskDaos, total, err := model.ListTasks(ctx, s.pg.DB, options, pagination)
+	var taskDaos []model.Task
+	var total int32
+	// Eligibility can change while counting (for example, a Task becomes active).
+	// Both statements must observe one snapshot, including an empty page.
+	err := s.pg.DB.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+		var queryErr error
+		taskDaos, total, queryErr = model.ListTasks(ctx, tx, options, pagination)
+		return queryErr
+	})
 	if err != nil {
-		return nil, 0, errors.GRPCErrorInternal(err.Error())
+		return nil, 0, fmt.Errorf("list tasks: %w", err)
 	}
 
 	results := make([]*taskdef.Task, 0, len(taskDaos))
 	for _, taskDao := range taskDaos {
-		converted, err := taskFromDAO(&taskDao)
+		converted, err := dao.TaskFrom(&taskDao)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("decode task %s: %w", taskDao.ID, err)
 		}
 		results = append(results, converted)
 	}

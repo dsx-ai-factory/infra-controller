@@ -271,6 +271,8 @@ tags:
   - name: Task Run
     description: |-
       A Task Run is a phased, policy-gated execution of one operation across many Racks. A Task Run narrows a candidate set of Racks with an optional selector, divides the selected Racks into phases, and drives one execution target per Rack; each target in turn drives at most one Task. Safety gates pause the Task Run when failures exceed a threshold, and phase gates hold each phase until an operator advances it. This tag exposes creation, retrieval, target listing, and the pause / resume / advance / cancel lifecycle actions; drill into per-Rack execution detail via the Task tag using each target's `taskId`.
+  - name: Event
+    description: Generic event policies, explicit bindings, handlings, and triggered Tasks.
   - name: Network Security Group
     description: |-
       Network Security Group is a security policy that controls the traffic flowing between Instances.
@@ -15166,6 +15168,1112 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  "/v2/org/{org}/nico/event/policy":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    get:
+      tags:
+      - Event
+      operationId: get-all-event-policy
+      summary: List event policies
+      description: Returns persisted policies followed by built-ins, each group ordered
+        by UUID ascending. Includes disabled and unbound policies. All filters combine
+        with AND before pagination. Requires Provider Admin authorization and an owned
+        Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Optional event type; omission includes every supported type.
+      - name: enabled
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: enabled
+      - name: bound
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: True selects at least one explicit binding; false selects none;
+          omission includes both. Built-ins have no explicit bindings. Each policy appears
+          once.
+      - name: pageNumber
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/PageNumber"
+          default: 1
+        description: pageNumber
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        description: pageSize
+      - name: orderBy
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - ID_ASC
+          default: ID_ASC
+        description: Only the documented deterministic ordering is supported.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  "$ref": "#/components/schemas/EventPolicy"
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON containing pageNumber, pageSize, total, and orderBy.
+                Filtering and ordering precede slicing; empty and out-of-range pages
+                return [].
+    post:
+      tags:
+      - Event
+      operationId: create-event-policy
+      summary: Create an event policy
+      description: Validates and creates an immutable policy with its initial enabled
+        state in one atomic operation. Enabled defaults to true. Creation alone has
+        no operational effect until the policy is bound. Requires Provider Admin authorization
+        and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The policy
+            may have been created even though its UUID was not returned, and
+            creation may still complete after this timeout.
+
+            Do not automatically retry this POST. Creation requests are not
+            deduplicated: resubmitting can create another policy with a different
+            UUID. An absent match in a policy list does not establish that the
+            POST failed: the list may have been read before creation committed.
+
+            Confirm that the original creation attempt has finished, then obtain
+            a fresh Site policy list with `GET /v2/org/{org}/nico/event/policy`
+            using the same `siteId` before deciding whether to resubmit. If the
+            original outcome cannot be confirmed, resubmission must not be
+            treated as safe; duplicate policies remain possible.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicy"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/EventPolicyCreateRequest"
+  "/v2/org/{org}/nico/event/policy/binding/site":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    get:
+      tags:
+      - Event
+      operationId: get-site-event-policy-binding
+      summary: Get the Site event policy binding
+      description: Explicit Site assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. An absent binding
+        returns 404. Requires Provider Admin authorization and an owned Site with Flow
+        enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: true
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Required event type of the explicit scope slot.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Site
+                rackId: null
+    put:
+      tags:
+      - Event
+      operationId: put-site-event-policy-binding
+      summary: Put the Site event policy binding
+      description: Explicit Site assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. Atomically assigns
+        or replaces the policy UUID; definitions and enabled states are preserved. Assigning
+        the policy already occupying the slot is a no-op. A later PUT can replace
+        an intervening assignment. Requires Provider Admin authorization and
+        an owned Site with Flow enabled. Returns 201 when the assignment is created
+        and 200 when an existing assignment is replaced or unchanged.
+      security:
+      - JWTBearerToken: []
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            Site binding may already have changed, or the assignment may still
+            complete after this timeout.
+
+            Do not automatically retry this PUT. A retry starts a new mutation and
+            can overwrite an assignment made by another administrator. Read
+            `GET /v2/org/{org}/nico/event/policy/binding/site` using
+            the same `siteId` and `eventType`, reconcile the current assignment with
+            the intended state, and decide whether to issue a new change. Reading
+            current state does not cancel a request that is still in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '200':
+          description: Existing binding replaced or unchanged
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Site
+                rackId: null
+        '201':
+          description: Binding created
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Site
+                rackId: null
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SiteEventPolicyBindingRequest"
+    delete:
+      tags:
+      - Event
+      operationId: delete-site-event-policy-binding
+      summary: Delete the Site event policy binding
+      description: Explicit Site assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. Removing the
+        binding requires policyId to match its current policy. A mismatch returns 409
+        without deleting the binding. The policy definition is preserved. An absent binding returns 404. Requires
+        Provider Admin authorization and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: true
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Required event type of the explicit scope slot.
+      - name: policyId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Expected policy UUID. Deletion is atomic; a different assignment returns 409 and is preserved.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            Site binding may already have been deleted, or deletion may still
+            complete after this timeout.
+
+            Do not automatically retry this DELETE. Read
+            `GET /v2/org/{org}/nico/event/policy/binding/site` using
+            the same `siteId` and `eventType` and reconcile the current assignment
+            before deciding whether to issue a new change. The expected `policyId`
+            protects a binding to a different policy, but a retry can delete a new
+            binding to the same policy. Reading current state does not cancel a
+            request that is still in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '204':
+          description: No content
+
+  "/v2/org/{org}/nico/event/policy/binding/rack/{rackId}":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    - name: rackId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: External inventory Rack ID. UUID-shaped values are also external IDs.
+    get:
+      tags:
+      - Event
+      operationId: get-rack-event-policy-binding
+      summary: Get the Rack event policy binding
+      description: Explicit Rack assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. An absent binding
+        returns 404. Requires Provider Admin authorization and an owned Site with Flow
+        enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: true
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Required event type of the explicit scope slot.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Rack
+                rackId: rack-17
+    put:
+      tags:
+      - Event
+      operationId: put-rack-event-policy-binding
+      summary: Put the Rack event policy binding
+      description: Explicit Rack assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. Atomically assigns
+        or replaces the policy UUID; definitions and enabled states are preserved. Assigning
+        the policy already occupying the slot is a no-op. A later PUT can replace
+        an intervening assignment. Requires Provider Admin authorization and
+        an owned Site with Flow enabled. Returns 201 when the assignment is created
+        and 200 when an existing assignment is replaced or unchanged.
+      security:
+      - JWTBearerToken: []
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            Rack binding may already have changed, or the assignment may still
+            complete after this timeout.
+
+            Do not automatically retry this PUT. A retry starts a new mutation and
+            can overwrite an assignment made by another administrator. Read
+            `GET /v2/org/{org}/nico/event/policy/binding/rack/{rackId}` using
+            the same `siteId`, `eventType`, and `rackId`, reconcile the current assignment with
+            the intended state, and decide whether to issue a new change. Reading
+            current state does not cancel a request that is still in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '200':
+          description: Existing binding replaced or unchanged
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Rack
+                rackId: rack-17
+        '201':
+          description: Binding created
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicyBinding"
+              example:
+                siteId: 550e8400-e29b-41d4-a716-446655440000
+                eventType: hardware.leak.detected
+                policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+                scopeType: Rack
+                rackId: rack-17
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/RackEventPolicyBindingRequest"
+    delete:
+      tags:
+      - Event
+      operationId: delete-rack-event-policy-binding
+      summary: Delete the Rack event policy binding
+      description: Explicit Rack assignment for the required eventType. Disabled assignments
+        remain visible. No inherited or built-in policy is substituted. Removing the
+        binding requires policyId to match its current policy. A mismatch returns 409
+        without deleting the binding. The policy definition is preserved. An absent binding returns 404. Requires
+        Provider Admin authorization and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: true
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Required event type of the explicit scope slot.
+      - name: policyId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Expected policy UUID. Deletion is atomic; a different assignment returns 409 and is preserved.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            Rack binding may already have been deleted, or deletion may still
+            complete after this timeout.
+
+            Do not automatically retry this DELETE. Read
+            `GET /v2/org/{org}/nico/event/policy/binding/rack/{rackId}` using
+            the same `siteId`, `eventType`, and `rackId` and reconcile the current assignment
+            before deciding whether to issue a new change. The expected `policyId`
+            protects a binding to a different policy, but a retry can delete a new
+            binding to the same policy. Reading current state does not cancel a
+            request that is still in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '204':
+          description: No content
+
+  "/v2/org/{org}/nico/event/policy/binding":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    get:
+      tags:
+      - Event
+      operationId: get-all-event-policy-binding
+      summary: List event policy bindings
+      description: List explicit assignments, including assignments to disabled policies.
+        Optional filters combine with AND before pagination. With no filters, returns
+        all bindings in the selected Site. Order is Site first, then canonical Rack
+        UUID, event type, and binding UUID ascending. Returns an empty list when valid
+        filters match no assignments, including a valid, nonzero policy UUID with no
+        bindings. Requires Provider Admin authorization and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Optional event type; omission includes all supported event types.
+      - name: scopeType
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - Site
+          - Rack
+        description: Optional binding scope. Rack scope includes all Racks when rackId
+          is omitted.
+      - name: rackId
+        in: query
+        required: false
+        schema:
+          type: string
+        description: External inventory Rack ID. UUID-shaped values are also external IDs. Cannot be combined with scopeType=Site.
+      - name: policyId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+          not:
+            const: "00000000-0000-0000-0000-000000000000"
+        description: Filter by referenced policy UUID; must be valid and nonzero.
+          A valid, nonzero UUID with no matching bindings returns an empty list.
+          The zero UUID is invalid and returns 400.
+      - name: pageNumber
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/PageNumber"
+          default: 1
+        description: pageNumber
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        description: pageSize
+      - name: orderBy
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - SCOPE_ASC
+          default: SCOPE_ASC
+        description: Only the documented deterministic ordering is supported.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  "$ref": "#/components/schemas/EventPolicyBinding"
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON containing pageNumber, pageSize, total, and orderBy.
+                Filtering and ordering precede slicing; empty and out-of-range pages
+                return [].
+
+  "/v2/org/{org}/nico/event/policy/{policyId}":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    - name: policyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Policy UUID
+    get:
+      tags:
+      - Event
+      operationId: get-event-policy
+      summary: Get an event policy
+      description: Includes the complete typed action definition and enabled state.
+        Event type is inferred from the UUID. Requires Provider Admin authorization
+        and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicy"
+    patch:
+      tags:
+      - Event
+      operationId: update-event-policy
+      summary: Set event policy enabled state
+      description: Only enabled may change. Setting the current enabled state is a
+        no-op; a later PATCH can overwrite an intervening state change. Event type
+        is inferred from the UUID. Disabling permits policy fallback and
+        does not cancel existing Tasks. Built-ins are read-only. Requires Provider Admin
+        authorization and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            enabled state may already have changed, or the change may still
+            complete after this timeout.
+
+            Do not automatically retry this PATCH. A retry starts a new mutation
+            and can overwrite an enabled-state change made by another administrator.
+            Read `GET /v2/org/{org}/nico/event/policy/{policyId}` using the same
+            `siteId`, reconcile the current state with the intended state, and
+            decide whether to issue a new change. Reading current state does not
+            cancel a request that is still in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/EventPolicy"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/EventPolicyUpdateRequest"
+    delete:
+      tags:
+      - Event
+      operationId: delete-event-policy
+      summary: Delete an unbound event policy
+      description: Rejects bound policies with 409, including disabled policies with
+        bindings. The check and deletion are atomic with binding writes. Built-ins are
+        read-only. Captured applied policies remain unchanged. Requires Provider Admin
+        authorization and an owned Site with Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          description: |-
+            The Site did not return a result within the request budget. The
+            policy may already have been deleted, or deletion may still complete
+            after this timeout.
+
+            Do not automatically retry this DELETE. Check
+            `GET /v2/org/{org}/nico/event/policy/{policyId}` and list its bindings
+            with `GET /v2/org/{org}/nico/event/policy/binding` using the same
+            `siteId` and the `policyId` filter. Reconcile the current state before
+            deciding whether to issue a new deletion. A new request may succeed
+            if another administrator has removed bindings that blocked the earlier
+            request. Reading current state does not cancel a request that is still
+            in progress.
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/NICoAPIError"
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: Flow proxy request timed out
+                    data: null
+        '204':
+          description: No content
+  "/v2/org/{org}/nico/event/handling":
+    parameters:
+    - name: org
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Name of the Org
+    get:
+      tags:
+      - Event
+      operationId: get-all-event-handling
+      summary: List event handlings
+      description: Operational event-policy results ordered by handledAt then internal
+        event UUID descending. All filters combine with AND. Captured policies survive
+        later edits/deletion. Corrupt snapshots return 500. Record-level failures, retries,
+        skips, and empty Task lists still return 200 with authoritative Flow status
+        and diagnostics. This API does not report whether the underlying condition is
+        active or cleared. Requires Provider Admin authorization and an owned Site with
+        Flow enabled.
+      security:
+      - JWTBearerToken: []
+      parameters:
+      - name: siteId
+        in: query
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Site routing scope. Requires Provider Admin authorization and Site
+          ownership.
+      - name: eventType
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/EventType"
+        description: Optional event type; omission includes every supported type.
+      - name: policyId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+        description: Captured event-policy UUID, independent of current bindings. Does
+          not refer to a Task operation rule.
+      - name: rackId
+        in: query
+        required: false
+        schema:
+          type: string
+        description: External inventory Rack ID, including UUID-shaped values. Requires
+          a Rack resolvable in live inventory. Retired (soft-deleted) or missing Racks
+          cannot be selected by external ID; unresolved IDs return HTTP 400 even when
+          captured rows remain. After resolution, matches captured event Rack context,
+          including component events; later component moves do not alter membership.
+          Older events without captured Rack context are excluded.
+      - name: sourceType
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - Component
+          - Rack
+        description: Exact source kind; supply together with sourceId.
+      - name: sourceId
+        in: query
+        required: false
+        schema:
+          type: string
+        description: |-
+          Exact source identifier; supply together with `sourceType`.
+          For `Component`, use an external component ID or BMC MAC address that
+          resolves to exactly one component across the Site's inventory, including
+          all component types. Shared identifiers return HTTP 412. If the component
+          ID is shared, use that component's unique BMC MAC address instead, such
+          as `aa:bb:cc:dd:ee:ff`; the MAC must also resolve uniquely.
+
+          `rackId` filters captured event records after source resolution. It does
+          not narrow the inventory lookup or disambiguate a shared component ID.
+          A `sourceId` copied from a handling response is therefore not guaranteed
+          to be usable as a component filter. For `Rack`, use the external inventory
+          Rack ID; UUID-shaped values remain external IDs.
+        example: aa:bb:cc:dd:ee:ff
+      - name: pageNumber
+        in: query
+        required: false
+        schema:
+          "$ref": "#/components/schemas/PageNumber"
+          default: 1
+        description: pageNumber
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        description: pageSize
+      - name: orderBy
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - HANDLED_AT_DESC
+          default: HANDLED_AT_DESC
+        description: Only the documented deterministic ordering is supported.
+      responses:
+        '400':
+          "$ref": "#/components/responses/ValidationError"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedError"
+        '403':
+          "$ref": "#/components/responses/ForbiddenError"
+        '404':
+          "$ref": "#/components/responses/NotFoundError"
+        '409':
+          "$ref": "#/components/responses/ConflictError"
+        '412':
+          "$ref": "#/components/responses/PreconditionFailedError"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsError"
+        '500':
+          "$ref": "#/components/responses/GenericHttpError"
+        '503':
+          "$ref": "#/components/responses/ServiceUnavailableError"
+        '504':
+          "$ref": "#/components/responses/GatewayTimeoutError"
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  "$ref": "#/components/schemas/EventHandling"
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON containing pageNumber, pageSize, total, and orderBy.
+                Filtering and ordering precede slicing; empty and out-of-range pages
+                return [].
   '/v2/org/{org}/nico/task/rule':
     parameters:
       - schema:
@@ -15360,6 +16468,14 @@ paths:
 
         Setting `activeOnly=true` restricts the result to tasks in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination. The `X-Pagination` response header reports the total count over the post-filter set.
 
+        Optional `eventType` and `eventPolicyId` filters select event-triggered Tasks using the triggering event's captured type and policy UUID. `eventPolicyId` is distinct from the Task operation rule returned as `ruleId`. Membership remains valid after policy replacement, disabling, or deletion. A valid, nonzero policy UUID with no matching Tasks returns `[]`.
+
+        Set `eventTriggeredOnly=true` to list Tasks from all event types and policies. `eventType` or `eventPolicyId` also implies event-triggered Tasks, even when `eventTriggeredOnly=false` or omitted. Without event selectors, ordinary and event-triggered Tasks are included. All filters combine with AND before pagination.
+
+        Use `/rack/{id}/task` or `/tray/{id}/task` with the same event selectors to restrict results to a target Rack or Tray. Target IDs are path parameters on those endpoints; `/task` does not accept `rackId` or `trayId` query parameters. Task targets can differ from the source of the triggering event.
+
+        Filtering by event provenance requires a Site Agent and Flow that acknowledge the requested event and target selectors. A service version that ignores a selector returns HTTP 412 instead of an unfiltered Task list.
+
         By default the `report` field is omitted from each Task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB.
       parameters:
         - schema:
@@ -15381,6 +16497,24 @@ paths:
           name: includeReport
           in: query
           description: Include the per-task execution report on each returned Task.
+        - name: eventType
+          in: query
+          schema:
+            $ref: '#/components/schemas/EventType'
+          description: Captured event type. Implies event-triggered Tasks and combines with every other filter using AND.
+        - name: eventPolicyId
+          in: query
+          schema:
+            type: string
+            format: uuid
+            not:
+              const: '00000000-0000-0000-0000-000000000000'
+          description: Nonzero captured Event policy UUID, independent of current bindings, enabled state, or policy existence. Does not refer to a Task operation rule. A valid, nonzero UUID with no matching Tasks returns an empty list. Implies event-triggered Tasks.
+        - name: eventTriggeredOnly
+          in: query
+          schema:
+            type: boolean
+          description: Defaults to false. Restrict to event-triggered Tasks from any policy or type. False or omission includes all Tasks unless eventType or eventPolicyId is supplied.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -15422,9 +16556,17 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
-          $ref: '#/components/responses/GenericHttpError'
+          description: Site does not have Flow enabled, or the Site Agent and Flow do not acknowledge the requested event Task filters. Upgrade both services before using these selectors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -16469,6 +17611,14 @@ paths:
 
         Filters compose with AND: setting `activeOnly=true` restricts the result to tasks that are still in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination; the `X-Pagination` response header reports the total count over the post-filter set.
 
+        Optional `eventType` and `eventPolicyId` select the triggering event's captured type and Event policy UUID, independently of current policy existence, bindings, or enabled state. The Event policy UUID differs from the Task operation rule returned as `ruleId`. A valid nonzero policy UUID with no matching Tasks returns `[]` when the target Rack exists.
+
+        `eventTriggeredOnly=true` selects event-triggered Tasks from any policy or type. A supplied `eventType` or `eventPolicyId` also implies this restriction, even when the flag is false or omitted. All event, target, and active-state filters combine with AND before pagination. Omission of event selectors includes ordinary and event-triggered Tasks.
+
+        This endpoint selects Tasks targeting the Rack, including Tasks with multiple targets that include it; the triggering event may originate elsewhere. The target must remain resolvable in inventory. Missing or retired targets return HTTP 404. Target IDs belong in the path; `rackId` and `trayId` query parameters are not supported.
+
+        Event filtering requires a Site Agent and Flow that acknowledge all requested selectors. A missing or different acknowledgement returns HTTP 412 without exposing a broader Task list.
+
         By default the `report` field is omitted from each task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB and pulling them across the list path persists the full payload in each caller-side workflow record. Single-task `GET /rack/task/{id}` and `POST /rack/task/{id}/cancel` always include the report.
       parameters:
         - schema:
@@ -16490,6 +17640,24 @@ paths:
           name: includeReport
           in: query
           description: Include the per-task execution report on each returned task.
+        - name: eventType
+          in: query
+          schema:
+            $ref: '#/components/schemas/EventType'
+          description: Captured event type. Implies event-triggered Tasks and combines with every other filter using AND.
+        - name: eventPolicyId
+          in: query
+          schema:
+            type: string
+            format: uuid
+            not:
+              const: '00000000-0000-0000-0000-000000000000'
+          description: Nonzero captured Event policy UUID, independent of current bindings, enabled state, or policy existence. Does not refer to a Task operation rule. A valid, nonzero UUID with no matching Tasks returns an empty list. Implies event-triggered Tasks.
+        - name: eventTriggeredOnly
+          in: query
+          schema:
+            type: boolean
+          description: Defaults to false. Restrict to event-triggered Tasks from any policy or type. False or omission includes all Tasks unless eventType or eventPolicyId is supplied.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -16501,6 +17669,7 @@ paths:
             type: integer
             minimum: 1
             maximum: 100
+            default: 20
             example: 20
           in: query
           name: pageSize
@@ -16526,6 +17695,18 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Flow is disabled for the Site or the Site Agent and Flow do not acknowledge the requested Task filters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -17565,6 +18746,14 @@ paths:
 
         Filters compose with AND: setting `activeOnly=true` restricts the result to tasks that are still in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination; the `X-Pagination` response header reports the total count over the post-filter set.
 
+        Optional `eventType` and `eventPolicyId` select the triggering event's captured type and Event policy UUID, independently of current policy existence, bindings, or enabled state. The Event policy UUID differs from the Task operation rule returned as `ruleId`. A valid nonzero policy UUID with no matching Tasks returns `[]` when the target Tray exists.
+
+        `eventTriggeredOnly=true` selects event-triggered Tasks from any policy or type. A supplied `eventType` or `eventPolicyId` also implies this restriction, even when the flag is false or omitted. All event, target, and active-state filters combine with AND before pagination. Omission of event selectors includes ordinary and event-triggered Tasks.
+
+        This endpoint selects Tasks targeting the Tray, including Tasks with multiple targets that include it; the triggering event may originate elsewhere. The target must remain resolvable in inventory. Missing or retired targets return HTTP 404. Target IDs belong in the path; `rackId` and `trayId` query parameters are not supported.
+
+        Event filtering requires a Site Agent and Flow that acknowledge all requested selectors. A missing or different acknowledgement returns HTTP 412 without exposing a broader Task list.
+
         By default the `report` field is omitted from each task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB and pulling them across the list path persists the full payload in each caller-side workflow record. Single-task `GET /rack/task/{id}` and `POST /rack/task/{id}/cancel` always include the report.
       parameters:
         - schema:
@@ -17586,6 +18775,24 @@ paths:
           name: includeReport
           in: query
           description: Include the per-task execution report on each returned task.
+        - name: eventType
+          in: query
+          schema:
+            $ref: '#/components/schemas/EventType'
+          description: Captured event type. Implies event-triggered Tasks and combines with every other filter using AND.
+        - name: eventPolicyId
+          in: query
+          schema:
+            type: string
+            format: uuid
+            not:
+              const: '00000000-0000-0000-0000-000000000000'
+          description: Nonzero captured Event policy UUID, independent of current bindings, enabled state, or policy existence. Does not refer to a Task operation rule. A valid, nonzero UUID with no matching Tasks returns an empty list. Implies event-triggered Tasks.
+        - name: eventTriggeredOnly
+          in: query
+          schema:
+            type: boolean
+          description: Defaults to false. Restrict to event-triggered Tasks from any policy or type. False or omission includes all Tasks unless eventType or eventPolicyId is supplied.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17597,6 +18804,7 @@ paths:
             type: integer
             minimum: 1
             maximum: 100
+            default: 20
             example: 20
           in: query
           name: pageSize
@@ -17623,8 +18831,17 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '412':
-          description: The identifier matches more than one component.
+          description: Flow is disabled for the Site or the Site Agent and Flow do not acknowledge the requested Task filters. Also returned when the supplied component identifier is ambiguous in inventory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/TooManyRequestsError'
+        '500':
           $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -31541,6 +32758,730 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    EventType:
+      type: string
+      enum:
+      - hardware.leak.detected
+      description: Registered Flow event type. Leakage is the initial supported type.
+    EventTargetStrategy:
+      type: string
+      enum:
+      - Source
+      - Rack
+      - AffectedComponents
+      description: Source selects the reporting component or the components of the reporting
+        Rack. Rack selects the reporting Rack or the component source's owning Rack. AffectedComponents
+        uses the event-type-specific impact resolver.
+    EventConflictBehavior:
+      type: string
+      enum:
+      - Queue
+      - Reject
+      description: |-
+        Configured admission strategy for event-triggered Tasks. For
+        `hardware.leak.detected`, when `operation.powerControl.operation` is
+        `ForcePowerOff` and `operation.powerControl.overrideReadinessCheck` is
+        `true`, Flow uses preempting admission instead of the configured `Queue`
+        or `Reject` strategy. This can interrupt conflicting work that `Queue`
+        would otherwise wait for. The stored policy retains the configured value.
+
+        The configured strategy applies to other event types, other operations,
+        or when `overrideReadinessCheck` is `false`, including when it is omitted
+        and defaults to `false`.
+    EventSeverity:
+      type: string
+      enum:
+      - Info
+      - Warning
+      - Critical
+    EventComponentType:
+      type: string
+      enum:
+      - Compute
+      - NVSwitch
+      - PowerShelf
+      - TORSwitch
+      - UMS
+      - CDU
+    PowerTaskOperation:
+      type: string
+      enum:
+      - PowerOn
+      - ForcePowerOn
+      - PowerOff
+      - ForcePowerOff
+      - Restart
+      - ForceRestart
+      - WarmReset
+      - ColdReset
+    FirmwareTaskOperation:
+      type: string
+      enum:
+      - Upgrade
+      - Downgrade
+      - Rollback
+    EventHandlingStatus:
+      type: string
+      enum:
+      - Unknown
+      - NoAction
+      - Starting
+      - Retrying
+      - Running
+      - Completed
+      - Skipped
+      - Failed
+      description: Flow-computed aggregate across all matched actions and created Tasks.
+        Completed includes Task completion. Unknown preserves missing or unrecognized
+        state; no inference is made from an empty Task list.
+    EventHandlingReason:
+      type: string
+      enum:
+      - NoTargets
+      - AttemptFailed
+      - AttemptInterrupted
+      - RetryScheduled
+      - ActionFailed
+      - TaskFailed
+      - IncompleteState
+    EventActionCondition:
+      type: object
+      example:
+        severities:
+          - "Critical"
+        componentTypes:
+          - "Compute"
+          - "CDU"
+      additionalProperties: false
+      properties:
+        severities:
+          oneOf:
+          - type: array
+            items:
+              "$ref": "#/components/schemas/EventSeverity"
+            minItems: 1
+          - type: 'null'
+        componentTypes:
+          oneOf:
+          - type: array
+            items:
+              "$ref": "#/components/schemas/EventComponentType"
+            minItems: 1
+          - type: 'null'
+      description: OR within each nonempty list, AND across lists. Omitted or null lists
+        impose no condition. Component types match only component-origin events. Empty
+        lists are rejected.
+    PowerControl:
+      example: {operation: ForcePowerOff, overrideReadinessCheck: false}
+      type: object
+      additionalProperties: false
+      properties:
+        operation:
+          "$ref": "#/components/schemas/PowerTaskOperation"
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+      required:
+      - operation
+    FirmwareControl:
+      example: {operation: Upgrade, targetVersion: "2.0.0", startTime: null, endTime: null, subTargets: [bmc], overrideReadinessCheck: false, overrideVersionCheck: true}
+      type: object
+      additionalProperties: false
+      properties:
+        operation:
+          "$ref": "#/components/schemas/FirmwareTaskOperation"
+        targetVersion:
+          oneOf:
+          - type: string
+          - type: 'null'
+        startTime:
+          oneOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+        endTime:
+          oneOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+        subTargets:
+          oneOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+        overrideVersionCheck:
+          type: boolean
+          default: false
+      required:
+      - operation
+      description: Optional execution window is compared in whole Unix seconds; Unix second
+        zero is rejected and endTime must follow startTime. Null version leaves selection
+        to Flow. Empty or null subTargets selects all supported sub-parts.
+    TaskOperation:
+      type: object
+      additionalProperties: false
+      description: Reusable target-independent operation. Exactly one operation must be selected.
+        An optional ruleId pins an Operation Rule UUID; omission or null uses normal rule resolution.
+        The ID is captured with the policy and execution plan. It does not freeze the rule definition.
+        Flow checks rule existence at Task submission and uses the explicit override during execution.
+        An unavailable explicit rule does not fall back to a default.
+      example:
+        ruleId: 550e8400-e29b-41d4-a716-446655440000
+        powerControl: {operation: ForcePowerOff, overrideReadinessCheck: false}
+        firmwareControl: null
+      properties:
+        ruleId:
+          description: Optional non-zero Operation Rule UUID, distinct from the event-policy UUID.
+          oneOf:
+          - type: string
+            format: uuid
+            not:
+              const: 00000000-0000-0000-0000-000000000000
+          - type: 'null'
+        powerControl:
+          oneOf:
+          - "$ref": "#/components/schemas/PowerControl"
+          - type: 'null'
+        firmwareControl:
+          oneOf:
+          - "$ref": "#/components/schemas/FirmwareControl"
+          - type: 'null'
+      not:
+        anyOf:
+        - type: object
+          properties:
+            powerControl:
+              const: null
+            firmwareControl:
+              const: null
+        - type: object
+          required:
+          - powerControl
+          - firmwareControl
+          properties:
+            powerControl:
+              type: object
+            firmwareControl:
+              type: object
+    EventSubmitTask:
+      type: object
+      example:
+        targetStrategy: "Source"
+        onConflict: "Queue"
+        description: "Power off the leaking source"
+        operation:
+          ruleId: null
+          powerControl:
+            operation: "ForcePowerOff"
+            overrideReadinessCheck: false
+          firmwareControl: null
+      additionalProperties: false
+      properties:
+        targetStrategy:
+          "$ref": "#/components/schemas/EventTargetStrategy"
+        onConflict:
+          "$ref": "#/components/schemas/EventConflictBehavior"
+        description:
+          type: string
+        operation:
+          "$ref": "#/components/schemas/TaskOperation"
+      required:
+      - targetStrategy
+      - onConflict
+      - operation
+    EventSendAlert:
+      type: object
+      example:
+        severity: "Warning"
+        message: "Observed condition"
+      additionalProperties: false
+      properties:
+        severity:
+          "$ref": "#/components/schemas/EventSeverity"
+        message:
+          type: string
+      required:
+      - severity
+      description: Flow rejects creation if the selected Site has no registered alert
+        executor.
+    EventNoAction:
+      type: object
+      example:
+        reason: "record leakage"
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+      description: Explicit no-op. A selected NoAction policy prevents fallback. It does
+        not pause existing work.
+    EventAction:
+      type: object
+      example:
+        name: "record"
+        condition: null
+        submitTask: null
+        sendAlert: null
+        noAction:
+          reason: "record leakage"
+      additionalProperties: false
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+        condition:
+          oneOf:
+          - "$ref": "#/components/schemas/EventActionCondition"
+          - type: 'null'
+        submitTask:
+          oneOf:
+          - "$ref": "#/components/schemas/EventSubmitTask"
+          - type: 'null'
+        sendAlert:
+          oneOf:
+          - "$ref": "#/components/schemas/EventSendAlert"
+          - type: 'null'
+        noAction:
+          oneOf:
+          - "$ref": "#/components/schemas/EventNoAction"
+          - type: 'null'
+      not:
+        anyOf:
+        - type: object
+          properties:
+            submitTask:
+              const: null
+            sendAlert:
+              const: null
+            noAction:
+              const: null
+        - type: object
+          required:
+          - submitTask
+          - sendAlert
+          properties:
+            submitTask:
+              type: object
+            sendAlert:
+              type: object
+        - type: object
+          required:
+          - submitTask
+          - noAction
+          properties:
+            submitTask:
+              type: object
+            noAction:
+              type: object
+        - type: object
+          required:
+          - sendAlert
+          - noAction
+          properties:
+            sendAlert:
+              type: object
+            noAction:
+              type: object
+      description: Exactly one non-null specification is required. Names must be unique
+        within the policy. Omitted or null condition applies without constraints. Responses
+        preserve null for unselected specifications.
+    EventPolicy:
+      type: object
+      example:
+        id: "63f1c140-81c9-4711-8c3a-1664aaed2cd9"
+        name: "Staged leakage recording"
+        description: "Review before binding"
+        eventType: "hardware.leak.detected"
+        enabled: false
+        readOnly: false
+        actions:
+          - name: "record"
+            condition: null
+            submitTask: null
+            sendAlert: null
+            noAction:
+              reason: "record leakage"
+        created: "2026-10-26T16:00:00Z"
+        updated: "2026-10-26T16:00:00Z"
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        enabled:
+          type: boolean
+        readOnly:
+          type: boolean
+        actions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/EventAction"
+          minItems: 1
+        created:
+          oneOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+        updated:
+          oneOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+      required:
+      - id
+      - name
+      - description
+      - eventType
+      - enabled
+      - readOnly
+      - actions
+      - created
+      - updated
+      description: Reusable immutable definition. Only enabled can be changed through
+        REST. Built-ins are read-only, cannot be explicitly bound, and have null persistence
+        timestamps.
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+      - created
+      - updated
+    EventPolicyCreateRequest:
+      type: object
+      example:
+        siteId: "550e8400-e29b-41d4-a716-446655440000"
+        name: "Staged leakage recording"
+        description: "Review before binding"
+        eventType: "hardware.leak.detected"
+        enabled: false
+        actions:
+          - name: "record"
+            noAction:
+              reason: "record leakage"
+      additionalProperties: false
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: UUID of the Site routing this request to Flow.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Policy name, limited to 128 characters and 128 UTF-8 bytes.
+            Non-ASCII characters may use multiple bytes; for example, 65 `é`
+            characters occupy 130 bytes and are rejected.
+        description:
+          type: string
+          maxLength: 1024
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        enabled:
+          type: boolean
+          default: true
+        actions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/EventAction"
+          minItems: 1
+      required:
+      - siteId
+      - name
+      - eventType
+      - actions
+      description: Creates and validates the entire policy atomically with its initial
+        enabled state. Unbound enabled policies do not affect selection. Specify enabled=false
+        for staging.
+    EventPolicyUpdateRequest:
+      type: object
+      example:
+        siteId: "550e8400-e29b-41d4-a716-446655440000"
+        enabled: true
+      additionalProperties: false
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: UUID of the Site routing this request to Flow.
+        enabled:
+          type: boolean
+      required:
+      - siteId
+      - enabled
+      description: Sets the desired state explicitly. Disabled policies retain bindings
+        but are skipped during selection, permitting fallback. Definition changes require
+        a new policy UUID.
+    SiteEventPolicyBindingRequest:
+      type: object
+      example:
+        siteId: 550e8400-e29b-41d4-a716-446655440000
+        eventType: hardware.leak.detected
+        policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+      additionalProperties: false
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: UUID of the Site routing this request to Flow.
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        policyId:
+          type: string
+          format: uuid
+      required:
+      - siteId
+      - eventType
+      - policyId
+      description: Atomically assigns or replaces the Site binding. Policy type must
+        match eventType. Assignment may reference a disabled policy. Assigning the
+        current policy is a no-op; a later PUT can replace an intervening assignment.
+    RackEventPolicyBindingRequest:
+      type: object
+      example:
+        siteId: 550e8400-e29b-41d4-a716-446655440000
+        eventType: hardware.leak.detected
+        policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+      additionalProperties: false
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: UUID of the Site routing this request to Flow.
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        policyId:
+          type: string
+          format: uuid
+      required:
+      - siteId
+      - eventType
+      - policyId
+      description: Atomically assigns or replaces the Rack binding. Policy type must
+        match eventType. Assignment may reference a disabled policy. Assigning the
+        current policy is a no-op; a later PUT can replace an intervening assignment.
+        The Rack identifier is supplied only in the URL path.
+    EventPolicyBinding:
+      type: object
+      example:
+        siteId: 550e8400-e29b-41d4-a716-446655440000
+        eventType: hardware.leak.detected
+        policyId: 63f1c140-81c9-4711-8c3a-1664aaed2cd9
+        scopeType: Site
+        rackId: null
+      additionalProperties: false
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: UUID of the Site routing this request to Flow.
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        policyId:
+          type: string
+          format: uuid
+        scopeType:
+          type: string
+          enum:
+          - Site
+          - Rack
+        rackId:
+          oneOf:
+          - type: string
+            description: External inventory Rack ID. Null for the Site binding or when
+              the Rack external ID is unavailable.
+          - type: 'null'
+      required:
+      - siteId
+      - eventType
+      - policyId
+      - scopeType
+      - rackId
+      description: Explicit assignment, including disabled policies. Absence returns 404;
+        inherited and built-in policies are never substituted.
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+      - rackId
+    Event:
+      type: object
+      example:
+        eventType: "hardware.leak.detected"
+        detectedAt: "2026-10-26T15:59:00Z"
+        summary: "Leak detected"
+        sourceId: "component-17"
+        sourceType: "Component"
+      additionalProperties: false
+      properties:
+        eventType:
+          "$ref": "#/components/schemas/EventType"
+        detectedAt:
+          oneOf:
+          - type: string
+            format: date-time
+            description: First accepted source observation time, not necessarily the condition
+              start. Null for older records or sources without this timestamp.
+          - type: 'null'
+        summary:
+          type: string
+        sourceId:
+          type: string
+          description: Current external identifier of the event source, resolved
+            from inventory when read. It may change after an inventory rename.
+            Returns an empty string (`""`) when the inventory row is missing or
+            its external identifier is unavailable, even if the event is retained.
+            This applies to both Rack and component sources. A component ID can
+            be shared by multiple inventory components. To filter that component's handlings,
+            use a unique external component ID or its unique BMC MAC address with
+            sourceType=Component; rackId does not disambiguate a shared ID.
+        sourceType:
+          type: string
+          enum:
+          - Component
+          - Rack
+      required:
+      - eventType
+      - detectedAt
+      - summary
+      - sourceId
+      - sourceType
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+      - detectedAt
+    EventAppliedPolicy:
+      type: object
+      example:
+        id: "c3e4990d-b63f-42f3-93ec-a778c4975044"
+        actions:
+          - name: "shutdown"
+            condition: null
+            submitTask:
+              targetStrategy: "Source"
+              onConflict: "Queue"
+              description: "Power off the leaking source"
+              operation:
+                ruleId: null
+                powerControl:
+                  operation: "ForcePowerOff"
+                  overrideReadinessCheck: false
+                firmwareControl: null
+            sendAlert: null
+            noAction: null
+      additionalProperties: false
+      properties:
+        actions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/EventAction"
+        id:
+          type: string
+          format: uuid
+      required:
+      - actions
+      - id
+      description: Captured event-policy UUID and matched actions. Empty actions means
+        no conditions matched. The snapshot never resolves from the current policy.
+    EventHandlingTask:
+      type: object
+      example:
+        id: "93a72f49-8a4f-4fd0-883d-0bc1c8443e21"
+        status: "Running"
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - Unknown
+          - Pending
+          - Running
+          - Succeeded
+          - Failed
+          - Terminated
+      required:
+      - id
+      - status
+    EventHandling:
+      type: object
+      example:
+        id: "b9a73216-8b7a-4c89-9e6d-391e3dd15012"
+        event:
+          eventType: "hardware.leak.detected"
+          detectedAt: "2026-10-26T15:59:00Z"
+          summary: "Leak detected"
+          sourceId: "component-17"
+          sourceType: "Component"
+        appliedPolicy:
+          id: "c3e4990d-b63f-42f3-93ec-a778c4975044"
+          actions:
+            - name: "shutdown"
+              condition: null
+              submitTask:
+                targetStrategy: "Source"
+                onConflict: "Queue"
+                description: "Power off the leaking source"
+                operation:
+                  ruleId: null
+                  powerControl:
+                    operation: "ForcePowerOff"
+                    overrideReadinessCheck: false
+                  firmwareControl: null
+              sendAlert: null
+              noAction: null
+        reason: "ActionFailed"
+        message: "One or more handling actions could not be completed."
+        status: "Failed"
+        tasks: []
+        handledAt: "2026-10-26T16:00:00Z"
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Opaque, stable handling UUID supplied by Flow. Preserved across retries and status updates; identifies the handling independently of its source resource.
+        event:
+          "$ref": "#/components/schemas/Event"
+        appliedPolicy:
+          "$ref": "#/components/schemas/EventAppliedPolicy"
+        reason:
+          oneOf:
+          - "$ref": "#/components/schemas/EventHandlingReason"
+          - type: 'null'
+        message:
+          type: string
+        status:
+          "$ref": "#/components/schemas/EventHandlingStatus"
+        tasks:
+          type: array
+          items:
+            "$ref": "#/components/schemas/EventHandlingTask"
+        handledAt:
+          type: string
+          format: date-time
+      required:
+      - id
+      - event
+      - appliedPolicy
+      - reason
+      - message
+      - status
+      - tasks
+      - handledAt
+      description: Flow aggregate, including dispatch failures and retries even when Tasks
+        is empty. Tasks are ordered by creation time then UUID ascending. The source payload
+        and execution-attempt details are not exposed.
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+      - reason
     LeakHandlingStatus:
       title: LeakHandlingStatus
       type: string
@@ -39346,6 +41287,15 @@ components:
         curl -v -X GET -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_BEARER_TOKEN" https://nico-rest-api.nico.svc.cluster.local/v2/org/$ORG_NAME/nico/user/current
         ```
   responses:
+    PreconditionFailedError:
+      description: Flow is disabled for the Site or rejected a request precondition
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
+    TooManyRequestsError:
+      description: Flow exhausted a bounded resource
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
+    ServiceUnavailableError:
+      description: Flow is unavailable
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
     GenericHttpError:
       description: Response when the API handler encounters an unexpected error
       content:
@@ -39376,8 +41326,12 @@ components:
         Site communication within the request cycle. This can occur if the Site
         Controller is down or under heavy request load.
 
-        Operations are in general safe to retry. In rare cases, operations that
-        create or update resources may succeed even if timeout is returned.
+        A timeout does not establish that an operation failed. A mutation may
+        already have taken effect or may still complete after this response.
+        Do not automatically retry mutations. Reconcile the current state and
+        follow the operation-specific guidance before deciding whether to issue
+        a new change; a replay may duplicate work or overwrite an intervening
+        change. Read-only requests can be repeated.
       content:
         application/json:
           schema:

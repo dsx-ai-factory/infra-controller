@@ -7,7 +7,7 @@ API contracts and examples, see the [Event Rules Usage Guide](event-rules-guide.
 ## Scope and invariants
 
 Each supported event type needs to register an immutable built-in fallback
-event rule. Currently, Flow supports only one event type:
+event rule. The registered event type is
 `hardware.leak.detected`. Its built-in rule force-powers-off components that
 the leakage target resolver considers affected.
 
@@ -24,8 +24,9 @@ The subsystem provides these invariants:
 - All attempts for the same action use the same idempotency key, allowing the
   downstream service to recognize duplicate requests after a retry or reclaim.
 
-The gRPC API manages rules and bindings. Events and action executions are
-internal durable records; the v1 API does not expose query methods for them.
+The gRPC and REST APIs manage policies and explicit scope bindings. Operational
+handling and event-triggered Task reads project the durable records without
+exposing individual action execution attempts.
 
 ## Components
 
@@ -178,8 +179,11 @@ actions. An action has an optional condition and exactly one typed
 specification: `submit_task`, `send_alert`, or `noop`.
 
 Built-in rules are defined by code, always enabled, and immutable. Persisted
-rules are created disabled so clients can finish their configuration before
-making them effective.
+rules support an atomically validated initial enabled state. gRPC defaults to
+disabled when that field is omitted; REST defaults to enabled. An enabled policy
+without a binding does not participate in selection. Persisted rule definitions
+are immutable after creation; `SetEventRuleEnabled` changes only their enabled
+state. Definition changes require creating a new rule and replacing bindings.
 
 A binding associates a persisted rule with a site or rack selection scope.
 The binding stores the rule event type as part of its lookup key. A composite
@@ -187,14 +191,29 @@ foreign key ensures that the binding type matches the referenced rule. Partial
 unique indexes permit only one site binding per event type and one rack binding
 per event type and rack.
 
-The store prevents one rule from mixing site and rack bindings. A rule may be
-site-wide or reused by several racks, but it cannot do both.
+`PutEventRuleBinding` atomically replaces one slot and permits sharing a policy
+across Site and Rack scopes. Its slot lock coordinates with other binding
+writers, while parent-rule locks serialize assignment with policy deletion.
+Policy deletion always rejects remaining bindings, regardless of enabled state. `CreateEventRuleBinding` retains its original occupied-slot and
+mixed-scope conflict checks for its callers.
+
+Binding PUT reports whether the slot was created within the same transaction,
+allowing REST to distinguish creation (`201`) from replacement (`200`). Binding
+collection filters combine event type, policy UUID, scope type, and Rack UUID;
+all are optional. Disabled policies' assignments remain visible. Stores order
+by scope, canonical Rack UUID, event type, and binding UUID before pagination.
 
 ### Events and executions
 
 The durable event identity is `(source_name, source_key)`. An event records its
 canonical resource, selected rule UUID, effective-policy snapshot, observation
-count, and timestamps.
+count, and timestamps. The nullable `first_observed_at` captures the source timestamp
+from the first accepted observation independently of store-owned `created_at`
+and `last_observed_at`. Repeated observations preserve `first_observed_at`; older
+records and sources without a timestamp leave it null. The nullable `rack_id`
+captures the source Rack at planning time, so handling and Task queries remain
+stable after a component moves. Older records retain null Rack context; reads
+do not reconstruct it from current inventory.
 
 Each applicable action produces one execution keyed by `(event_id,
 action_name)`. The execution stores an immutable typed plan alongside mutable
@@ -278,7 +297,8 @@ hardcoded strategies:
 
 | Strategy | Component event | Rack event |
 |---|---|---|
-| `COMPONENT` | Selects only the component that produced the event. | Rejected because the event does not identify one component. |
+| `SOURCE` | Selects the component that produced the event. | Selects the event rack, then materializes every component known in that rack. |
+| `COMPONENT` | Deprecated gRPC alias for `SOURCE`; selects the event component. | Deprecated gRPC alias for `SOURCE`; selects the event rack and its known components. |
 | `RACK` | Selects the component's owning rack, then materializes every component currently known in that rack. | Selects the event rack, then materializes every component currently known in that rack. |
 | `AFFECTED_COMPONENTS` | Uses the resolver selected for the event type. The generic resolver selects only the event component. | Uses the resolver selected for the event type. The generic resolver selects the event rack and materializes every component currently known in it. |
 
@@ -289,9 +309,10 @@ For each task action, Flow chooses exactly one resolver in this order:
    the strategy.
 
 An event-specific registration changes only that event type and strategy; all
-other event types continue to use the generic resolver. Currently, the only
-event-specific registration is `hardware.leak.detected` with
-`AFFECTED_COMPONENTS`.
+other event types continue to use the generic resolver. The leakage integration
+registers an event-specific resolver for `hardware.leak.detected` with
+`AFFECTED_COMPONENTS`. See [source strategy compatibility](event-rules-guide.md#source-strategy-compatibility)
+for the `SOURCE` wire value, REST mapping, and reader upgrade requirements.
 
 ### Leakage affected components
 
@@ -473,11 +494,13 @@ Event uniqueness prevents separate plans for one occurrence. Row locks and
 claim tokens prevent schedulers from owning the same attempt and reject stale
 completion writes.
 
-Rule mutations use last-write-wins semantics without etag or revision
-preconditions. Enabling validates a loaded snapshot and atomically changes the
-latest row, but a concurrent valid definition update can win before or after
-it. This management-plane contract does not weaken immutable plans and fenced
-execution after an event is committed.
+Enabled-state changes use last-write-wins semantics without etag or revision
+preconditions. Enabling validates the immutable rule definition before atomically
+applying the desired state. Repeating the current state preserves `updated_at`.
+Rule definitions cannot be updated; administrators create a replacement rule
+and replace its bindings instead. Each binding replacement is atomic for its
+selection slot. Immutable plans and fenced execution remain unchanged after an
+event is committed.
 
 ## Extension points
 

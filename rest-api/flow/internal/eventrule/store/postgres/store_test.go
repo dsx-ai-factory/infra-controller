@@ -9,6 +9,7 @@ import (
 	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
 	"github.com/google/uuid"
@@ -30,8 +31,16 @@ func (s fixedTimestampSource) Timestamp(
 func TestStore_RuleBindingContract(t *testing.T) {
 	session := storetest.NewPostgresTestSession(t)
 
-	storetest.RunRuleBindingContract(t, func() (eventrule.RuleStore, eventrule.BindingStore) {
+	storetest.RunRuleBindingContract(t, func(t *testing.T, rackIDs ...uuid.UUID) (eventrule.RuleStore, eventrule.BindingStore) {
+		t.Helper()
 		resetEventRuleTables(session)
+		for _, id := range rackIDs {
+			if id == uuid.Nil {
+				continue
+			}
+			err := (&dbmodel.Rack{ID: id, Name: "binding rack"}).Create(t.Context(), session.DB)
+			require.NoError(t, err)
+		}
 		store := New(session)
 
 		return store, store

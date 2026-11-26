@@ -19,6 +19,8 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
@@ -42,6 +44,63 @@ func mirrorTestPool(t *testing.T) (context.Context, *cdb.Session) {
 	t.Cleanup(pool.Close)
 	require.NoError(t, err)
 	return ctx, pool
+}
+
+func TestMirrorExpectedRacks(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		failCleanup bool
+	}{
+		{name: "removal deletes bindings and preserves shared policy"},
+		{name: "cleanup failure rolls back rack removal", failCleanup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			removed := &model.Rack{ID: uuid.New(), Name: "rack-removed", ExternalID: strPtr("removed")}
+			retained := &model.Rack{ID: uuid.New(), Name: "rack-keep", ExternalID: strPtr("keep"), Manufacturer: "Mfg", SerialNumber: "keep"}
+			require.NoError(t, removed.Create(ctx, pool.DB))
+			require.NoError(t, retained.Create(ctx, pool.DB))
+			policy, err := eventrulecodec.MarshalPolicy(eventrule.Policy{Actions: []eventrule.Action{{Name: "record", Spec: &eventrule.Noop{}}}})
+			require.NoError(t, err)
+			rule := &model.EventRule{ID: uuid.New(), Name: "shared disabled policy", EventType: "test.event", Policy: policy}
+			_, err = pool.DB.NewInsert().Model(rule).Exec(ctx)
+			require.NoError(t, err)
+			bindings := []model.EventRuleBinding{
+				{ID: uuid.New(), RuleID: rule.ID, EventType: rule.EventType, ScopeType: "rack", ScopeID: &removed.ID},
+				{ID: uuid.New(), RuleID: rule.ID, EventType: rule.EventType, ScopeType: "rack", ScopeID: &retained.ID},
+				{ID: uuid.New(), RuleID: rule.ID, EventType: rule.EventType, ScopeType: "site"},
+			}
+			_, err = pool.DB.NewInsert().Model(&bindings).Exec(ctx)
+			require.NoError(t, err)
+			if tc.failCleanup {
+				_, err = pool.DB.ExecContext(ctx, "CREATE TABLE binding_cleanup_guard (binding_id uuid REFERENCES event_rule_bindings(id))")
+				require.NoError(t, err)
+				_, err = pool.DB.ExecContext(ctx, "INSERT INTO binding_cleanup_guard VALUES (?)", bindings[0].ID)
+				require.NoError(t, err)
+			}
+
+			result := mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{coreRack("keep", "Mfg", "keep")})
+			row, err := removed.GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			count, err := pool.DB.NewSelect().Model((*model.EventRuleBinding)(nil)).Where("scope_id = ?", removed.ID).Count(ctx)
+			require.NoError(t, err)
+			if tc.failCleanup {
+				require.Zero(t, result.softDeleted)
+				require.Nil(t, row.DeletedAt)
+				require.Equal(t, 1, count)
+			} else {
+				require.Equal(t, 1, result.softDeleted)
+				require.NotNil(t, row.DeletedAt)
+				require.Zero(t, count)
+			}
+			otherBindings, err := pool.DB.NewSelect().Model((*model.EventRuleBinding)(nil)).Where("scope_type = 'site' OR scope_id = ?", retained.ID).Count(ctx)
+			require.NoError(t, err)
+			require.Equal(t, 2, otherBindings)
+			exists, err := pool.DB.NewSelect().Model((*model.EventRule)(nil)).Where("id = ?", rule.ID).Exists(ctx)
+			require.NoError(t, err)
+			require.True(t, exists)
+		})
+	}
 }
 
 func TestMirrorTestPool(t *testing.T) {

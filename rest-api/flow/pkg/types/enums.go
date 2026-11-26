@@ -108,6 +108,14 @@ const (
 	OperationTypeFirmwareControl OperationType = "FIRMWARE_CONTROL"
 )
 
+// EventType identifies a Flow domain event family.
+type EventType string
+
+const (
+	// EventTypeHardwareLeakDetected identifies an observed hardware coolant leak.
+	EventTypeHardwareLeakDetected EventType = "hardware.leak.detected"
+)
+
 // LeakStatus is Flow's view of whether coolant leak detection has fired
 // for a component. It is set by the leak-detection loop from core's
 // tray-leak-detection health alert; LeakStatusUnknown is the resting value

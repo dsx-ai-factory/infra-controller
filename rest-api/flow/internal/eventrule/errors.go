@@ -17,6 +17,10 @@ var ErrBuiltInRuleImmutable = errors.New("built-in event rule is immutable")
 // scope or with the owning rule's site-versus-rack hierarchy.
 var ErrBindingConflict = errors.New("event rule binding conflicts with existing bindings")
 
+// ErrBindingRuleMismatch identifies a binding whose assigned rule differs from
+// the policy expected by a conditional deletion.
+var ErrBindingRuleMismatch = errors.New("event rule binding references a different policy")
+
 // ErrBindingNotFound identifies an event type and scope with no persisted
 // binding.
 var ErrBindingNotFound = errors.New("event rule binding not found")

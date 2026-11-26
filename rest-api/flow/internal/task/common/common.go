@@ -98,6 +98,15 @@ type TaskListOptions struct {
 	// component type.
 	ComponentID uuid.UUID
 	ActiveOnly  bool
+	// EventFilter restricts Tasks by captured event provenance when non-nil.
+	EventFilter *EventTaskFilter
+}
+
+// EventTaskFilter selects event-triggered Tasks. Empty fields include every event.
+// PolicyID is the event policy, independently of a Task's operation rule.
+type EventTaskFilter struct {
+	EventType string
+	PolicyID  uuid.UUID
 }
 
 type OperationRuleListOptions struct {

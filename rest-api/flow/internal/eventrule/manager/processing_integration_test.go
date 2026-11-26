@@ -43,7 +43,8 @@ func TestManager_Start(t *testing.T) {
 		ID:   rackID,
 	})
 	require.NoError(t, err)
-	require.NoError(t, manager.SetEnabled(ctx, rule.ID, true))
+	_, err = manager.SetEnabled(ctx, rule.ID, true)
+	require.NoError(t, err)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -151,7 +152,8 @@ func TestManager_ProcessIntegration(t *testing.T) {
 	require.Equal(t, rackID, processed.Resource.ID)
 	require.Equal(t, builtIn.ID, processed.AppliedRuleID)
 
-	require.NoError(t, manager.SetEnabled(ctx, rackRule.ID, true))
+	_, err = manager.SetEnabled(ctx, rackRule.ID, true)
+	require.NoError(t, err)
 
 	envelope.Key.SourceKey = "event-2"
 	err = manager.Process(ctx, envelope)

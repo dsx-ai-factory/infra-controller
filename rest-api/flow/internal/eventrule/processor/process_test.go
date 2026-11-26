@@ -52,6 +52,7 @@ func TestProcessorProcessPersistsAtomicPlan(t *testing.T) {
 	require.Equal(t, envelope.Key, events[0].Key)
 	require.Equal(t, eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: rackID}, events[0].Resource)
 	require.Equal(t, rule.ID, events[0].AppliedRuleID)
+	require.Equal(t, rackID, events[0].RackID)
 	require.Len(t, events[0].EffectivePolicy.Actions, 1)
 	require.False(t, events[0].CreatedAt.IsZero())
 	require.NotContains(t, events[0].Summary, string(envelope.Payload))

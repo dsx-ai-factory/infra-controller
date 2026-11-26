@@ -10,6 +10,10 @@ import (
 	"strconv"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -289,16 +293,22 @@ func (r *APICancelTaskRequest) Validate() error {
 // APIGetTasksRequest binds query parameters for Site-, Rack-, and Tray-scoped
 // task list endpoints. Pagination is bound separately via pagination.PageRequest.
 type APIGetTasksRequest struct {
-	SiteID        string `query:"siteId"`
-	ActiveOnly    bool   `query:"activeOnly"`
-	IncludeReport bool   `query:"includeReport"`
+	SiteID             string  `query:"siteId"`
+	ActiveOnly         bool    `query:"activeOnly"`
+	IncludeReport      bool    `query:"includeReport"`
+	EventType          *string `query:"eventType"`
+	EventPolicyID      *string `query:"eventPolicyId"`
+	EventTriggeredOnly bool    `query:"eventTriggeredOnly"`
 }
 
 func (r *APIGetTasksRequest) Validate() error {
 	if r.SiteID == "" {
 		return fmt.Errorf("siteId query parameter is required")
 	}
-	return nil
+	return validation.ValidateStruct(r,
+		validation.Field(&r.EventType, validation.When(r.EventType != nil, validation.Required), validation.In(EventTypeHardwareLeakDetected)),
+		validation.Field(&r.EventPolicyID, validation.When(r.EventPolicyID != nil, validation.Required), validationis.UUID, validation.NotIn(uuid.Nil.String())),
+	)
 }
 
 // TaskOptions returns the APITaskOption slice the list-task handlers
@@ -326,6 +336,15 @@ func (r *APIGetTasksRequest) QueryValues(page pagination.PageRequest) url.Values
 	if r.IncludeReport {
 		v.Set("includeReport", strconv.FormatBool(r.IncludeReport))
 	}
+	if r.EventType != nil {
+		v.Set("eventType", *r.EventType)
+	}
+	if r.EventPolicyID != nil {
+		v.Set("eventPolicyId", *r.EventPolicyID)
+	}
+	if r.EventTriggeredOnly {
+		v.Set("eventTriggeredOnly", strconv.FormatBool(r.EventTriggeredOnly))
+	}
 	if page.PageNumber != nil && *page.PageNumber != 0 {
 		v.Set("pageNumber", strconv.Itoa(*page.PageNumber))
 	}
@@ -333,4 +352,20 @@ func (r *APIGetTasksRequest) QueryValues(page pagination.PageRequest) url.Values
 		v.Set("pageSize", strconv.Itoa(*page.PageSize))
 	}
 	return v
+}
+
+// ToProto converts validated event filters, report options, and optional paging.
+// The handler adds any Rack or Tray target from the URL path.
+func (r APIGetTasksRequest) ToProto(page *pagination.PageRequest) *flowv1.ListTasksRequest {
+	result := &flowv1.ListTasksRequest{ActiveOnly: r.ActiveOnly, WithReport: r.IncludeReport}
+	if page != nil && page.Offset != nil && page.Limit != nil {
+		result.Pagination = &flowv1.Pagination{Offset: int32(*page.Offset), Limit: int32(*page.Limit)}
+	}
+	if r.EventTriggeredOnly || r.EventType != nil || r.EventPolicyID != nil {
+		result.EventFilter = &flowv1.EventTaskFilter{EventType: r.EventType}
+		if r.EventPolicyID != nil {
+			result.EventFilter.PolicyId = &flowv1.UUID{Id: *r.EventPolicyID}
+		}
+	}
+	return result
 }

@@ -5,15 +5,18 @@ package model
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 	"time"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
 )
 
@@ -408,24 +411,6 @@ func TestAPIGetTasksRequest_TaskOptions(t *testing.T) {
 	})
 }
 
-func TestAPIGetTasksRequest_QueryValues(t *testing.T) {
-	t.Run("includeReport=true surfaces in query values", func(t *testing.T) {
-		req := APIGetTasksRequest{SiteID: "site-x", IncludeReport: true}
-		v := req.QueryValues(pagination.PageRequest{})
-
-		assert.Equal(t, "true", v.Get("includeReport"))
-		assert.Equal(t, "site-x", v.Get("siteId"))
-	})
-
-	t.Run("includeReport=false is omitted from query values", func(t *testing.T) {
-		req := APIGetTasksRequest{SiteID: "site-y"}
-		v := req.QueryValues(pagination.PageRequest{})
-
-		assert.Empty(t, v.Get("includeReport"))
-		assert.False(t, v.Has("includeReport"), "Default-false includeReport must not affect deterministic workflow ID hashing")
-	})
-}
-
 func TestAPIGetTaskRequest_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -457,6 +442,87 @@ func TestAPIGetTaskRequest_Validate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestAPIGetTasksRequest_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		query       APIGetTasksRequest
+		bad         bool
+		missingSite bool
+	}{
+		{name: "all Tasks"},
+		{name: "missing Site", bad: true, missingSite: true},
+		{name: "zero policy UUID", query: APIGetTasksRequest{EventPolicyID: proto.String("00000000-0000-0000-0000-000000000000")}, bad: true},
+		{name: "unsupported event", query: APIGetTasksRequest{EventType: proto.String("future.event")}, bad: true},
+		{name: "empty event type", query: APIGetTasksRequest{EventType: proto.String("")}, bad: true},
+		{name: "invalid policy UUID", query: APIGetTasksRequest{EventPolicyID: proto.String("not-a-uuid")}, bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := tc.query
+			if !tc.missingSite {
+				q.SiteID = uuid.NewString()
+			}
+			err := q.Validate()
+			if tc.bad {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestAPIGetTasksRequest_ToProto(t *testing.T) {
+	page := eventPageForTest(t)
+	for _, tc := range []struct {
+		name  string
+		query APIGetTasksRequest
+		page  *pagination.PageRequest
+		want  *flowv1.ListTasksRequest
+	}{
+		{name: "all event Tasks", query: APIGetTasksRequest{EventTriggeredOnly: true}, want: &flowv1.ListTasksRequest{EventFilter: &flowv1.EventTaskFilter{}}},
+		{name: "no filters", want: &flowv1.ListTasksRequest{}},
+		{name: "active Tasks without pagination", query: APIGetTasksRequest{ActiveOnly: true}, want: &flowv1.ListTasksRequest{ActiveOnly: true}},
+		{
+			name:  "captured associations",
+			query: APIGetTasksRequest{EventType: proto.String(EventTypeHardwareLeakDetected), EventPolicyID: proto.String("550e8400-e29b-41d4-a716-446655440000"), ActiveOnly: true, IncludeReport: true},
+			page:  page,
+			want:  &flowv1.ListTasksRequest{EventFilter: &flowv1.EventTaskFilter{EventType: proto.String(EventTypeHardwareLeakDetected), PolicyId: &flowv1.UUID{Id: "550e8400-e29b-41d4-a716-446655440000"}}, Pagination: &flowv1.Pagination{Offset: 20, Limit: 10}, ActiveOnly: true, WithReport: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := tc.query
+			query.SiteID = uuid.NewString()
+			require.NoError(t, query.Validate())
+			require.True(t, proto.Equal(tc.want, query.ToProto(tc.page)))
+		})
+	}
+}
+
+func TestAPIGetTasksRequest_QueryValues(t *testing.T) {
+	const policyID = "63f1c140-81c9-4711-8c3a-1664aaed2cd9"
+	pageNumber, pageSize := 2, 10
+	page := pagination.PageRequest{PageNumber: &pageNumber, PageSize: &pageSize}
+	for _, tc := range []struct {
+		name    string
+		request APIGetTasksRequest
+		page    pagination.PageRequest
+		want    url.Values
+	}{
+		{name: "legacy defaults omit false flags and absent paging", want: url.Values{"siteId": {"site-1"}}},
+		{name: "legacy report flag", request: APIGetTasksRequest{IncludeReport: true}, want: url.Values{"siteId": {"site-1"}, "includeReport": {"true"}}},
+		{name: "legacy flags and paging", request: APIGetTasksRequest{ActiveOnly: true, IncludeReport: true}, page: page, want: url.Values{"siteId": {"site-1"}, "activeOnly": {"true"}, "includeReport": {"true"}, "pageNumber": {"2"}, "pageSize": {"10"}}},
+		{name: "event type participates", request: APIGetTasksRequest{EventType: proto.String("hardware.leak.detected")}, want: url.Values{"siteId": {"site-1"}, "eventType": {"hardware.leak.detected"}}},
+		{name: "event policy participates", request: APIGetTasksRequest{EventPolicyID: proto.String(policyID)}, want: url.Values{"siteId": {"site-1"}, "eventPolicyId": {policyID}}},
+		{name: "event-only flag participates", request: APIGetTasksRequest{EventTriggeredOnly: true}, want: url.Values{"siteId": {"site-1"}, "eventTriggeredOnly": {"true"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := tc.request
+			request.SiteID = "site-1"
+			require.Equal(t, tc.want, request.QueryValues(tc.page))
 		})
 	}
 }

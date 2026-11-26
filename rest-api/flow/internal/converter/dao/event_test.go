@@ -32,15 +32,32 @@ func TestEventRoundTrip(t *testing.T) {
 		LastObservedAt: now.Add(time.Second),
 	}
 
-	persisted, err := EventTo(event)
-	require.NoError(t, err)
-	persisted.CreatedAt = persisted.CreatedAt.In(local)
-	persisted.LastObservedAt = persisted.LastObservedAt.In(local)
+	for _, test := range []struct {
+		name       string
+		observedAt time.Time
+	}{
+		{name: "source observation timestamp", observedAt: now.Add(-time.Minute)},
+		{name: "older record without observation timestamp"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event.FirstObservedAt = test.observedAt
+			persisted, err := EventTo(event)
+			require.NoError(t, err)
+			persisted.CreatedAt = persisted.CreatedAt.In(local)
+			persisted.LastObservedAt = persisted.LastObservedAt.In(local)
+			if test.observedAt.IsZero() {
+				require.Nil(t, persisted.FirstObservedAt)
+			} else {
+				require.NotNil(t, persisted.FirstObservedAt)
+				observedAt := persisted.FirstObservedAt.In(local)
+				persisted.FirstObservedAt = &observedAt
+			}
 
-	roundTripped, err := EventFrom(persisted)
-	require.NoError(t, err)
-
-	require.Equal(t, event, roundTripped)
+			roundTripped, err := EventFrom(persisted)
+			require.NoError(t, err)
+			require.Equal(t, event, roundTripped)
+		})
+	}
 }
 
 func TestEventFromRejectsInvalidPersistence(t *testing.T) {

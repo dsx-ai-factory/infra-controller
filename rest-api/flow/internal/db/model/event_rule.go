@@ -4,7 +4,9 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,4 +38,17 @@ type EventRuleBinding struct {
 	ScopeID   *uuid.UUID `bun:"scope_id,type:uuid"`
 	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp"`
 	UpdatedAt time.Time  `bun:"updated_at,notnull,default:current_timestamp"`
+}
+
+// DeleteEventRuleBindingsForRack removes assignments while preserving shared policies.
+// Callers must hold the rack row's mutation lock in the same transaction.
+func DeleteEventRuleBindingsForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) error {
+	_, err := idb.NewDelete().Model((*EventRuleBinding)(nil)).
+		Where("scope_type = ?", "rack").
+		Where("scope_id = ?", rackID).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("delete event rule bindings for rack %s: %w", rackID, err)
+	}
+	return nil
 }

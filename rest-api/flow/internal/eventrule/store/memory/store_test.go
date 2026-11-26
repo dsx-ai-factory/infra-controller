@@ -16,7 +16,7 @@ import (
 )
 
 func TestStoreContract(t *testing.T) {
-	storetest.RunRuleBindingContract(t, func() (eventrule.RuleStore, eventrule.BindingStore) {
+	storetest.RunRuleBindingContract(t, func(_ *testing.T, _ ...uuid.UUID) (eventrule.RuleStore, eventrule.BindingStore) {
 		store := New()
 
 		return store, store
@@ -61,6 +61,7 @@ func TestBindingScansIgnoreUnrelatedInvalidRecords(t *testing.T) {
 	found, err := store.GetForScope(ctx, rule.EventType, scope)
 	require.NoError(t, err)
 	require.Equal(t, &binding, found)
+	require.NoError(t, store.Unbind(ctx, rule.EventType, scope, rule.ID))
 	require.NoError(t, store.Delete(ctx, rule.ID))
 }
 
