@@ -59,6 +59,9 @@ detailed validation or repair work.
 
 The purpose of this document is to define a simple, generic way for a site to
 run external validation before a machine is released for normal tenant use.
+It describes the target design. Delivery status and validation evidence belong
+in the tracking issue and implementation PRs; this document does not establish
+deployment availability.
 
 The requirement is to connect successful local validation with the external
 team's instance-based workflow safely. NICo must block normal allocation while
@@ -120,9 +123,10 @@ NICo already has the building blocks needed for this workflow:
 | Instance release and cleanup | Releasing an instance returns the machine through normal cleanup and validation. | Ensures the validation instance is gone before normal allocation resumes. |
 | Machine Validation | Scout runs built-in tests and site-provided plugins. | Local validation must succeed before external validation can begin. |
 
-Today there is no workflow-specific state connecting these capabilities. An
-external service can race with normal tenant allocation, and a passing external
-result has no fenced, auditable way to release that allocation gate.
+These capabilities alone do not connect workflow-specific state. Without a
+durable hold and attempt binding, an external service can race with normal
+tenant allocation, and a passing external result has no fenced, auditable way
+to release that allocation gate.
 
 In particular, `allowUnhealthyMachine` relaxes health eligibility only. It does
 not relax the managed-state requirement: targeted instance creation still starts
@@ -196,12 +200,11 @@ and REST resolves it to the Core organization ID. A site may reuse an existing
 validation tenant. Site access and targeted-instance creation must already be
 enabled through normal onboarding; a new tenant per attempt is unnecessary.
 
-When policy configuration is implemented, advertise its effective validation
-tenant organization IDs in `RuntimeConfig`, analogous to
-`machine_validation_enabled`. REST Site inventory retains that advertisement
-for early validation-Tenant checks, in addition to REST authorization and Core
-binding checks. Missing advertisement on older builds is unknown, not proof of
-authorization or an empty policy. Policy and advertisement are Milestone 4 work.
+Advertise the site policy's effective validation tenant organization IDs in
+`RuntimeConfig`, analogous to `machine_validation_enabled`. REST Site inventory
+retains that advertisement for early validation-Tenant checks, in addition to
+REST authorization and Core binding checks. Missing advertisement on older
+builds is unknown, not proof of authorization or an empty policy.
 
 There is no separate service-identity setting or alias registration. NICo uses
 its existing authentication and tenant-management authorization. Any caller
@@ -390,10 +393,9 @@ NICo provides these workflow APIs:
 There is no separate validation-instance creation API. The existing Create
 Instance API receives the additive request-binding field described below.
 The companion [REST surface PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
-publishes the routes, OpenAPI/SDK models, and HTTP 501 placeholders. Core proxying,
-request-bound allocation, and reconciliation follow in the implementation
-milestones. See the [REST integration contract](external-validation-api-contract.md#rest-integration-contract-implementation-deferred)
-for the mapping and schema alignment still required before activation.
+defines the routes and OpenAPI/SDK models. See the
+[REST integration contract](external-validation-api-contract.md#rest-integration-contract)
+for the Core mapping and request-bound allocation requirements.
 
 #### **3.3.1 Phase 1 API Contract**
 
@@ -408,8 +410,8 @@ Tenant/site access, requires Provider Admin authority for
 `SiteAgent`; runtime Core grants must include that principal for all six RPCs.
 Core authorizes/audits the service caller and checks resource/policy bindings;
 it cannot infer the original user's role from a Site Agent identity. Direct
-Core callers require explicit method/site permissions. Milestone 1 retains
-empty grants until runtime checks are implemented.
+Core callers require explicit method/site permissions and persisted
+tenant/machine/cycle checks.
 
 All hold and attempt mutations are persisted and auditable. The API responses
 below are the external service's durable contract; DSX Exchange events are not
@@ -906,12 +908,12 @@ state-change publisher and periodic-republisher changes. Hold ID discovery and
 retrieval remain the source of truth for service startup, missed events, and
 out-of-order delivery.
 
-Before external teams integrate, Phase 1 must publish the reviewed protobuf and
-OpenAPI contracts for the workflow APIs and the additive Create Instance field.
-Those contracts must specify pagination, authentication and tenant permissions,
-response and error schemas, in-progress allocation responses, idempotent replay,
-and conflict handling. The examples here are a proposed design, not an available
-API specification or a delivery-date commitment.
+The protobuf and OpenAPI contracts define pagination, authentication and tenant
+permissions, response and error schemas, in-progress allocation responses,
+idempotent replay, and conflict handling. Use the
+[Core API contract](external-validation-api-contract.md) and referenced OpenAPI
+schema for the exact request and response definitions. Delivery status belongs
+in the tracking issue and implementation PRs.
 
 ## **4. Security and Compatibility**
 
