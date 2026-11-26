@@ -66,8 +66,9 @@ pub mod value;
 
 use std::str::FromStr;
 
-pub use allocation::{Allocation, PreparedAllocationRequest};
+pub use allocation::{Allocation, FOREGROUND_ATTACHMENT_TIMEOUT, PreparedAllocationRequest};
 pub use cleanup::AllocationCleanup;
+pub use db::resource_pool::remote::cleanup_may_free_capacity;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::{ConditionalWrite, DatabaseError};
 pub use growth::ResourcePoolGrowthError;
@@ -121,6 +122,15 @@ where
 pub struct IntegratedResourcePoolBackend;
 
 impl ResourcePoolBackend {
+    /// Whether reserving a value requires work outside the caller's database
+    /// transaction. Callers can use this to decide when to prepare an allocation.
+    pub fn requires_external_preparation(&self) -> bool {
+        match self {
+            Self::Integrated(_) => false,
+            Self::Grpc(_) => true,
+        }
+    }
+
     /// `remote` returns the coordinator for calls made outside an entity transaction.
     /// `None` means allocation and release belong in the Integrated transaction.
     pub fn remote(&self) -> Option<&RemoteResourcePool> {

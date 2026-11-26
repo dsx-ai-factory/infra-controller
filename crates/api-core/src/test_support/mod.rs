@@ -60,6 +60,11 @@ impl Api {
         self.work_lock_manager_handle.clone()
     }
 
+    /// Returns the pool bindings shared by this fixture's API and controllers.
+    pub fn resource_pool_registry(&self) -> &carbide_resource_pool::ResourcePoolRegistry {
+        &self.resource_pool_registry
+    }
+
     pub fn common_pools(&self) -> &Arc<CommonPools> {
         &self.common_pools
     }

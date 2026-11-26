@@ -36,8 +36,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    AllocationStatus, IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
-    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+    AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner, IntegratedResourcePoolBackend,
+    ResourcePoolBackend, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolRegistryError,
+    ResourcePoolWithBackend,
 };
 
 #[ctor::ctor(unsafe)]
@@ -640,5 +641,69 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         Err(ResourcePoolBackendError::Integrated(_))
     ));
     txn.rollback().await?;
+    Ok(())
+}
+
+/// Two segments can own different inventory values under the same name. Deleting
+/// one must still free just its recorded value.
+#[carbide_macros::sqlx_test]
+async fn release_value_preserves_other_integrated_values_with_the_same_name(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = ResourcePool::<i32>::new("segment-vni".to_owned(), ValueType::Integer);
+    let registry = ResourcePoolRegistry::default();
+    let mut txn = database.txn_begin().await?;
+    populate(&pool, &mut txn, vec![10, 11], true).await?;
+    let selected = registry
+        .select(&mut txn, &pool)
+        .await?
+        .expect("pool has inventory");
+
+    for (id, value) in [("segment-a", 10), ("segment-b", 11)] {
+        selected
+            .prepare_exact_allocation(
+                &database,
+                OwnerType::NetworkSegment,
+                id,
+                "vni",
+                value,
+                &CancellationToken::new(),
+            )
+            .await?
+            .with_integrated_owner("shared-name")
+            .allocate(&mut txn)
+            .await?;
+    }
+    let ids = AllocationOwnerIds {
+        entity_id: "segment-b",
+        integrated_owner: IntegratedAllocationOwner::Known("shared-name"),
+    };
+    registry
+        .release_value(&pool, &mut txn, 11, OwnerType::NetworkSegment, ids, "vni")
+        .await?;
+    let remaining = db::resource_pool::find_owned_allocation(
+        &pool,
+        &mut txn,
+        OwnerType::NetworkSegment,
+        "shared-name",
+    )
+    .await?;
+    assert_eq!(remaining, Some(10));
+    txn.commit().await?;
+
+    // Another owner can immediately allocate the value that was released.
+    let mut txn = database.txn_begin().await?;
+    let next = selected
+        .prepare_allocation(
+            &database,
+            OwnerType::NetworkSegment,
+            "segment-c",
+            "vni",
+            None,
+            &CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(next.allocate(&mut txn).await?, 11);
+    txn.commit().await?;
     Ok(())
 }

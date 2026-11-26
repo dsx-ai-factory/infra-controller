@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! VPC and SPX partition checks for VNIs and routing policy returned by a pool
+//! VPC, SPX partition and network segment checks for VNIs and routing policy returned by a pool
 //! provider.
 
 use model::resource_pool::remote::ProviderRouteTargetPolicy;
@@ -15,21 +15,29 @@ use crate::CarbideError;
 pub(super) const VNI_SLOT: &str = "vni";
 
 /// `validate` accepts only a usable 24-bit VNI. Provider routing policy is rejected
-/// because VPC creation and routing changes do not save it or include it in DPU
+/// because these consumers do not save it or include it in DPU
 /// configuration, and SPX partitions have no route targets.
 pub(super) fn validate(
     vni: i32,
+    route_target_policy: Option<&ProviderRouteTargetPolicy>,
+) -> Result<(), CarbideError> {
+    reject_route_target_policy(route_target_policy)?;
+    if !(1..=0x00ff_ffff).contains(&vni) {
+        return Err(CarbideError::internal(format!(
+            "VNI provider returned `{vni}`; expected a value between 1 and 16777215",
+        )));
+    }
+    Ok(())
+}
+
+/// Reject policy that these consumers cannot persist or apply to devices.
+pub(super) fn reject_route_target_policy(
     route_target_policy: Option<&ProviderRouteTargetPolicy>,
 ) -> Result<(), CarbideError> {
     if route_target_policy.is_some() {
         return Err(CarbideError::FailedPrecondition(
             "provider route-target policy is not supported".to_owned(),
         ));
-    }
-    if !(1..=0x00ff_ffff).contains(&vni) {
-        return Err(CarbideError::internal(format!(
-            "VNI provider returned `{vni}`; expected a value between 1 and 16777215",
-        )));
     }
     Ok(())
 }
@@ -42,7 +50,7 @@ mod tests {
 
     use super::*;
 
-    /// Provider assignments must be usable VNIs before VPC or SPX partition
+    /// Provider assignments must be usable VNIs before consumer
     /// creation or routing commits them. Integrated pools retain their existing value rules.
     #[test]
     fn provider_assignments_must_be_usable_vnis() {

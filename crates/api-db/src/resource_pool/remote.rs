@@ -353,6 +353,34 @@ pub async fn list(
         .map_err(|error| DatabaseError::query(query.sql(), error))
 }
 
+/// Returns whether recovery could free capacity in the exhausted pool for a
+/// caller whose reservation failed. An abandoned foreground request can hold
+/// capacity until its attachment deadline, even if its reply was lost.
+/// Ignore this attempt's reservations and definite rejections. Callers pass
+/// the pool that failed, since releasing a sibling pool cannot restore it.
+pub async fn cleanup_may_free_capacity(
+    db: impl DbReader<'_>,
+    pool: &str,
+    current_owner_type: OwnerType,
+    current_owner: &str,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (
+        SELECT 1 FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND pool_name = $1
+          AND (owner_type, owner_id) <> ($2, $3)
+          AND result->>'status' IS DISTINCT FROM 'failed'
+          AND (state IN ('cancel_requested', 'release_requested')
+            OR (state = 'pending' AND remote_request #>> '{completion_authority,kind}' = 'foreground'))
+    )";
+    sqlx::query_scalar(query)
+        .bind(pool)
+        .bind(current_owner_type.to_string())
+        .bind(current_owner)
+        .fetch_one(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `cleanup_backlog` counts remote allocations awaiting confirmed cancellation
 /// or release across every provider authority. Terminal rows remain stored but
 /// no longer contribute to the count.

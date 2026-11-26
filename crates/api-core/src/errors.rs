@@ -567,6 +567,13 @@ impl CarbideError {
         CarbideError::Internal { message }
     }
 
+    /// Whether the allocator confirmed it has no available value.
+    pub(crate) fn is_pool_exhausted(&self) -> bool {
+        matches!(self, Self::ResourceExhausted(_))
+            || matches!(self, Self::RemoteResourcePool(error)
+                if matches!(error.as_ref(), RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted)))
+    }
+
     /// Returns the Postgres SQLSTATE code if this is a database error, or `None` otherwise.
     pub(crate) fn pg_sqlstate(&self) -> Option<String> {
         if let CarbideError::DBError(db::AnnotatedSqlxError {
@@ -677,15 +684,7 @@ impl OperatorError for CarbideError {
                  once it recovers: re-run the Admin CLI command, REST API call, or client \
                  integration that failed, backing off briefly between attempts.",
             ),
-            CarbideError::ResourceExhausted(_) | CarbideError::DhcpError(_) => {
-                Some("Check configured resource pools and available capacity.")
-            }
-            CarbideError::RemoteResourcePool(error)
-                if matches!(
-                    error.as_ref(),
-                    RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted)
-                ) =>
-            {
+            error if error.is_pool_exhausted() || matches!(error, CarbideError::DhcpError(_)) => {
                 Some("Check configured resource pools and available capacity.")
             }
             CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(

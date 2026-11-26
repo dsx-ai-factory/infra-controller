@@ -539,68 +539,71 @@ pub async fn reconcile_network_defs(
     declared: &HashMap<String, NetworkDefinition>,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
-    let stored = all_stored_defs(&mut *txn).await?;
-    let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
-
+    let mut to_create = Vec::new();
     for (name, def) in declared {
-        let exists = segment_exists(&mut *txn, name).await?;
-        match (stored.get(name), exists) {
-            // Already seeded with the current declaration — nothing to do.
-            (Some(stored_def), true) if stored_def == def => {}
-            // Declaration has drifted since seed; warn and leave both in place.
-            (Some(stored_def), true) => {
-                instrumentation.emit(ConfigDefinitionDrifted {
-                    resource_kind: ConfigResourceKind::NetworkDefinition,
-                    drift_kind: ConfigDriftKind::Changed,
-                    name: name.clone(),
-                    stored: Some(format!("{stored_def:?}")),
-                    declared: Some(format!("{def:?}")),
-                });
-            }
-            // Network segment exists, but has no snapshot yet.
-            // Pre-migration deployment or a network was re-added after a
-            // snapshot was manually deleted.
-            //
-            // TOML-declared names are unique by nature, but
-            // `network_segments.name` has no UNIQUE constraint at the DB
-            // layer — multiple segments can share a name. If we
-            // see more than one match, we can't tell which one the
-            // operator originally seeded, so we skip the backfill and
-            // log; the operator can resolve by inserting `network_def`
-            // by hand.
-            (None, true) => {
-                let query = "SELECT id FROM network_segments WHERE name = $1 LIMIT 2";
-                let candidates: Vec<NetworkSegmentId> = sqlx::query_scalar(query)
-                    .bind(name)
-                    .fetch_all(&mut *txn)
-                    .await
-                    .map_err(|e| DatabaseError::query(query, e))?;
-                if let [segment_id] = candidates.as_slice() {
-                    insert_network_def(txn, name, *segment_id, def).await?;
-                    tracing::info!(
-                        network_name = name,
-                        "Backfilled NetworkDefinition snapshot for pre-existing network segment"
-                    );
-                } else {
-                    tracing::warn!(
-                        network_name = name,
-                        matching_network_segment_count = candidates.len(),
-                        "Backfill skipped: multiple network_segments share this name; \
-                         operator must reconcile by hand",
-                    );
-                }
-            }
-            // No segment and no snapshot: return to the caller for creation.
-            (None, false) => {
-                to_create.push((name.clone(), def.clone()));
-            }
-            (Some(_), false) => {
-                unreachable!("network_def.segment_id is FK; snapshot cannot outlive its segment")
+        if reconcile_network_def(txn, name, def, instrumentation).await? {
+            to_create.push((name.clone(), def.clone()));
+        }
+    }
+    diagnose_dropped_network_defs(txn, declared, instrumentation).await?;
+    Ok(to_create)
+}
+
+/// `reconcile_network_def` returns whether one configured name needs creation.
+/// Existing rows are locked before reading their snapshot, so deletion cannot
+/// invalidate a legacy backfill or produce inconsistent existence observations.
+/// The caller serializes configured insertion under the overlap lock.
+pub async fn reconcile_network_def(
+    txn: &mut PgConnection,
+    name: &str,
+    def: &NetworkDefinition,
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT id FROM network_segments WHERE name = $1 ORDER BY id LIMIT 2 FOR SHARE";
+    let candidates: Vec<NetworkSegmentId> = sqlx::query_scalar(query)
+        .bind(name)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+    match stored_def(&mut *txn, name).await? {
+        Some(stored) if stored == *def => {}
+        Some(stored) => instrumentation.emit(ConfigDefinitionDrifted {
+            resource_kind: ConfigResourceKind::NetworkDefinition,
+            drift_kind: ConfigDriftKind::Changed,
+            name: name.to_owned(),
+            stored: Some(format!("{stored:?}")),
+            declared: Some(format!("{def:?}")),
+        }),
+        None => {
+            if let [segment_id] = candidates.as_slice() {
+                insert_network_def(txn, name, *segment_id, def).await?;
+                tracing::info!(
+                    network_name = name,
+                    "Backfilled NetworkDefinition snapshot for pre-existing network segment"
+                );
+            } else {
+                tracing::warn!(
+                    network_name = name,
+                    "Multiple network segments share this name. Reconcile them before saving the configuration snapshot."
+                );
             }
         }
     }
+    Ok(false)
+}
 
-    for name in stored.keys() {
+/// `diagnose_dropped_network_defs` reports stored definitions omitted from
+/// startup configuration without changing their segment or snapshot.
+/// Run once per configured startup pass.
+pub async fn diagnose_dropped_network_defs(
+    db: impl DbReader<'_>,
+    declared: &HashMap<String, NetworkDefinition>,
+    instrumentation: &carbide_instrument::Instrumentation,
+) -> Result<(), DatabaseError> {
+    for name in all_stored_defs(db).await?.keys() {
         if !declared.contains_key(name) {
             instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
@@ -611,9 +614,9 @@ pub async fn reconcile_network_defs(
             });
         }
     }
-
-    Ok(to_create)
+    Ok(())
 }
+
 pub async fn find_ids(
     txn: impl DbReader<'_>,
     filter: model::network_segment::NetworkSegmentSearchFilter,
