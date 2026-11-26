@@ -1,0 +1,16 @@
+---
+tags: ["unreleased", "deployment", "provisioning"]
+---
+
+## NVIDIA Infra Controller v2.5 — unreleased
+
+### Kea 3.0 LTS migration
+
+[Issue #8084](https://github.com/dsx-ai-factory/infra-controller/issues/8084) moves the DHCP runtime and NICo hook to Kea 3.0 LTS. Single IPv4 catch-all deployments whose retained leases use subnet ID `1` can upgrade directly, without a preparation release or Core database change. Deploy matching images and configuration, including GitOps-managed ConfigMaps; Kea 2.x hook binaries cannot be reused. Before upgrading:
+
+- Preserve existing subnet IDs. Multiple IPv4 subnet overrides must supply explicit IDs or chart rendering fails.
+- When using NICo images, remove architecture-specific `hookLibraryPath` overrides and rewrite additional-hook paths to `/usr/lib/kea/hooks`. Keep the additional-hook entries; stale paths fail at daemon startup.
+- Update structured IPv4 site overrides for the catch-all pool and subnet IDs. In operator-owned IPv4 raw configurations and external ConfigMaps, update hook paths, the catch-all pool, subnet IDs, and explicit cache and threading settings; the chart does not apply its structured defaults to them.
+- Preserve custom lease filenames where configured and the server identity. The stock IPv4 chart has no lease volume; release tooling must provide lease retention and writer coordination before applying the guide's retained-storage backup and rollback procedure. Exercise upgrade, renewal, and rollback. Reconcile allocations made since the backup before restoring older state.
+
+Follow [Upgrade Kea to 3.0 LTS](../../docs/provisioning/kea-lts-upgrade.md) for exact configuration changes, candidate validation, AppArmor requirements, and recovery steps.

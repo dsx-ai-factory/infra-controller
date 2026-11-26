@@ -36,8 +36,8 @@ const KEA_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
 const METRICS_READY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 /// DHCPv6 DNS servers configured through hook context.
 pub(super) const HOOK_DNS_SERVERS_IPV6: [&str; 1] = ["2001:db8::53"];
-/// DHCPv6 NTP servers configured through hook context.
-pub(super) const HOOK_NTP_SERVERS_IPV6: [&str; 1] = ["2001:db8::123"];
+/// Two hook-configured NTP servers exercise Kea's split option-56 replies.
+pub(super) const HOOK_NTP_SERVERS_IPV6: [&str; 2] = ["2001:db8::123", "2001:db8::126"];
 
 // Real Kea children share process-global hook/logger/metrics state through the
 // loaded cdylib, so serialize them instead of running multiple daemons at once.
@@ -55,7 +55,7 @@ pub(crate) struct Kea6ExpiredLeasesProcessing {
 }
 
 /// Runtime configuration overrides for the DHCPv6 integration-test Kea process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) struct Kea6Config {
     pub(crate) preferred_lifetime: u32,
     pub(crate) valid_lifetime: u32,
@@ -67,7 +67,7 @@ pub(crate) struct Kea6Config {
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
     pub(crate) nico_pxe_service_url: Option<&'static str>,
-    pub(crate) native_vendor_opts_hex: Option<&'static str>,
+    pub(crate) option_data: Vec<serde_json::Value>,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -85,7 +85,7 @@ impl Default for Kea6Config {
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
             nico_pxe_service_url: None,
-            native_vendor_opts_hex: None,
+            option_data: Vec::new(),
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -148,6 +148,7 @@ impl Drop for Kea6RunPermit {
 
 pub(crate) struct Kea6 {
     temp_conf_file: PathBuf,
+    lease_file: PathBuf,
     dhcp_in_port: u16,
     dhcp_out_port: u16,
     dhcp_in_port_reservation: Option<UdpSocket>,
@@ -236,6 +237,7 @@ impl Kea6 {
 
         Ok(Kea6 {
             temp_conf_file,
+            lease_file,
             temp_base_directory,
             dhcp_in_port: ports.dhcp_in_port,
             dhcp_out_port: ports.dhcp_out_port,
@@ -320,6 +322,11 @@ impl Kea6 {
         let mut process = Command::new("/usr/sbin/kea-dhcp6")
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
+            .env("KEA_DHCP_DATA_DIR", self.lease_file.parent().unwrap())
+            .env(
+                "KEA_HOOKS_PATH",
+                Path::new(&super::hook_library_path()).parent().unwrap(),
+            )
             .arg("-c")
             .arg(self.temp_conf_file.as_os_str())
             .arg("-p")
@@ -517,6 +524,7 @@ impl Kea6 {
             },
             // Persist the memfile so restart and lease-inspection tests observe
             // Kea's on-disk state; tempdir cleanup still bounds artifacts.
+            "cache-threshold": 0.0,
             "lease-database": {
                 "type": "memfile",
                 "persist": true,
@@ -553,6 +561,7 @@ impl Kea6 {
             ],
             "subnet6": [
                 {
+                    "id": 1,
                     "subnet": "::/0",
                     // Kea owns the rapid-commit state transition; the hook
                     // remains the policy gate by stripping option 14.
@@ -586,13 +595,8 @@ impl Kea6 {
         if let Some(url) = config.nico_pxe_service_url {
             dhcp6["hooks-libraries"][0]["parameters"]["nico-pxe-service-url"] = json!(url);
         }
-        if let Some(payload) = config.native_vendor_opts_hex {
-            dhcp6["option-data"] = json!([{
-                "code": 17,
-                "csv-format": false,
-                "data": payload,
-                "always-send": true,
-            }]);
+        if !config.option_data.is_empty() {
+            dhcp6["option-data"] = config.option_data.into();
         }
         if config.prefix_pool {
             dhcp6["subnet6"][0]["pd-pools"] = json!([{
