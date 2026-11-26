@@ -21,7 +21,7 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
 use bmc_platform::LockdownDesiredState;
 use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
-use carbide_machine_controller::platform_config;
+use carbide_machine_controller::platform_config::{self, BiosProfileSelection};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::redfish::BmcAccessInfo;
@@ -721,9 +721,14 @@ pub(crate) async fn machine_setup(
                 oem_manager_profiles: Default::default(),
                 ..api.runtime_config.machine_state_handler_site_config()
             };
-            platform_config::apply_through_drivers(&bmc, &site_config, boot_interface.as_ref())
-                .await
-                .map_err(|e| CarbideError::internal(e.to_string()))?;
+            platform_config::apply_through_drivers(
+                &bmc,
+                &site_config,
+                &BiosProfileSelection::SiteDefault,
+                boot_interface.as_ref(),
+            )
+            .await
+            .map_err(|e| CarbideError::internal(e.to_string()))?;
         }
         None => {
             api.bmc_client
