@@ -113,6 +113,80 @@ func TestFilterHostMachineDetails(t *testing.T) {
 	}
 }
 
+func TestSyncMachineIDs(t *testing.T) {
+	const hostMAC = "aa:bb:cc:dd:ee:90"
+	hostType := devicetypes.BMCTypeToString(devicetypes.BMCTypeHost)
+	dpuType := devicetypes.BMCTypeToString(devicetypes.BMCTypeDPU)
+	testCases := []struct {
+		name         string
+		previousID   *string
+		machines     []nicoapi.MachineDetail
+		bmcTypes     []string
+		invalidMAC   bool
+		concurrentID *string
+		expectedID   *string
+	}{
+		{name: "missing host returns to MAC addressing", previousID: ptr("stale-host"), bmcTypes: []string{hostType}},
+		{name: "current host stays linked", previousID: ptr("current-host"), bmcTypes: []string{hostType}, machines: []nicoapi.MachineDetail{{MachineID: "current-host", BmcMac: hostMAC}}, expectedID: ptr("current-host")},
+		{name: "reingested host replaces stale link", previousID: ptr("stale-host"), bmcTypes: []string{hostType}, machines: []nicoapi.MachineDetail{{MachineID: "new-host", BmcMac: hostMAC}}, expectedID: ptr("new-host")},
+		{name: "present host without MAC retains ID", previousID: ptr("current-host"), bmcTypes: []string{hostType}, machines: []nicoapi.MachineDetail{{MachineID: "current-host"}}, expectedID: ptr("current-host")},
+		{name: "DPU BMC alone is not a host fallback", previousID: ptr("stale-host"), bmcTypes: []string{dpuType}, expectedID: ptr("stale-host")},
+		{name: "invalid host MAC retains ID", previousID: ptr("stale-host"), bmcTypes: []string{hostType}, invalidMAC: true, expectedID: ptr("stale-host")},
+		{name: "ambiguous host BMCs retain ID", previousID: ptr("stale-host"), bmcTypes: []string{hostType, hostType}, expectedID: ptr("stale-host")},
+		{name: "rowless expected tray stays rowless", bmcTypes: []string{hostType}},
+		{name: "newer concurrent link is not cleared", previousID: ptr("stale-host"), bmcTypes: []string{hostType}, concurrentID: ptr("newer-host"), expectedID: ptr("newer-host")},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			comp := model.Component{
+				Type:            devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+				ComponentID:     tc.previousID,
+				PowerState:      ptr(nicoapi.PowerStateOff),
+				FirmwareVersion: "before-snapshot",
+			}
+			err := comp.Create(ctx, pool.DB)
+			require.NoError(t, err)
+			for i, bmcType := range tc.bmcTypes {
+				mac := hostMAC
+				if i != 0 {
+					mac = "aa:bb:cc:dd:ee:91"
+				}
+				bmc := model.BMC{MacAddress: mac, Type: bmcType, ComponentID: comp.ID}
+				_, err = pool.DB.NewInsert().Model(&bmc).Exec(ctx)
+				require.NoError(t, err)
+			}
+			var snapshot model.Component
+			err = pool.DB.NewSelect().Model(&snapshot).Where("c.id = ?", comp.ID).Relation("BMCs").Scan(ctx)
+			require.NoError(t, err)
+			if tc.invalidMAC {
+				snapshot.BMCs[0].MacAddress = "invalid"
+			}
+			// A different loop can update runtime fields after our read. ID
+			// reconciliation must not write those older snapshot values back.
+			_, err = pool.DB.NewUpdate().Model(&model.Component{}).
+				Set("power_state = ?", nicoapi.PowerStateOn).
+				Set("firmware_version = ?", "concurrent-snapshot").Where("id = ?", comp.ID).Exec(ctx)
+			require.NoError(t, err)
+			if tc.concurrentID != nil {
+				_, err = pool.DB.NewUpdate().Model(&model.Component{}).
+					Set("external_id = ?", tc.concurrentID).Where("id = ?", comp.ID).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			syncMachineIDs(ctx, pool, tc.machines, []model.Component{snapshot})
+
+			var stored model.Component
+			err = pool.DB.NewSelect().Model(&stored).Where("c.id = ?", comp.ID).Relation("BMCs").Scan(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectedID, stored.ComponentID)
+			assert.Equal(t, ptr(nicoapi.PowerStateOn), stored.PowerState)
+			assert.Equal(t, "concurrent-snapshot", stored.FirmwareVersion)
+			assert.Len(t, stored.BMCs, len(tc.bmcTypes))
+		})
+	}
+}
+
 func TestSyncMachines(t *testing.T) {
 	testCases := []struct {
 		name                       string
@@ -204,6 +278,29 @@ func TestSyncMachines(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("failed Core snapshot retains existing host link", func(t *testing.T) {
+		ctx, pool := mirrorTestPool(t)
+		comp := model.Component{
+			Type:        devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+			ComponentID: ptr("existing-host"),
+		}
+		err := comp.Create(ctx, pool.DB)
+		require.NoError(t, err)
+		createTestBMC(ctx, t, pool, comp.ID, "aa:bb:cc:dd:ee:95")
+		client := &actualInventoryTestClient{
+			Client:     nicoapi.NewMockClient(),
+			machineErr: errors.New("Core inventory unavailable"),
+		}
+
+		_, _, rpcOK := syncMachines(ctx, pool, client)
+
+		assert.False(t, rpcOK)
+		var stored model.Component
+		err = pool.DB.NewSelect().Model(&stored).Where("c.id = ?", comp.ID).Scan(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, ptr("existing-host"), stored.ComponentID)
+	})
 
 	t.Run("links host and reconciles associated DPU in one cycle", func(t *testing.T) {
 		ctx, pool := mirrorTestPool(t)

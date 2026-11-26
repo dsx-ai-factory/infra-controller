@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 
@@ -304,67 +306,98 @@ func syncMachineIDs(
 	hostMachineDetails []nicoapi.MachineDetail,
 	components []model.Component,
 ) {
-	// Index discovered host machines by normalized BMC MAC → Core MachineId.
-	// A compute component can also own an auxiliary DPU BMC. Keeping DPU machine
-	// details out of this index prevents that BMC from replacing the component's
-	// external_id with the DPU machine ID.
+	// Only the successful complete HOST snapshot passed by syncMachines can
+	// unlink a missing machine. Missing MAC details on a still-present ID do
+	// not establish that the machine disappeared.
 	machineIDByBmcMac := make(map[string]string)
+	hostMachineIDs := make(map[string]struct{})
 	for _, cur := range hostMachineDetails {
-		if cur.BmcMac != "" && cur.MachineID != "" {
+		if cur.MachineID == "" {
+			continue
+		}
+		hostMachineIDs[cur.MachineID] = struct{}{}
+		if cur.BmcMac != "" {
 			machineIDByBmcMac[utils.NormalizeMAC(cur.BmcMac)] = cur.MachineID
 		}
 	}
 
-	var toUpdate []model.Component
+	type machineIDUpdate struct {
+		id         uuid.UUID
+		previousID *string
+		nextID     *string
+	}
+	var toUpdate []machineIDUpdate
 	for _, comp := range components {
-		if len(comp.BMCs) == 0 {
-			log.Error().
-				Str("component_id", comp.ID.String()).
-				Str("rack_id", comp.RackID.String()).
-				Msg("Compute component has no BMCs; skipping")
-			continue
-		}
-		// A compute component can legitimately expose several BMCs (e.g. host
-		// and DPU). Core advertises only one of them as MachineDetail.BmcMac,
-		// so try each BMC and link on the first that resolves to a machine.
+		var nextID *string
+		hostBMCCount := 0
+		validHostBMC := false
 		for _, bmc := range comp.BMCs {
+			isHost := bmc.Type == devicetypes.BMCTypeToString(devicetypes.BMCTypeHost)
+			if isHost {
+				hostBMCCount++
+			}
 			bmcMacAddr, err := net.ParseMAC(bmc.MacAddress)
 			if err != nil {
 				log.Error().
 					Str("component_id", comp.ID.String()).
-					Str("rack_id", comp.RackID.String()).
 					Str("bmc_mac_address", bmc.MacAddress).
 					Msg("Compute component has invalid BMC MAC address; skipping")
 				continue
 			}
+			if isHost {
+				validHostBMC = true
+			}
 			machineID, ok := machineIDByBmcMac[bmcMacAddr.String()]
-			if !ok {
+			if ok && nextID == nil {
+				nextID = &machineID
+			}
+		}
+
+		if nextID == nil {
+			if comp.ComponentID == nil || *comp.ComponentID == "" {
 				continue
 			}
-			if comp.ComponentID == nil || *comp.ComponentID != machineID {
-				componentID := machineID
-				comp.ComponentID = &componentID
-				toUpdate = append(toUpdate, comp)
+			_, stillPresent := hostMachineIDs[*comp.ComponentID]
+			if stillPresent || hostBMCCount != 1 || !validHostBMC {
+				continue
 			}
-			break
+			// Return this expected tray to the existing pre-ingestion MAC path.
+			// No usable or ambiguous host BMC means we cannot safely fall back.
+		} else if comp.ComponentID != nil && *comp.ComponentID == *nextID {
+			continue
 		}
+		toUpdate = append(toUpdate, machineIDUpdate{comp.ID, comp.ComponentID, nextID})
 	}
 
-	if len(toUpdate) > 0 {
-		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
-			for _, cur := range toUpdate {
-				if err := cur.Patch(ctx, tx); err != nil {
-					return fmt.Errorf("unable to update machine ID: %w", err)
-				}
-			}
-			return nil
-		}); err != nil {
-			log.Error().Msgf("Unable to update components with BMC MAC: %v", err)
-			return
-		}
-
-		log.Info().Msgf("Updated %d machine ID(s)", len(toUpdate))
+	if len(toUpdate) == 0 {
+		return
 	}
+	var updated int64
+	err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for _, change := range toUpdate {
+			// Update only our column, and preserve a newer link written since
+			// the inventory snapshot was read.
+			result, err := tx.NewUpdate().Model((*model.Component)(nil)).
+				Set("external_id = ?", change.nextID).
+				Where("id = ?", change.id).
+				Where("external_id IS NOT DISTINCT FROM ?", change.previousID).
+				Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("unable to update machine ID: %w", err)
+			}
+			count, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			updated += count
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Msgf("Unable to update components with BMC MAC: %v", err)
+		return
+	}
+	log.Info().Msgf("Updated %d machine ID(s)", updated)
 }
 
 // syncPowerStates fetches power states from NICo and direct-writes to component table.
