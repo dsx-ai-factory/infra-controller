@@ -651,14 +651,13 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
     ///
     /// Reads the account collection (`AccountService/Accounts`) through an
     /// uninitialized `Unknown` client. That endpoint is gated behind login on
-    /// every vendor, and -- unlike `/Systems` -- is served even by factory BMCs
-    /// that answer `403 PasswordChangeRequired` on other resources (the
-    /// [`set_bmc_root_password`] path already reads it to resolve the account id),
-    /// so it verifies authentication without tripping that trap.
+    /// every vendor. Factory BMCs that require a password change may answer it
+    /// with `PasswordChangeRequired`, which still proves the login succeeded.
     ///
-    /// Returns `Ok(true)` when the credentials authenticate, `Ok(false)` when the
-    /// BMC rejects them as unauthorized (401/403), and `Err` for a transport or
-    /// other failure the caller should treat as a transient tick error.
+    /// Returns `Ok(true)` when the credentials authenticate (including
+    /// `PasswordChangeRequired`), `Ok(false)` when the BMC rejects them as
+    /// unauthorized (401/403), and `Err` for a transport or other failure the
+    /// caller should treat as a transient tick error.
     ///
     /// [`set_bmc_root_password`]: BmcCredentialOps::set_bmc_root_password
     async fn bmc_credentials_valid(
@@ -678,7 +677,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .await?;
 
         match client.get_accounts().await {
-            Ok(_) => Ok(true),
+            Ok(_) | Err(libredfish::RedfishError::PasswordChangeRequired { .. }) => Ok(true),
             Err(err) if err.is_unauthorized() => Ok(false),
             Err(err) => Err(RedfishClientCreationError::RedfishError(err)),
         }
@@ -727,7 +726,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .await?;
 
         match client.get_accounts().await {
-            Ok(_) => Ok(true),
+            Ok(_) | Err(libredfish::RedfishError::PasswordChangeRequired { .. }) => Ok(true),
             // Authenticated but not authorized to list accounts: the password is
             // correct, which is all this probe asks. Must precede the 401 arm
             // because `is_unauthorized` also matches 403.
@@ -1568,6 +1567,30 @@ mod tests {
             ),
             "expected a non-unauthorized RedfishError, got {err:?}",
         );
+    }
+
+    /// A factory BMC answers the account read with `PasswordChangeRequired`
+    /// only after accepting the login, so it authenticates; a wrong password is
+    /// still rejected first.
+    #[tokio::test]
+    async fn credential_probes_accept_password_change_required() {
+        let sim = RedfishSim::default();
+        sim.set_enforce_auth(true);
+        sim.seed_user("root", "factory");
+        sim.seed_user("service", "factory");
+        sim.set_password_change_required(true, None);
+
+        for (password, expected) in [("factory", true), ("stale", false)] {
+            let root = sim
+                .bmc_credentials_valid("127.0.0.1", Some(443), Credentials::new("root", password))
+                .await
+                .expect("the root probe must classify the response");
+            let service = sim
+                .bf4_dpu_service_credentials_valid("127.0.0.1", Some(443), password.to_string())
+                .await
+                .expect("the service probe must classify the response");
+            assert_eq!((root, service), (expected, expected), "password {password}");
+        }
     }
 
     /// Minimal in-crate pool double for driving the `BmcCredentialOps`

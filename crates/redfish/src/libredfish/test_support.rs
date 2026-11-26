@@ -2082,6 +2082,11 @@ impl Redfish for RedfishSimClient {
             // so authorize the credential this client was created with (a no-op
             // unless enforcement is on).
             self.authorize(&mut state, "AccountService/Accounts")?;
+            if state.password_change_required {
+                return Err(RedfishError::PasswordChangeRequired {
+                    account_uri: state.password_change_required_account_uri.clone(),
+                });
+            }
             let accounts = state
                 .users
                 .keys()
