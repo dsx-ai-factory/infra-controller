@@ -67,9 +67,11 @@ where
     S::Future: Send,
 {
     let mut builder = http1::Builder::new();
+    // BMC http-download FW 24.07 requires literal Content-Length on the wire.
     builder
         .timer(TokioTimer::new())
-        .header_read_timeout(header_read_timeout);
+        .header_read_timeout(header_read_timeout)
+        .title_case_headers(true);
 
     // Tracks open connections so requests in progress can finish after shutdown
     let graceful = GracefulShutdown::new();
@@ -222,6 +224,27 @@ mod tests {
                 "{scenario}: closed before the timeout elapsed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn content_length_is_title_cased_on_the_wire() {
+        let server = start_server().await;
+        let mut stream = TcpStream::connect(server).await.unwrap();
+        let client = stream.local_addr().unwrap().to_string();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: pxe\r\n\r\n")
+            .await
+            .unwrap();
+
+        let response = read_until(&mut stream, &client).await;
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"), "{response}");
+        let expected = format!("Content-Length: {}", client.len());
+        assert!(
+            headers.split("\r\n").any(|line| line == expected),
+            "missing {expected:?} in response: {response}"
+        );
+        assert_eq!(body, client);
     }
 
     /// A request already in progress must still get a response after the server
