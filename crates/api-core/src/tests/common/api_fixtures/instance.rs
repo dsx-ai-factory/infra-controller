@@ -391,6 +391,7 @@ pub(in crate::tests) fn single_interface_network_config(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -413,6 +414,7 @@ pub(in crate::tests) fn single_interface_network_config_with_vfs(
         ip_address: None,
         ipv6_interface_config: None,
         routing_profile: None,
+        roce_config: None,
     }];
 
     interfaces.extend(
@@ -426,6 +428,7 @@ pub(in crate::tests) fn single_interface_network_config_with_vfs(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }),
     );
 
@@ -454,6 +457,7 @@ pub(in crate::tests) fn interface_network_config_with_devices(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         })
         .collect();
     rpc::InstanceNetworkConfig {
@@ -478,6 +482,7 @@ pub(in crate::tests) fn single_interface_network_config_with_vpc_prefix(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,

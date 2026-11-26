@@ -759,6 +759,7 @@ async fn test_zero_dpu_instance_allocation_rejects_explicit_interfaces(
                         ip_address: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                     }],
                     #[allow(deprecated)]
                     auto: false,
@@ -1680,6 +1681,7 @@ async fn test_reject_single_dpu_instance_allocation_host_inband_network_config(
                         ip_address: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                     }],
                     #[allow(deprecated)]
                     auto: false,
@@ -1920,6 +1922,7 @@ async fn test_single_dpu_instance_allocation(
                         ip_address: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                     }],
                     #[allow(deprecated)]
                     auto: false,
@@ -2076,6 +2079,7 @@ async fn test_reject_zero_dpu_instance_with_tenant_network_segment(
                         ip_address: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                     }],
                     #[allow(deprecated)]
                     auto: false,
@@ -2217,6 +2221,7 @@ async fn test_instance_allocation_rejects_auto_with_explicit_interfaces(
                         ip_address: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                     }],
                     #[allow(deprecated)]
                     auto: true,

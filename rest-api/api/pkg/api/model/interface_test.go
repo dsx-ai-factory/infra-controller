@@ -318,6 +318,121 @@ func TestAPIInterfaceCreateOrUpdateRequest_InlineRoutingProfileValidate(t *testi
 	}
 }
 
+func TestAPIInterfaceCreateOrUpdateRequest_RoceConfigValidate(t *testing.T) {
+	dscp := APIInterfaceRoceTrustModeDscp
+	tests := []struct {
+		name              string
+		req               APIInterfaceCreateOrUpdateRequest
+		wantErr           bool
+		wantErrorContains []string
+	}{
+		{
+			name: "PF accepts operator-default RoCE runtime knobs",
+			req: APIInterfaceCreateOrUpdateRequest{
+				VpcPrefixID: cutil.GetPtr(uuid.NewString()),
+				IsPhysical:  true,
+				RoceConfig: &APIInterfaceRoceConfig{
+					TrustMode:     &dscp,
+					PfcPriorities: []int{3},
+					Tos:           cutil.GetPtr(0),
+				},
+			},
+		},
+		{
+			name: "VF accepts RoCE runtime knobs",
+			req: APIInterfaceCreateOrUpdateRequest{
+				VpcPrefixID:       cutil.GetPtr(uuid.NewString()),
+				IsPhysical:        false,
+				VirtualFunctionID: cutil.GetPtr(1),
+				RoceConfig: &APIInterfaceRoceConfig{
+					TrustMode:     &dscp,
+					PfcPriorities: []int{3},
+					Tos:           cutil.GetPtr(0),
+				},
+			},
+		},
+		{
+			name: "Subnet interface accepts RoCE runtime knobs",
+			req: APIInterfaceCreateOrUpdateRequest{
+				SubnetID: cutil.GetPtr(uuid.NewString()),
+				RoceConfig: &APIInterfaceRoceConfig{
+					PfcPriorities: []int{3},
+				},
+			},
+		},
+		{
+			name: "invalid PFC priority is rejected",
+			req: APIInterfaceCreateOrUpdateRequest{
+				VpcPrefixID: cutil.GetPtr(uuid.NewString()),
+				RoceConfig: &APIInterfaceRoceConfig{
+					PfcPriorities: []int{8},
+				},
+			},
+			wantErr:           true,
+			wantErrorContains: []string{"pfcPriorities", "between 0 and 7"},
+		},
+		{
+			name: "duplicate PFC priority is rejected",
+			req: APIInterfaceCreateOrUpdateRequest{
+				VpcPrefixID: cutil.GetPtr(uuid.NewString()),
+				RoceConfig: &APIInterfaceRoceConfig{
+					PfcPriorities: []int{3, 3},
+				},
+			},
+			wantErr:           true,
+			wantErrorContains: []string{"pfcPriorities", "duplicated"},
+		},
+		{
+			name: "invalid trust mode is rejected",
+			req: APIInterfaceCreateOrUpdateRequest{
+				VpcPrefixID: cutil.GetPtr(uuid.NewString()),
+				RoceConfig: &APIInterfaceRoceConfig{
+					TrustMode: cutil.GetPtr(APIInterfaceRoceTrustMode("dscp")),
+				},
+			},
+			wantErr:           true,
+			wantErrorContains: []string{"trustMode"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				for _, want := range tt.wantErrorContains {
+					assert.Contains(t, err.Error(), want)
+				}
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestAPIInterfaceRoceConfig_ToDBAndFromDB(t *testing.T) {
+	var nilConfig *APIInterfaceRoceConfig
+	assert.Nil(t, nilConfig.ToDB())
+
+	dscp := APIInterfaceRoceTrustModeDscp
+	apiConfig := &APIInterfaceRoceConfig{
+		TrustMode:     &dscp,
+		PfcPriorities: []int{3},
+		Tos:           cutil.GetPtr(0),
+	}
+	dbConfig := apiConfig.ToDB()
+	require.NotNil(t, dbConfig)
+	assert.Equal(t, "Dscp", *dbConfig.TrustMode)
+	assert.Equal(t, []int{3}, dbConfig.PfcPriorities)
+	assert.Equal(t, 0, *dbConfig.Tos)
+
+	roundTrip := &APIInterfaceRoceConfig{}
+	roundTrip.FromDB(dbConfig)
+	assert.Equal(t, APIInterfaceRoceTrustModeDscp, *roundTrip.TrustMode)
+	assert.Equal(t, []int{3}, roundTrip.PfcPriorities)
+	assert.Equal(t, 0, *roundTrip.Tos)
+}
+
 func TestAPIInterfaceInlineRoutingProfile_ToDB(t *testing.T) {
 	var nilProfile *APIInterfaceInlineRoutingProfile
 	assert.Nil(t, nilProfile.ToDB())

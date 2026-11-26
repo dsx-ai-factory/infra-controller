@@ -167,6 +167,7 @@ async fn create_test_vpcs(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -954,6 +955,7 @@ async fn allocate_instance_on_segment(env: &TestEnv, segment_id: NetworkSegmentI
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,

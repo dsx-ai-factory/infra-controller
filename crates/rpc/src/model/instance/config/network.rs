@@ -21,9 +21,9 @@ use std::net::IpAddr;
 use itertools::Itertools;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceConfig, InstanceInterfaceIpFamilyMode,
-    InstanceInterfaceRoutingProfile, InstanceInterfaceVpcSelection, InstanceNetworkAutoConfig,
-    InstanceNetworkConfig, InterfaceFunctionId, InterfaceFunctionType, Ipv6InterfaceConfig,
-    NetworkDetails,
+    InstanceInterfaceRoceConfig, InstanceInterfaceRoceTrustMode, InstanceInterfaceRoutingProfile,
+    InstanceInterfaceVpcSelection, InstanceNetworkAutoConfig, InstanceNetworkConfig,
+    InterfaceFunctionId, InterfaceFunctionType, Ipv6InterfaceConfig, NetworkDetails,
 };
 
 use crate as rpc;
@@ -387,6 +387,11 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
                 )
                 .transpose()?;
 
+            let roce_config = iface
+                .roce_config
+                .map(TryInto::try_into)
+                .transpose()?;
+
             interfaces.push(InstanceInterfaceConfig {
                 function_id,
                 network_segment_id,
@@ -400,6 +405,7 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
                     .map_err(|e| RpcDataConversionError::InvalidIpAddress(e.to_string()))?,
                 ipv6_interface_config,
                 routing_profile,
+                roce_config,
                 interface_prefixes: HashMap::default(),
                 network_segment_gateways: HashMap::new(),
                 host_inband_mac_address: None,
@@ -497,6 +503,7 @@ impl TryFrom<InstanceNetworkConfig> for rpc::InstanceNetworkConfig {
                             .collect(),
                     }
                 }),
+                roce_config: iface.roce_config.as_ref().map(Into::into),
             });
         }
 
@@ -528,6 +535,101 @@ impl From<&InstanceInterfaceRoutingProfile> for rpc::forge::FlatInterfaceRouting
                 })
                 .collect(),
         }
+    }
+}
+
+impl From<&InstanceInterfaceRoceConfig> for rpc::forge::InstanceInterfaceRoceConfig {
+    fn from(config: &InstanceInterfaceRoceConfig) -> Self {
+        Self {
+            trust_mode: config.trust_mode.map(|mode| {
+                match mode {
+                    InstanceInterfaceRoceTrustMode::Dscp => {
+                        rpc::forge::InstanceInterfaceRoceTrustMode::Dscp as i32
+                    }
+                    InstanceInterfaceRoceTrustMode::Pcp => {
+                        rpc::forge::InstanceInterfaceRoceTrustMode::Pcp as i32
+                    }
+                }
+            }),
+            pfc_priorities: config.pfc_priorities.iter().map(|&p| u32::from(p)).collect(),
+            tos: config.tos.map(u32::from),
+        }
+    }
+}
+
+impl From<&InstanceInterfaceRoceConfig> for rpc::forge::FlatInterfaceRoceConfig {
+    fn from(config: &InstanceInterfaceRoceConfig) -> Self {
+        let wire: rpc::forge::InstanceInterfaceRoceConfig = config.into();
+        Self {
+            trust_mode: wire.trust_mode,
+            pfc_priorities: wire.pfc_priorities,
+            tos: wire.tos,
+        }
+    }
+}
+
+impl TryFrom<rpc::forge::InstanceInterfaceRoceConfig> for InstanceInterfaceRoceConfig {
+    type Error = RpcDataConversionError;
+
+    fn try_from(config: rpc::forge::InstanceInterfaceRoceConfig) -> Result<Self, Self::Error> {
+        let trust_mode = match config.trust_mode {
+            None => None,
+            Some(mode) => {
+                let mode = rpc::forge::InstanceInterfaceRoceTrustMode::try_from(mode).map_err(
+                    |_| {
+                        RpcDataConversionError::InvalidValue(
+                            "roce_config.trust_mode".to_string(),
+                            mode.to_string(),
+                        )
+                    },
+                )?;
+                match mode {
+                    rpc::forge::InstanceInterfaceRoceTrustMode::Unspecified => None,
+                    rpc::forge::InstanceInterfaceRoceTrustMode::Dscp => {
+                        Some(InstanceInterfaceRoceTrustMode::Dscp)
+                    }
+                    rpc::forge::InstanceInterfaceRoceTrustMode::Pcp => {
+                        Some(InstanceInterfaceRoceTrustMode::Pcp)
+                    }
+                }
+            }
+        };
+
+        let mut pfc_priorities = Vec::with_capacity(config.pfc_priorities.len());
+        for priority in config.pfc_priorities {
+            let priority = u8::try_from(priority).map_err(|_| {
+                RpcDataConversionError::InvalidValue(
+                    "roce_config.pfc_priorities".to_string(),
+                    priority.to_string(),
+                )
+            })?;
+            pfc_priorities.push(priority);
+        }
+
+        let tos = config
+            .tos
+            .map(|tos| {
+                u8::try_from(tos).map_err(|_| {
+                    RpcDataConversionError::InvalidValue(
+                        "roce_config.tos".to_string(),
+                        tos.to_string(),
+                    )
+                })
+            })
+            .transpose()?;
+
+        let roce = InstanceInterfaceRoceConfig {
+            trust_mode,
+            pfc_priorities,
+            tos,
+        };
+        roce.validate().map_err(|e| match e {
+            model::ConfigValidationError::InvalidValue(msg) => {
+                RpcDataConversionError::InvalidArgument(msg)
+            }
+            other => RpcDataConversionError::InvalidArgument(other.to_string()),
+        })?;
+        Ok(roce)
     }
 }
 
@@ -601,6 +703,7 @@ mod tests {
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }
     }
 
@@ -743,6 +846,7 @@ mod tests {
                         requested_ip_addr,     // We'll confirm that this...
                         ipv6_interface_config, // and this, are suppressed because vpc_selection above is set.
                         routing_profile: None,
+                        roce_config: None,
                         interface_prefixes: HashMap::default(),
                         network_segment_gateways: HashMap::default(),
                         host_inband_mac_address: None,
@@ -814,6 +918,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             }],
             #[allow(deprecated)]
             auto: false,
@@ -830,6 +935,7 @@ mod tests {
                 requested_ip_addr: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
                 interface_prefixes: HashMap::new(),
                 network_segment_gateways: HashMap::new(),
                 host_inband_mac_address: None,
@@ -854,6 +960,7 @@ mod tests {
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }];
         for vfid in INTERFACE_VFID_MIN..=INTERFACE_VFID_MAX {
             interfaces.push(rpc::InstanceInterfaceConfig {
@@ -866,6 +973,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             });
         }
 
@@ -885,6 +993,7 @@ mod tests {
             requested_ip_addr: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
             interface_prefixes: HashMap::new(),
             network_segment_gateways: HashMap::new(),
             host_inband_mac_address: None,
@@ -904,6 +1013,7 @@ mod tests {
                 requested_ip_addr: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
                 interface_prefixes: HashMap::new(),
                 network_segment_gateways: HashMap::new(),
                 host_inband_mac_address: None,
@@ -933,6 +1043,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
@@ -948,6 +1059,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
@@ -963,6 +1075,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
@@ -978,6 +1091,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         ]
     }
@@ -1094,6 +1208,7 @@ mod tests {
                     requested_ip_addr: Some("2001:db8::1".parse().unwrap()),
                 }),
                 routing_profile: None,
+                roce_config: None,
                 interface_prefixes: HashMap::default(),
                 network_segment_gateways: HashMap::default(),
                 host_inband_mac_address: None,
@@ -1161,6 +1276,7 @@ mod tests {
                         prefix: anycast_prefix.to_string(),
                     }],
                 }),
+                roce_config: None,
             }],
             #[allow(deprecated)]
             auto: false,
@@ -1212,6 +1328,7 @@ mod tests {
                         prefix: "not-a-prefix".to_string(),
                     }],
                 }),
+                roce_config: None,
             }],
             #[allow(deprecated)]
             auto: false,
@@ -1222,6 +1339,84 @@ mod tests {
         assert!(matches!(
             result,
             Err(RpcDataConversionError::NetworkParseError(_))
+        ));
+    }
+
+    #[test]
+    fn test_interface_roce_config_rpc_roundtrip() {
+        let segment_id = NetworkSegmentId::new();
+
+        let rpc_config = rpc::InstanceNetworkConfig {
+            interfaces: vec![rpc::InstanceInterfaceConfig {
+                function_type: rpc::InterfaceFunctionType::Virtual as i32,
+                network_segment_id: Some(segment_id),
+                network_details: Some(
+                    rpc::forge::instance_interface_config::NetworkDetails::SegmentId(segment_id),
+                ),
+                device: Some("mlx5_0".to_string()),
+                device_instance: 0,
+                virtual_function_id: Some(1),
+                ip_address: None,
+                ipv6_interface_config: None,
+                routing_profile: None,
+                roce_config: Some(rpc::forge::InstanceInterfaceRoceConfig {
+                    trust_mode: Some(rpc::forge::InstanceInterfaceRoceTrustMode::Dscp as i32),
+                    pfc_priorities: vec![3],
+                    tos: Some(0),
+                }),
+            }],
+            #[allow(deprecated)]
+            auto: false,
+            auto_config: None,
+        };
+
+        let model: InstanceNetworkConfig = rpc_config.try_into().unwrap();
+        let roce = model.interfaces[0].roce_config.as_ref().unwrap();
+        assert_eq!(roce.trust_mode, Some(InstanceInterfaceRoceTrustMode::Dscp));
+        assert_eq!(roce.pfc_priorities, vec![3]);
+        assert_eq!(roce.tos, Some(0));
+
+        let rpc_config: rpc::InstanceNetworkConfig = model.try_into().unwrap();
+        let wire = rpc_config.interfaces[0].roce_config.as_ref().unwrap();
+        assert_eq!(
+            wire.trust_mode,
+            Some(rpc::forge::InstanceInterfaceRoceTrustMode::Dscp as i32)
+        );
+        assert_eq!(wire.pfc_priorities, vec![3]);
+        assert_eq!(wire.tos, Some(0));
+    }
+
+    #[test]
+    fn test_interface_roce_config_rejects_invalid_pfc_priority() {
+        let segment_id = NetworkSegmentId::new();
+        let rpc_config = rpc::InstanceNetworkConfig {
+            interfaces: vec![rpc::InstanceInterfaceConfig {
+                function_type: rpc::InterfaceFunctionType::Physical as i32,
+                network_segment_id: Some(segment_id),
+                network_details: Some(
+                    rpc::forge::instance_interface_config::NetworkDetails::SegmentId(segment_id),
+                ),
+                device: None,
+                device_instance: 0,
+                virtual_function_id: None,
+                ip_address: None,
+                ipv6_interface_config: None,
+                routing_profile: None,
+                roce_config: Some(rpc::forge::InstanceInterfaceRoceConfig {
+                    trust_mode: None,
+                    pfc_priorities: vec![8],
+                    tos: None,
+                }),
+            }],
+            #[allow(deprecated)]
+            auto: false,
+            auto_config: None,
+        };
+
+        let result: Result<InstanceNetworkConfig, _> = rpc_config.try_into();
+        assert!(matches!(
+            result,
+            Err(RpcDataConversionError::InvalidArgument(_))
         ));
     }
 
@@ -1251,6 +1446,7 @@ mod tests {
                 ip_address: None,
             }),
             routing_profile: None,
+            roce_config: None,
         };
 
         // An IPv6 ip_address AND ipv6_interface_config together should be rejected.
@@ -1269,6 +1465,7 @@ mod tests {
                 ip_address: None,
             }),
             routing_profile: None,
+            roce_config: None,
         };
 
         // An IPv4 ip_address AND ipv6_interface_config is fine (dual-stack).
@@ -1287,6 +1484,7 @@ mod tests {
                 ip_address: None,
             }),
             routing_profile: None,
+            roce_config: None,
         };
 
         value_scenarios!(
@@ -1329,6 +1527,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             }],
             #[allow(deprecated)]
             auto: false,
@@ -1357,6 +1556,7 @@ mod tests {
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             }],
             #[allow(deprecated)]
             auto: true,

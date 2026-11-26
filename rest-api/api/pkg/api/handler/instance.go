@@ -791,6 +791,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				Subnet:             subnet,
 				IsPhysical:         ifc.IsPhysical,
 				RequestedIpAddress: nil, // RequestedIpAddress requires a VPC prefix, and model validation enforces this.
+				RoceConfig:         ifc.RoceConfig.ToDB(),
 				Status:             cdbm.InterfaceStatusPending,
 			})
 		}
@@ -872,6 +873,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				VpcPrefix:            vpcPrefix, // We attach this here so it can be used when we convert to the API model.
 				RequestedIpAddress:   ifc.IPAddress,
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -912,6 +914,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				Vpc:                  interfaceVpc,
 				VpcIPFamilyMode:      cutil.GetPtr(ifc.VpcIPFamilyMode()),
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -1801,6 +1804,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				VirtualFunctionID:    dbifc.VirtualFunctionID,
 				RequestedIpAddress:   dbifc.RequestedIpAddress,
 				InlineRoutingProfile: dbifc.InlineRoutingProfile,
+				RoceConfig:           dbifc.RoceConfig,
 				IsPhysical:           dbifc.IsPhysical,
 				Status:               dbifc.Status,
 				CreatedBy:            dbUser.ID,
@@ -1869,6 +1873,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if dbifc.InlineRoutingProfile != nil {
 				interfaceConfig.RoutingProfile = dbifc.InlineRoutingProfile.ToProto()
+			}
+			if dbifc.RoceConfig != nil {
+				interfaceConfig.RoceConfig = dbifc.RoceConfig.ToProto()
 			}
 
 			interfaceConfigs = append(interfaceConfigs, interfaceConfig)
@@ -3152,6 +3159,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				Subnet:             subnet,
 				IsPhysical:         ifc.IsPhysical,
 				RequestedIpAddress: nil, // RequestedIpAddress requires a VPC prefix, and model validation enforces this.
+				RoceConfig:         ifc.RoceConfig.ToDB(),
 				Status:             cdbm.InterfaceStatusPending,
 			})
 		}
@@ -3236,6 +3244,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				VpcPrefix:            vpcPrefix, // We attach this here so it can be used when we convert to the API model.
 				RequestedIpAddress:   ifc.IPAddress,
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -3275,6 +3284,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				Vpc:                  interfaceVpc,
 				VpcIPFamilyMode:      cutil.GetPtr(ifc.VpcIPFamilyMode()),
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -3973,6 +3983,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					VirtualFunctionID:    dbifc.VirtualFunctionID,
 					RequestedIpAddress:   dbifc.RequestedIpAddress,
 					InlineRoutingProfile: dbifc.InlineRoutingProfile,
+					RoceConfig:           dbifc.RoceConfig,
 					IsPhysical:           dbifc.IsPhysical,
 					Status:               dbifc.Status,
 					CreatedBy:            dbUser.ID,
@@ -4497,6 +4508,9 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if ifc.InlineRoutingProfile != nil {
 				interfaceConfig.RoutingProfile = ifc.InlineRoutingProfile.ToProto()
+			}
+			if ifc.RoceConfig != nil {
+				interfaceConfig.RoceConfig = ifc.RoceConfig.ToProto()
 			}
 
 			interfaceConfigs = append(interfaceConfigs, interfaceConfig)

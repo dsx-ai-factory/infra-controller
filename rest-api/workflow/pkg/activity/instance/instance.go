@@ -585,6 +585,11 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						inlineRoutingProfile = &cdbm.InterfaceInlineRoutingProfile{}
 						inlineRoutingProfile.FromProto(interfaceConfig.RoutingProfile)
 					}
+					var roceConfig *cdbm.InterfaceRoceConfig
+					if interfaceConfig.RoceConfig != nil {
+						roceConfig = &cdbm.InterfaceRoceConfig{}
+						roceConfig.FromProto(interfaceConfig.RoceConfig)
+					}
 
 					// A VPC selector remains the desired intent; synchronize Core's
 					// resolved prefix IDs from the aligned status.
@@ -630,7 +635,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					if ifc.InlineRoutingProfile != nil && interfaceConfig.RoutingProfile == nil {
 						clearInput.InlineRoutingProfile = true
 					}
-					if clearInput.VpcPrefixID || clearInput.SecondaryVpcPrefixID || clearInput.RequestedIpAddress || clearInput.InlineRoutingProfile {
+					if ifc.RoceConfig != nil && interfaceConfig.RoceConfig == nil {
+						clearInput.RoceConfig = true
+					}
+					if clearInput.VpcPrefixID || clearInput.SecondaryVpcPrefixID || clearInput.RequestedIpAddress || clearInput.InlineRoutingProfile || clearInput.RoceConfig {
 						_, serr := interfaceDAO.Clear(ctx, nil, clearInput)
 						if serr != nil {
 							slogger.Error().Err(serr).Str("Interface ID", ifc.ID.String()).Msg("failed to update Interface in DB")
@@ -654,6 +662,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						VirtualFunctionID:    vfID,
 						RequestedIpAddress:   requestedIpAddress,
 						InlineRoutingProfile: inlineRoutingProfile,
+						RoceConfig:           roceConfig,
 						MacAddress:           macAddress,
 						IpAddresses:          ipAddresses,
 						IPPrefixes:           append([]string{}, interfaceStatus.Prefixes...),

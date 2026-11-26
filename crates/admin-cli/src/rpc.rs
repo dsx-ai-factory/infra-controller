@@ -2189,6 +2189,7 @@ impl ApiClient {
                     ip_address: None,
                     ipv6_interface_config: None,
                     routing_profile: None,
+                    roce_config: None,
                 });
 
                 if let Some(vf_network_segment_chunks) = vf_chunk_iter.next() {
@@ -2205,6 +2206,7 @@ impl ApiClient {
                             ip_address: None,
                             ipv6_interface_config: None,
                             routing_profile: None,
+                            roce_config: None,
                         });
                         vf_function_id += 1;
                     }
@@ -2281,6 +2283,7 @@ impl ApiClient {
                                     .cloned(),
                             }),
                         routing_profile: None,
+                        roce_config: None,
                     };
                     tracing::debug!(
                         new_interface = ?new_interface,
@@ -2318,6 +2321,7 @@ impl ApiClient {
                                             .cloned(),
                                     }),
                                 routing_profile: None,
+                                roce_config: None,
                             };
                             vf_function_id += 1;
                             tracing::debug!(

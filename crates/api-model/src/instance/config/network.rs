@@ -264,6 +264,7 @@ impl InstanceNetworkConfig {
                     requested_ip_addr: None,
                     ipv6_interface_config: None,
                     routing_profile: None,
+                    roce_config: None,
                     interface_prefixes: HashMap::default(),
                     network_segment_gateways: HashMap::default(),
                     host_inband_mac_address: None,
@@ -291,6 +292,7 @@ impl InstanceNetworkConfig {
                         requested_ip_addr: None,
                         ipv6_interface_config: None,
                         routing_profile: None,
+                        roce_config: None,
                         interface_prefixes: HashMap::default(),
                         network_segment_gateways: HashMap::default(),
                         host_inband_mac_address: None,
@@ -318,6 +320,7 @@ impl InstanceNetworkConfig {
                 requested_ip_addr: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
                 interface_prefixes: HashMap::default(),
                 network_segment_gateways: HashMap::default(),
                 host_inband_mac_address: None,
@@ -504,6 +507,10 @@ impl InstanceNetworkConfig {
                     }))
             {
                 return Err(ConfigValidationError::NetworkPrefixAllocationMismatch);
+            }
+
+            if let Some(roce_config) = iface.roce_config.as_ref() {
+                roce_config.validate()?;
             }
         }
 
@@ -845,6 +852,65 @@ pub struct InstanceInterfaceRoutingProfile {
     pub allowed_anycast_prefixes: Vec<IpNetwork>,
 }
 
+
+/// IEEE 802.1Q priority range accepted for PFC enablement.
+pub const ROCE_PFC_PRIORITY_MIN: u8 = 0;
+/// Inclusive upper bound for PFC priorities (0..=7).
+pub const ROCE_PFC_PRIORITY_MAX: u8 = 7;
+/// Inclusive upper bound for the IPv4 ToS octet.
+pub const ROCE_TOS_MAX: u8 = 255;
+
+/// Trust mode for RoCE runtime QoS classification on a NIC PF/VF.
+///
+/// Matches NIC Configuration Operator / `mlnx_qos --trust` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceInterfaceRoceTrustMode {
+    /// Differentiated Services Code Point trust (`dscp`).
+    Dscp,
+    /// Priority Code Point trust (`pcp`).
+    Pcp,
+}
+
+/// RoCE runtime QoS parameters for an instance PF or VF.
+///
+/// These mirror NIC Configuration Operator `roceOptimized` runtime knobs
+/// (`trust`, `pfc`, `tos`) and are distinct from firmware nvconfig.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceInterfaceRoceConfig {
+    /// QoS trust mode. Operator `roceOptimized` default is DSCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_mode: Option<InstanceInterfaceRoceTrustMode>,
+    /// IEEE 802.1Q priorities (0-7) with PFC enabled. Operator default: `[3]`.
+    #[serde(default)]
+    pub pfc_priorities: Vec<u8>,
+    /// IPv4 Type of Service octet (0-255). Operator `roceOptimized` default is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tos: Option<u8>,
+}
+
+impl InstanceInterfaceRoceConfig {
+    /// Validates PFC priorities and ToS against NIC Configuration Operator bounds.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let mut seen = [false; (ROCE_PFC_PRIORITY_MAX as usize) + 1];
+        for &priority in &self.pfc_priorities {
+            if priority > ROCE_PFC_PRIORITY_MAX {
+                return Err(ConfigValidationError::InvalidValue(format!(
+                    "roce_config.pfc_priorities entry `{priority}` is outside {ROCE_PFC_PRIORITY_MIN}..={ROCE_PFC_PRIORITY_MAX}"
+                )));
+            }
+            let index = priority as usize;
+            if seen[index] {
+                return Err(ConfigValidationError::InvalidValue(format!(
+                    "roce_config.pfc_priorities entry `{priority}` is duplicated"
+                )));
+            }
+            seen[index] = true;
+        }
+        Ok(())
+    }
+}
+
 /// The configuration that a customer desires for an instances network interface
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceInterfaceConfig {
@@ -884,6 +950,10 @@ pub struct InstanceInterfaceConfig {
     /// Optional routing-profile settings that narrow the owning VPC profile for this interface.
     #[serde(default)]
     pub routing_profile: Option<InstanceInterfaceRoutingProfile>,
+
+    /// Optional RoCE runtime QoS settings for this PF or VF (`mlnx_qos`-style).
+    #[serde(default)]
+    pub roce_config: Option<InstanceInterfaceRoceConfig>,
 
     /// The interface-specific prefix allocation we carved out from each
     /// network prefix for this interface (e.g. in FNN we might carve out
@@ -1105,6 +1175,36 @@ mod tests {
 
     /// Verifies durable service interfaces require canonical point-to-point prefixes matching their
     /// registered family so malformed stored links cannot reach allocation or networking.
+    // Distinct regression: PFC priority bounds and uniqueness are enforced at
+    // the model boundary before persistence.
+    #[test]
+    fn roce_config_validate_rejects_invalid_pfc_priorities() {
+        value_scenarios!(
+            run = |config: InstanceInterfaceRoceConfig| config.validate().map_err(|_| ());
+            "priority above 7" {
+                InstanceInterfaceRoceConfig {
+                    trust_mode: Some(InstanceInterfaceRoceTrustMode::Dscp),
+                    pfc_priorities: vec![8],
+                    tos: None,
+                } => Err(())
+            }
+            "duplicate priority" {
+                InstanceInterfaceRoceConfig {
+                    trust_mode: None,
+                    pfc_priorities: vec![3, 3],
+                    tos: None,
+                } => Err(())
+            }
+            "valid operator default shape" {
+                InstanceInterfaceRoceConfig {
+                    trust_mode: None,
+                    pfc_priorities: vec![3],
+                    tos: Some(0),
+                } => Ok(())
+            }
+        );
+    }
+
     #[test]
     fn service_vpc_interface_validates_canonical_link_prefixes() {
         let service_interface = |link_prefix: &str| InstanceServiceInterfaceConfig {
@@ -1298,6 +1398,7 @@ mod tests {
             requested_ip_addr,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
             interface_prefixes,
             network_segment_gateways,
             host_inband_mac_address: None,
@@ -1310,7 +1411,7 @@ mod tests {
         let serialized = serde_json::to_string(&interface).unwrap();
         assert_eq!(
             serialized,
-            r#"{"function_id":{"type":"physical"},"network_details":null,"network_segment_id":"91609f10-c91d-470d-a260-6293ea0c1200","ip_addrs":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2"},"requested_ip_addr":"192.168.1.2","ipv6":null,"routing_profile":null,"interface_prefixes":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2/32"},"network_segment_gateways":{},"host_inband_mac_address":null,"device_locator":null,"internal_uuid":"37c3dc65-9aef-4439-b7ca-d532a0a41d7f","vpc_id":null}"#
+            r#"{"function_id":{"type":"physical"},"network_details":null,"network_segment_id":"91609f10-c91d-470d-a260-6293ea0c1200","ip_addrs":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2"},"requested_ip_addr":"192.168.1.2","ipv6":null,"routing_profile":null,"roce_config":null,"interface_prefixes":{"91609f10-c91d-470d-a260-6293ea0c1201":"192.168.1.2/32"},"network_segment_gateways":{},"host_inband_mac_address":null,"device_locator":null,"internal_uuid":"37c3dc65-9aef-4439-b7ca-d532a0a41d7f","vpc_id":null}"#
         );
 
         assert_eq!(
@@ -1338,6 +1439,7 @@ mod tests {
                     requested_ip_addr: None,
                     ipv6_interface_config: None,
                     routing_profile: None,
+                    roce_config: None,
                     interface_prefixes: HashMap::default(),
                     network_segment_gateways: HashMap::default(),
                     host_inband_mac_address: None,
@@ -1962,6 +2064,7 @@ mod tests {
                     requested_ip_addr: None,
                     ipv6_interface_config: None,
                     routing_profile: None,
+                    roce_config: None,
                     interface_prefixes: HashMap::default(),
                     network_segment_gateways: HashMap::default(),
                     host_inband_mac_address: None,

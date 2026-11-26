@@ -3419,6 +3419,7 @@ async fn test_update_instance_config_restores_deprecated_auto_config(
         ip_address: None,
         ipv6_interface_config: None,
         routing_profile: None,
+        roce_config: None,
     }];
 
     let mut different_auto_config = updated_network.clone();
@@ -3642,6 +3643,7 @@ async fn test_reject_invalid_instance_config_updates(_: PgPoolOptions, options: 
         ip_address: Some("192.168.0.1".to_string()),
         ipv6_interface_config: None,
         routing_profile: None,
+        roce_config: None,
     }];
 
     let err = env
@@ -3687,6 +3689,7 @@ async fn test_reject_invalid_instance_config_updates(_: PgPoolOptions, options: 
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         });
     let err = env
         .api
@@ -4164,6 +4167,7 @@ fn single_vpc_interface_network(network_details: NetworkDetails) -> rpc::Instanc
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -5070,6 +5074,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_multidpu(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         }],
         #[allow(deprecated)]
         auto: false,
@@ -5127,6 +5132,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_multidpu(
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Physical as i32,
@@ -5138,6 +5144,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_multidpu(
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         ],
         #[allow(deprecated)]
@@ -5257,6 +5264,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                             ip_address: Some("5.5.5.1".to_string()),
                             ipv6_interface_config: None,
                             routing_profile: None,
+                            roce_config: None,
                         }],
                         #[allow(deprecated)]
                         auto: false,
@@ -5300,6 +5308,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                             ip_address: Some("192.1.4.0".to_string()),
                             ipv6_interface_config: None,
                             routing_profile: None,
+                            roce_config: None,
                         }],
                         #[allow(deprecated)]
                         auto: false,
@@ -5345,6 +5354,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                             ip_address: Some(expected_ip.to_string()),
                             ipv6_interface_config: None,
                             routing_profile: None,
+                            roce_config: None,
                         }],
                         #[allow(deprecated)]
                         auto: false,
@@ -5473,6 +5483,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some("5.5.5.5".to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                             rpc::InstanceInterfaceConfig {
                                 function_type: rpc::InterfaceFunctionType::Physical as i32,
@@ -5484,6 +5495,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some("6.6.6.7".to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                         ],
                         #[allow(deprecated)]
@@ -5534,6 +5546,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some(expected_ip.to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                             rpc::InstanceInterfaceConfig {
                                 function_type: rpc::InterfaceFunctionType::Physical as i32,
@@ -5545,6 +5558,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some(expected_ip.to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                         ],
                         #[allow(deprecated)]
@@ -5595,6 +5609,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some(expected_ip.to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                             rpc::InstanceInterfaceConfig {
                                 function_type: rpc::InterfaceFunctionType::Physical as i32,
@@ -5606,6 +5621,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                                 ip_address: Some(expected_ip2.to_string()),
                                 ipv6_interface_config: None,
                                 routing_profile: None,
+                                roce_config: None,
                             },
                         ],
                         #[allow(deprecated)]

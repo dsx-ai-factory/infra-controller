@@ -4879,6 +4879,7 @@ esac
                     vpc_peer_vnis: vpc_peer_vnis.clone(),
                     vpc_routing_profile: Some(routing_profile.clone()),
                     interface_routing_profile: None,
+                    interface_roce_config: None,
                     network_security_group: network_security_group.clone(),
                     mtu: Some(9_000), // Match the fixed DPF/CNI service MTU.
                     link_prefix: (*link_prefix).to_string(),
@@ -7369,6 +7370,7 @@ esac
             ipv6_interface_config: None,
             vpc_routing_profile: None,
             interface_routing_profile: None,
+            interface_roce_config: None,
             addresses: vec![],
         };
         assert_eq!(admin_interface.svi_ip, None);
@@ -7452,6 +7454,7 @@ esac
                     }],
                 }),
                 interface_routing_profile: None,
+                interface_roce_config: None,
                 addresses: vec![],
             },
             rpc::FlatInterfaceConfig {
@@ -7658,6 +7661,7 @@ esac
                     }],
                 }),
                 interface_routing_profile: None,
+                interface_roce_config: None,
                 addresses: vec![],
             },
         ];
@@ -7926,7 +7930,9 @@ esac
             vpc_peer_prefixes: vec![],
             vpc_peer_vnis: vec![],
             routing_profile: None,
+            roce_config: None,
             interface_routing_profile: None,
+            interface_roce_config: None,
             is_l2_segment: true,
             is_service: false,
             ipv6_port_config: None,
@@ -8404,6 +8410,7 @@ esac
             ipv6_interface_config: None,
             vpc_routing_profile: None,
             interface_routing_profile: None,
+            interface_roce_config: None,
             addresses: vec![
                 rpc::InterfaceAddressConfig {
                     address_family: rpc::AddressFamily::V4.into(),
@@ -8460,6 +8467,7 @@ esac
                 ipv6_interface_config: None,
                 vpc_routing_profile: None,
                 interface_routing_profile: None,
+                interface_roce_config: None,
                 addresses: vec![],
             },
             rpc::FlatInterfaceConfig {
@@ -8488,6 +8496,7 @@ esac
                 ipv6_interface_config: None,
                 vpc_routing_profile: None,
                 interface_routing_profile: None,
+                interface_roce_config: None,
                 addresses: vec![rpc::InterfaceAddressConfig {
                     address_family: rpc::AddressFamily::V6.into(),
                     ip: "2001:db8:185::1".to_string(),
@@ -8832,6 +8841,7 @@ esac
             anycast_site_prefixes: vec![],
             tenant_host_asn: None,
             routing_profile: None,
+            roce_config: None,
             dhcp_servers: vec![],
             ntp_servers: vec![],
             dhcpv6_server_preference: Some(255),

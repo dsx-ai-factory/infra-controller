@@ -671,6 +671,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			dbInterfaces = append(dbInterfaces, cdbm.Interface{
 				SubnetID:   &subnetID,
 				IsPhysical: ifc.IsPhysical,
+				RoceConfig: ifc.RoceConfig.ToDB(),
 				Status:     cdbm.InterfaceStatusPending,
 			})
 		}
@@ -738,6 +739,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				VpcPrefix:            vpcPrefix,
 				RequestedIpAddress:   nil, // Explicit IPs are not supported for batch create.
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -778,6 +780,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				Vpc:                  interfaceVpc,
 				VpcIPFamilyMode:      cutil.GetPtr(ifc.VpcIPFamilyMode()),
 				InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+				RoceConfig:           ifc.RoceConfig.ToDB(),
 				Device:               ifc.Device,
 				DeviceInstance:       ifc.DeviceInstance,
 				VirtualFunctionID:    ifc.VirtualFunctionID,
@@ -1555,6 +1558,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					VirtualFunctionID:    dbifc.VirtualFunctionID,
 					RequestedIpAddress:   dbifc.RequestedIpAddress,
 					InlineRoutingProfile: dbifc.InlineRoutingProfile,
+					RoceConfig:           dbifc.RoceConfig,
 					IsPhysical:           dbifc.IsPhysical,
 					Status:               cdbm.InterfaceStatusPending,
 					CreatedBy:            dbUser.ID,
@@ -1766,6 +1770,9 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if ifc.InlineRoutingProfile != nil {
 				interfaceConfig.RoutingProfile = ifc.InlineRoutingProfile.ToProto()
+			}
+			if ifc.RoceConfig != nil {
+				interfaceConfig.RoceConfig = ifc.RoceConfig.ToProto()
 			}
 			createdInstancesData[idx].interfaceConfigs = append(createdInstancesData[idx].interfaceConfigs, interfaceConfig)
 		}

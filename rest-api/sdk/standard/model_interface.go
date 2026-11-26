@@ -59,6 +59,8 @@ type Interface struct {
 	RequestedIpAddress NullableString `json:"requestedIpAddress,omitempty"`
 	// Inline interface-local routing profile options. Only valid for VPC-backed interfaces.
 	InlineRoutingProfile NullableInterfaceInlineRoutingProfile `json:"inlineRoutingProfile,omitempty"`
+	// RoCE runtime QoS parameters for this PF or VF (NIC Configuration Operator `roceOptimized` runtime knobs).
+	RoceConfig NullableInterfaceRoceConfig `json:"roceConfig,omitempty"`
 	// Status of the Interface
 	Status *InterfaceStatus `json:"status,omitempty"`
 	// Date/time when the Interface was created
@@ -708,6 +710,49 @@ func (o *Interface) UnsetInlineRoutingProfile() {
 	o.InlineRoutingProfile.Unset()
 }
 
+// GetRoceConfig returns the RoceConfig field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Interface) GetRoceConfig() InterfaceRoceConfig {
+	if o == nil || IsNil(o.RoceConfig.Get()) {
+		var ret InterfaceRoceConfig
+		return ret
+	}
+	return *o.RoceConfig.Get()
+}
+
+// GetRoceConfigOk returns a tuple with the RoceConfig field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Interface) GetRoceConfigOk() (*InterfaceRoceConfig, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RoceConfig.Get(), o.RoceConfig.IsSet()
+}
+
+// HasRoceConfig returns a boolean if a field has been set.
+func (o *Interface) HasRoceConfig() bool {
+	if o != nil && o.RoceConfig.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRoceConfig gets a reference to the given NullableInterfaceRoceConfig and assigns it to the RoceConfig field.
+func (o *Interface) SetRoceConfig(v InterfaceRoceConfig) {
+	o.RoceConfig.Set(&v)
+}
+
+// SetRoceConfigNil sets the value for RoceConfig to be an explicit nil
+func (o *Interface) SetRoceConfigNil() {
+	o.RoceConfig.Set(nil)
+}
+
+// UnsetRoceConfig ensures that no value is present for RoceConfig, not even an explicit nil
+func (o *Interface) UnsetRoceConfig() {
+	o.RoceConfig.Unset()
+}
+
 // GetStatus returns the Status field value if set, zero value otherwise.
 func (o *Interface) GetStatus() InterfaceStatus {
 	if o == nil || IsNil(o.Status) {
@@ -860,6 +905,9 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	}
 	if o.InlineRoutingProfile.IsSet() {
 		toSerialize["inlineRoutingProfile"] = o.InlineRoutingProfile.Get()
+	}
+	if o.RoceConfig.IsSet() {
+		toSerialize["roceConfig"] = o.RoceConfig.Get()
 	}
 	if !IsNil(o.Status) {
 		toSerialize["status"] = o.Status

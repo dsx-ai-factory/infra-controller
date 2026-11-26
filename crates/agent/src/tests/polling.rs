@@ -517,6 +517,7 @@ async fn fetch_config(State(state): State<Arc<FetchState>>) -> axum::response::R
             vpc_peer_vnis: vec![],
             vpc_routing_profile: Some(forge::RoutingProfile::default()),
             interface_routing_profile: None,
+            interface_roce_config: None,
             network_security_group: None,
             mtu: Some(9_000),
             link_prefix: if invalid_service {

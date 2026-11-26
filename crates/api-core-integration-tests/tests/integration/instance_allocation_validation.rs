@@ -504,6 +504,7 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
                             ip_address: Some("192.168.0.1".to_string()),
                             ipv6_interface_config: None,
                             routing_profile: None,
+                            roce_config: None,
 
                             function_type: rpc::InterfaceFunctionType::Physical as i32,
                             network_segment_id: None,
@@ -730,6 +731,7 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
                                 ip_address: None,
                             }),
                             routing_profile: None,
+                            roce_config: None,
                         }],
                             #[allow(deprecated)]
                             auto: false,
@@ -822,6 +824,7 @@ fn interface_network_config_with_devices(
             ip_address: None,
             ipv6_interface_config: None,
             routing_profile: None,
+            roce_config: None,
         })
         .collect();
     rpc::InstanceNetworkConfig {

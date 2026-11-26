@@ -251,6 +251,7 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
             rpc::InstanceInterfaceConfig {
                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
@@ -262,6 +263,7 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
                 ip_address: None,
                 ipv6_interface_config: None,
                 routing_profile: None,
+                roce_config: None,
             },
         ],
         #[allow(deprecated)]
