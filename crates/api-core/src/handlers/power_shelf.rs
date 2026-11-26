@@ -21,6 +21,7 @@ use db::{ObjectColumnFilter, power_shelf as db_power_shelf};
 use health_report::HealthReportApplyMode;
 use itertools::Itertools;
 use model::bmc_suppression::BmcSuppressionSubsystem;
+use model::machine_interface::InterfaceType;
 use model::metadata::Metadata;
 use tonic::{Request, Response, Status};
 
@@ -231,8 +232,8 @@ pub(crate) async fn delete_power_shelf(
     Ok(Response::new(rpc::PowerShelfDeletionResult {}))
 }
 
-/// Force deletes a power shelf and optionally its associated interfaces
-/// and BMC suppressions from the database.
+/// Force deletes a power shelf and its explored BMC endpoints, optionally deleting
+/// its associated interfaces and BMC suppressions from the database.
 /// Unlike `delete_power_shelf` (soft delete), this immediately hard-deletes the power shelf
 /// while retaining its state history.
 pub(crate) async fn admin_force_delete_power_shelf(
@@ -257,18 +258,29 @@ pub(crate) async fn admin_force_delete_power_shelf(
             id: power_shelf_id.to_string(),
         })?;
 
+    let interfaces = db::machine_interface::find_by(
+        &mut txn,
+        ObjectColumnFilter::One(db::machine_interface::PowerShelfIdColumn, &power_shelf_id),
+    )
+    .await
+    .map_err(CarbideError::from)?;
+    let bmc_addresses = interfaces
+        .iter()
+        .filter(|interface| interface.interface_type == InterfaceType::Bmc)
+        .flat_map(|interface| interface.addresses.iter().copied())
+        .collect::<Vec<_>>();
+    db::explored_endpoints::delete_many(&mut txn, &bmc_addresses)
+        .await
+        .map_err(CarbideError::from)?;
+
     let mut interfaces_deleted: u32 = 0;
     if request.delete_interfaces {
-        let interface_ids =
-            db::machine_interface::find_ids_by_power_shelf_id(&mut txn, &power_shelf_id)
-                .await
-                .map_err(CarbideError::from)?;
-        for interface_id in &interface_ids {
-            db::machine_interface::delete(interface_id, &mut txn, false)
+        for interface in &interfaces {
+            db::machine_interface::delete(&interface.id, &mut txn, false)
                 .await
                 .map_err(CarbideError::from)?;
         }
-        interfaces_deleted = interface_ids.len() as u32;
+        interfaces_deleted = interfaces.len() as u32;
     }
 
     if request.delete_bmc_suppressions {
