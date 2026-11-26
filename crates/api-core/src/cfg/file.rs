@@ -2122,6 +2122,7 @@ impl DpfConfig {
     /// [`Self::docker_image_pull_secret`] override applied. The override affects every
     /// mandatory service except `dts` and `doca_hbn`, which take a pull secret only
     /// from their per-service config.
+    /// Hardware-specific DTS defaults are applied by [`Self::resolved_services_for`].
     pub fn resolved_mandatory_services(&self) -> DpfMandatoryServicesConfig {
         let mut services = (*self.services).clone();
         self.apply_pull_secret_override(&mut services);
@@ -2136,6 +2137,8 @@ impl DpfConfig {
     /// [`Self::docker_image_pull_secret`] override is applied to the mandatory services and,
     /// when an extra service has no per-service secret, to the selected extra services
     /// (see [`Self::resolved_mandatory_services`]).
+    /// An omitted or empty DTS `helm_version` selects the built-in version for the
+    /// deployment's hardware generation; an explicit nonempty version is preserved.
     pub fn resolved_services_for(
         &self,
         deployment: &DpfDeploymentConfig,
@@ -2146,6 +2149,17 @@ impl DpfConfig {
             .as_deref()
             .cloned()
             .unwrap_or_else(|| (*self.services).clone());
+        if base.dts.helm_version.is_empty() {
+            base.dts.helm_version = match deployment_type {
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => {
+                    crate::dpf_services::DTS_SERVICE_HELM_VERSION_BF3
+                }
+                DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra => {
+                    crate::dpf_services::DTS_SERVICE_HELM_VERSION_BF4
+                }
+            }
+            .to_string();
+        }
         self.apply_pull_secret_override(&mut base);
 
         let mut extra = self.extra_services.for_deployment_type(deployment_type);
@@ -2437,7 +2451,8 @@ pub struct DpfServiceConfig {
     pub helm_repo_url: String,
     /// Name of the Helm chart.
     pub helm_chart: String,
-    /// Version of the Helm chart.
+    /// Version of the Helm chart. For DTS, omission or an empty string selects the
+    /// hardware-specific default when resolving deployment services.
     pub helm_version: String,
     /// Url for docker image
     pub docker_repo_url: String,
@@ -8384,6 +8399,78 @@ object_kind = "secret"
             expected_agent.helm_chart
         );
         assert_eq!(config.services.fmds.name, expected_fmds.name);
+    }
+
+    #[test]
+    fn dpf_dts_helm_version_follows_hardware() {
+        value_scenarios!(
+            run = |deployment_type| {
+                let config = DpfConfig::default();
+                config
+                    .resolved_services_for(&config.deployments.bf3, deployment_type)
+                    .base.dts.helm_version
+            };
+
+            "BF3 deployments use the DOCA 3.6 DTS chart" {
+                DpuDeploymentType::Bf3 => "1.27.8".to_string(),
+                DpuDeploymentType::Bf3Gb200 => "1.27.8".to_string(),
+            }
+
+            "BF4 deployments use the BF4 DTS chart" {
+                DpuDeploymentType::Bf4Generic => "1.25.43".to_string(),
+                DpuDeploymentType::Bf4Astra => "1.25.43".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dpf_dts_helm_version_preserves_service_overrides() {
+        let deployment_config = r#"
+[deployments.bf4_generic]
+flavor_name = "bf4-flavor"
+deployment_name = "bf4-deployment"
+node_label_key = "carbide.nvidia.com/bf4"
+"#;
+
+        value_scenarios!(
+            run = |body: &str| {
+                let config = toml::from_str::<DpfConfig>(&format!("{body}\n{deployment_config}"))
+                    .unwrap();
+                config
+                    .resolved_services_for(
+                        config.deployments.bf4_generic.as_ref().unwrap(),
+                        DpuDeploymentType::Bf4Generic,
+                    )
+                    .base.dts.helm_version
+            };
+
+            "a partial site-wide DTS entry still selects the BF4 default" {
+                "[services.dts]\ndocker_image_tag = 'custom-image'" => "1.25.43".to_string(),
+            }
+
+            "an explicit site-wide version overrides the hardware default" {
+                "[services.dts]\nhelm_version = 'custom-version'" => "custom-version".to_string(),
+                "[services.dts]\nhelm_version = '1.27.8'" => "1.27.8".to_string(),
+            }
+
+            "a deployment version replaces the site-wide version" {
+                "[services.dts]\nhelm_version = 'site-version'\n\
+                 [deployments.bf4_generic.services.dts]\nhelm_version = 'deployment-version'"
+                    => "deployment-version".to_string(),
+            }
+
+            "a partial deployment service block uses hardware defaults rather than site-wide values" {
+                "[services.dts]\nhelm_version = 'site-version'\n\
+                 [deployments.bf4_generic.services.dpu_agent]\nhelm_version = 'agent-version'"
+                    => "1.25.43".to_string(),
+            }
+
+            "an empty deployment version selects the hardware default" {
+                "[services.dts]\nhelm_version = 'site-version'\n\
+                 [deployments.bf4_generic.services.dts]\nhelm_version = ''"
+                    => "1.25.43".to_string(),
+            }
+        );
     }
 
     #[test]
