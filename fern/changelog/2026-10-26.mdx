@@ -1,0 +1,16 @@
+---
+tags: ["unreleased", "machine-controller", "bios"]
+---
+
+## BIOS setup waits for the host to boot — unreleased
+
+`PollingBiosSetup` now completes only once the host's Redfish `BootProgress` shows `OSBootStarted` or `OSRunning` after the BIOS reboot. Previously it could complete while the BMC was still applying the settings with extra power cycles, and the DPU-wait state then restarted the DPU in the middle of its boot.
+
+The step does not wait when `BootProgress` is missing, has no `LastState`, or is `OEM`, or when it shows `OSBootStarted` or `OSRunning` without a valid `LastStateTime`. A `LastState` of `None` waits.
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `machine_state_controller.bios_apply_settle_timeout` | New. Longest wait for the host to boot after the BIOS reboot; defaults to `20m`, must be greater than `0s` and at most `60m`. After it, the step completes and logs a warning. There is no wait when `BootProgress` is missing, has no `LastState`, or is `OEM`, or when it shows `OSBootStarted` or `OSRunning` without a valid `LastStateTime`. |
+| `machine_state_controller.dpu_first_restart_delay` | New. Minimum time from entering a DPU-wait state to the first restart of a DPU that has not reported. If the `failure_retry_time` of an earlier restart has not passed, the first restart also waits for it. Later restarts use `failure_retry_time`. Unset keeps the existing schedule, including the 5-minute fallback. When set, must be greater than `0s` and at most `30m`. |
