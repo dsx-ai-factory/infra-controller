@@ -48,12 +48,15 @@ async fn migration_preserves_unadopted_declarations_and_predecessor_writer(pool:
     .execute(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        super::super::find_by_ids(&pool, &[domain.id])
-            .await
-            .unwrap(),
-        vec![domain.clone()]
-    );
+    let [record]: [_; 1] = super::super::find_by_ids(&pool, &[domain.id])
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(record.domain, domain);
+    assert!(record.controller_state.is_none());
+    assert!(record.controller_state_version.is_none());
+    assert!(record.deleted.is_none());
     assert!(find_ids(&pool).await.unwrap().is_empty());
     assert!(find_snapshot(&pool, domain.id).await.unwrap().is_none());
 
@@ -169,12 +172,21 @@ async fn versioned_state_and_deletion_preserve_member_ownership(pool: sqlx::PgPo
         Err(DatabaseError::AlreadyFoundError { .. })
     ));
     txn.rollback().await.unwrap();
+    let [record]: [_; 1] = super::super::find_by_ids(&pool, &[domain.id])
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
-        super::super::find_by_ids(&pool, &[domain.id])
-            .await
-            .unwrap(),
-        vec![domain]
+        record.controller_state,
+        Some(NvLinkDomainState::Discovering)
     );
+    assert_eq!(
+        record.controller_state_version,
+        Some(repeated.controller_state.version)
+    );
+    assert_eq!(record.deleted, repeated.deleted);
+    assert_eq!(record.domain, domain);
 }
 
 #[crate::sqlx_test]

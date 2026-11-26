@@ -55,6 +55,9 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
         domain
     );
     assert_eq!(domain.members, request.members);
+    let lifecycle = domain.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
+    assert_eq!(lifecycle.state, r#"{"state":"created"}"#);
+    assert!(domain.deleted.is_none());
     let id = domain.id.as_ref().unwrap().value.parse().unwrap();
     let snapshot = db::nvlink_domain::lifecycle::find_snapshot(&pool, id)
         .await
@@ -117,6 +120,18 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
         .unwrap()
         .unwrap();
     assert!(deleting.deleted.is_some());
+    let pending = env
+        .api
+        .get_nv_link_domain(Request::new(lookup.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(pending.deleted, deleting.deleted.map(Into::into));
+    assert_eq!(pending.status, domain.status);
+    assert_eq!(
+        lifecycle.version,
+        snapshot.controller_state.version.version_string()
+    );
     assert_eq!(
         env.api
             .create_nv_link_domain(Request::new(request.clone()))
@@ -147,8 +162,28 @@ async fn expected_domain_api_lifecycle(pool: sqlx::PgPool) {
             .code(),
         Code::NotFound
     );
-    env.api
+    let replacement = env
+        .api
         .create_nv_link_domain(Request::new(request))
         .await
+        .unwrap()
+        .into_inner();
+    controller.run_single_iteration().await;
+    let observed = env
+        .api
+        .get_nv_link_domain(Request::new(forge::NvLinkDomainRequest {
+            id: replacement.id,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .status
+        .unwrap()
+        .lifecycle
         .unwrap();
+    assert_eq!(observed.state, r#"{"state":"discovering"}"#);
+    assert_eq!(
+        observed.state_reason.unwrap().outcome,
+        forge::ControllerStateOutcome::Transition as i32
+    );
 }

@@ -51,7 +51,10 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
     assert_eq!(
         find_by_ids(&pool, &[Uuid::new_v4(), domain.id, domain.id])
             .await
-            .unwrap(),
+            .unwrap()
+            .into_iter()
+            .map(|record| record.domain)
+            .collect::<Vec<_>>(),
         vec![domain.clone()]
     );
     assert_eq!(
@@ -193,7 +196,12 @@ async fn membership_storage_constraints(pool: sqlx::PgPool) {
     create(&mut txn, &declaration).await.unwrap();
     txn.commit().await.unwrap();
     assert_eq!(
-        find_by_ids(&pool, &[declaration.id]).await.unwrap(),
+        find_by_ids(&pool, &[declaration.id])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.domain)
+            .collect::<Vec<_>>(),
         vec![declaration]
     );
 }
@@ -246,7 +254,12 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
     ));
     assert_eq!(find_ids(&pool, None).await.unwrap(), vec![domain.id]);
     assert_eq!(
-        find_by_ids(&pool, &[domain.id]).await.unwrap(),
+        find_by_ids(&pool, &[domain.id])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.domain)
+            .collect::<Vec<_>>(),
         vec![domain]
     );
 }
@@ -254,10 +267,15 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::raw_sql(
+        "DROP TABLE nvlink_domain_members, nvlink_domains,
+        nvlink_domain_controller_iteration_ids, nvlink_domain_controller_queued_objects,
+        nvlink_domain_state_history;
+        DROP FUNCTION nvlink_domain_state_history_keep_limit();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut txn = pool.txn_begin().await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261014011133_expected_nvlink_domains.sql"
@@ -298,8 +316,17 @@ async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     .unwrap();
     create(&mut txn, &domain).await.unwrap();
     txn.commit().await.unwrap();
-    assert_eq!(
-        find_by_ids(&pool, &[domain.id]).await.unwrap(),
-        vec![domain]
-    );
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261113203000_nvlink_domain_controller.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let [record]: [_; 1] = find_by_ids(&pool, &[domain.id])
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(record.domain, domain);
+    assert!(record.controller_state.is_none());
 }

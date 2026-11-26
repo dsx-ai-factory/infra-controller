@@ -94,6 +94,8 @@ async fn public_commands_and_output() {
         id: Some(Uuid::new_v4().into()),
         rack_group_id: Some(RackGroupId::new("group")),
         name: Some("mini-a".into()),
+        status: None,
+        deleted: None,
         members: vec![
             parse_member("0:0:Compute").unwrap(),
             parse_member("0:0:Switch").unwrap(),
@@ -122,9 +124,24 @@ async fn public_commands_and_output() {
     assert!(output.contains(id));
 
     for format in [OutputFormat::AsciiTable, OutputFormat::Csv] {
-        for name in [Some("mini-a".into()), None] {
+        for (name, state_json, expected_state) in [
+            (
+                Some("mini-a"),
+                Some(
+                    r#"{"state":"maintenance","maintenance_state":{"FirmwareUpgrade":{"rack_firmware_upgrade":"Start"}}}"#,
+                ),
+                "Maintenance(FirmwareUpgrade(Start))",
+            ),
+            (None, None, ""),
+        ] {
             let expected = forge::NvLinkDomain {
-                name: name.clone(),
+                status: state_json.map(|state| forge::NvLinkDomainStatus {
+                    lifecycle: Some(forge::LifecycleStatus {
+                        state: state.to_owned(),
+                        ..Default::default()
+                    }),
+                }),
+                name: name.map(str::to_owned),
                 ..domain.clone()
             };
             let (output, _) = dispatch(&["show", id], format, expected).await;
@@ -133,6 +150,7 @@ async fn public_commands_and_output() {
                 "Rack Group ID",
                 "Name",
                 "Member Positions",
+                "State",
                 id,
                 "group",
                 "0:0:Compute",
@@ -143,9 +161,11 @@ async fn public_commands_and_output() {
             if format == OutputFormat::Csv {
                 let mut reader = csv::Reader::from_reader(output.as_bytes());
                 let row = reader.records().next().unwrap().unwrap();
+                assert_eq!(&row[4], expected_state);
                 assert_eq!(&row[3], "0:0:Compute, 0:0:Switch");
             } else {
                 let row = output.lines().find(|line| line.contains(id)).unwrap();
+                assert_eq!(row.split('|').nth(5).unwrap().trim(), expected_state);
                 assert_eq!(
                     row.split('|').nth(4).unwrap().trim(),
                     "0:0:Compute, 0:0:Switch"
