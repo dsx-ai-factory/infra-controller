@@ -852,6 +852,11 @@ func buildSubnetIPBlockSelectItems(ipBlocks []NamedItem, siteID, tenantID string
 	tenantID = strings.TrimSpace(tenantID)
 	items := make([]SelectItem, 0, len(ipBlocks))
 	for _, block := range ipBlocks {
+		// Older REST servers omit managed; only explicit false identifies a private root.
+		raw, _ := block.Raw.(map[string]interface{})
+		if raw[ipBlockManagedField] == false {
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(block.Status), "Ready") {
 			continue
 		}
@@ -2589,7 +2594,22 @@ func promptSingleAllocationConstraint(s *Session, ctx context.Context) (map[stri
 	if !ok {
 		return nil, fmt.Errorf("unsupported resource type %q", rt.ID)
 	}
-	item, err := s.Resolver.Resolve(ctx, resolverKey, resolverLabel)
+	items, err := s.Resolver.Fetch(ctx, resolverKey)
+	if err != nil {
+		return nil, err
+	}
+	if rt.ID == "IPBlock" {
+		// Keep private roots in the shared resolver cache for get/update/delete.
+		managedBlocks := make([]NamedItem, 0, len(items))
+		for _, item := range items {
+			raw, _ := item.Raw.(map[string]interface{})
+			if raw[ipBlockManagedField] != false {
+				managedBlocks = append(managedBlocks, item)
+			}
+		}
+		items = managedBlocks
+	}
+	item, err := s.Resolver.SelectFromItems(resolverLabel, items)
 	if err != nil {
 		return nil, err
 	}
@@ -3235,6 +3255,8 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 // manually" option in the IP block picker, mirroring tenantManualEntrySentinel.
 const ipBlockManualEntrySentinel = "__manual__"
 
+const ipBlockManagedField = "managed"
+
 // validateVPCPrefixLength checks the shared minimum and the maximum resolved
 // from the selected IP Block family and VPC address mode.
 func validateVPCPrefixLength(maximumLength, prefixLength int) error {
@@ -3311,6 +3333,11 @@ func buildIPBlockSelectItems(blocks []NamedItem, tenantID string) []SelectItem {
 	tenantID = strings.TrimSpace(tenantID)
 	items := make([]SelectItem, 0, len(blocks)+1)
 	for _, b := range blocks {
+		// Private roots become usable by VPC Prefixes in issue #3900.
+		raw, _ := b.Raw.(map[string]interface{})
+		if raw[ipBlockManagedField] == false {
+			continue
+		}
 		if strings.TrimSpace(b.Extra["tenantId"]) != tenantID || !strings.EqualFold(strings.TrimSpace(b.Status), "Ready") {
 			continue
 		}

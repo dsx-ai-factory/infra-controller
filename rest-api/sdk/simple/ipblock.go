@@ -21,6 +21,7 @@ type IpBlock struct {
 	Cidr            string    `json:"cidr"` // prefix/prefixLength
 	ProtocolVersion *string   `json:"protocolVersion"`
 	Status          string    `json:"status"`
+	Managed         *bool     `json:"managed"`
 	Created         time.Time `json:"created"`
 	Updated         time.Time `json:"updated"`
 }
@@ -41,6 +42,7 @@ func ipBlockFromStandard(api standard.IpBlock) IpBlock {
 		Description:     api.Description.Get(),
 		SiteID:          api.SiteId,
 		ProtocolVersion: api.ProtocolVersion,
+		Managed:         api.Managed,
 	}
 	if api.Id != nil {
 		ib.ID = *api.Id

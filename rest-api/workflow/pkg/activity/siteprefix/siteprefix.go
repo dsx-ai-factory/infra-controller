@@ -95,6 +95,29 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	for i := range blocks {
 		existingBlockMap[*blocks[i].SitePrefixID] = &blocks[i]
 	}
+	// Reported identities outside the Site snapshot may belong to another Site.
+	// Reject known foreign links before taking any Site-wide locks.
+	unknownPrefixIDs := []uuid.UUID{}
+	for _, prefix := range inventory.SitePrefixes {
+		id, err := uuid.Parse(prefix.GetId().GetValue())
+		if err == nil && existingBlockMap[id] == nil {
+			unknownPrefixIDs = append(unknownPrefixIDs, id)
+		}
+	}
+	foreignPrefixIDs := map[uuid.UUID]bool{}
+	if len(unknownPrefixIDs) > 0 {
+		linkedBlocks, _, err := dao.GetAll(ctx, nil, cdbm.IPBlockFilterInput{SitePrefixIDs: unknownPrefixIDs},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve IP Blocks for reported SitePrefixes")
+			return err
+		}
+		for _, block := range linkedBlocks {
+			if block.SiteID != siteID || block.InfrastructureProviderID != site.InfrastructureProviderID {
+				foreignPrefixIDs[*block.SitePrefixID] = true
+			}
+		}
+	}
 	reportedSitePrefixIDMap := map[uuid.UUID]bool{}
 	for _, strID := range page.GetItemIds() {
 		id, err := uuid.Parse(strID)
@@ -126,8 +149,18 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		// savepoint so a cleanup failure preserves the Deleting lifecycle.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
+		existing := existingBlockMap[id]
+		if foreignPrefixIDs[id] || (existing != nil && (existing.SiteID != siteID || existing.InfrastructureProviderID != site.InfrastructureProviderID)) {
+			logger.Warn().Str("Site Prefix ID", prefix.GetId().GetValue()).Msg("skipping SitePrefix linked to another Site or Provider")
+			continue
+		}
 		reconciledBlock, err := cdb.WithTxResult(ctx, manager.dbSession, func(tx *cdb.Tx) (*cdbm.IPBlock, error) {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
+			// Never hold a Site-wide lock while waiting for an in-flight Core call.
+			err := tx.AcquireAdvisoryLock(ctx, cdbm.SitePrefixIPBlockLockID(id), false)
+			if err != nil {
+				return nil, err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
 				return nil, err
 			}
@@ -189,6 +222,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			// REST owns metadata after creation, including on adopted and restored
 			// roots. Only lifecycle changes produce writes and status details.
 			status := getSitePrefixStatus(prefix.Status.LifecycleState)
+			if !block.Managed && block.Status == cdbm.IPBlockStatusDeleting {
+				status = cdbm.IPBlockStatusDeleting
+			}
 			block, err = manager.updateIPBlockStatusInDB(ctx, tx, block, status, sitePrefixInventoryStatusMessage)
 			if err != nil {
 				return nil, err
@@ -202,7 +238,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		if err != nil {
 			if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
 				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
-					Msg("skipping SitePrefix due to Site fabric lock contention")
+					Msg("skipping SitePrefix due to mutation or Site fabric lock contention")
 				continue
 			}
 			var applicationErr *temporal.ApplicationError
@@ -235,7 +271,11 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return ctx.Err()
 		}
 		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID), nil)
+			err := tx.AcquireAdvisoryLock(ctx, cdbm.SitePrefixIPBlockLockID(*candidate.SitePrefixID), false)
+			if err != nil {
+				return err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID), nil)
 			if err != nil {
 				return err
 			}
@@ -290,7 +330,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		if err != nil {
 			if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
 				logger.Warn().Err(err).Str("IP Block ID", candidate.ID.String()).
-					Msg("skipping missing SitePrefix due to Site fabric lock contention")
+					Msg("skipping missing SitePrefix due to mutation or Site fabric lock contention")
 				continue
 			}
 			logger.Error().Err(err).Str("IP Block ID", candidate.ID.String()).Msg("failed to reconcile missing SitePrefix")
@@ -504,8 +544,13 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		return dao.Clear(ctx, tx, cdbm.IPBlockClearInput{IPBlockID: existingBlock.ID, Deleted: true})
 	}
 	status := getSitePrefixStatus(prefix.Status.LifecycleState)
+	var blockID *uuid.UUID
+	if tenantID != nil {
+		blockID = &id
+	}
 	block, err := dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
-		Name: name, Description: description,
+		IPBlockID: blockID,
+		Name:      name, Description: description,
 		SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
 		SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
 		Managed:         cutil.GetPtr(tenantID == nil),
