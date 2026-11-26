@@ -36,8 +36,8 @@ const KEA_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
 const METRICS_READY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 /// DHCPv6 DNS servers configured through hook context.
 pub(super) const HOOK_DNS_SERVERS_IPV6: [&str; 1] = ["2001:db8::53"];
-/// DHCPv6 NTP servers configured through hook context.
-pub(super) const HOOK_NTP_SERVERS_IPV6: [&str; 1] = ["2001:db8::123"];
+/// Two hook-configured NTP servers exercise Kea's split option-56 replies.
+pub(super) const HOOK_NTP_SERVERS_IPV6: [&str; 2] = ["2001:db8::123", "2001:db8::126"];
 
 // Real Kea children share process-global hook/logger/metrics state through the
 // loaded cdylib, so serialize them instead of running multiple daemons at once.
@@ -55,7 +55,7 @@ pub(crate) struct Kea6ExpiredLeasesProcessing {
 }
 
 /// Runtime configuration overrides for the DHCPv6 integration-test Kea process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) struct Kea6Config {
     pub(crate) preferred_lifetime: u32,
     pub(crate) valid_lifetime: u32,
@@ -67,7 +67,17 @@ pub(crate) struct Kea6Config {
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
     pub(crate) nico_pxe_service_url: Option<&'static str>,
-    pub(crate) native_vendor_opts_hex: Option<&'static str>,
+    pub(crate) option_data: Vec<serde_json::Value>,
+    pub(crate) ddns_port: Option<u16>,
+    pub(crate) ddns_replace_name: bool,
+    pub(crate) pool_ddns_updates: Option<bool>,
+    pub(crate) subnet_ddns_updates: Option<bool>,
+    pub(crate) continue_after_store_failure: bool,
+    pub(crate) reject_runtime_capability: Option<&'static str>,
+    pub(crate) reserved_address: Option<(&'static str, &'static str, bool)>,
+    pub(crate) address_pool: &'static str,
+    pub(crate) pool_id: Option<u32>,
+    pub(crate) multi_threading: bool,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -85,7 +95,17 @@ impl Default for Kea6Config {
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
             nico_pxe_service_url: None,
-            native_vendor_opts_hex: None,
+            option_data: Vec::new(),
+            ddns_port: None,
+            ddns_replace_name: false,
+            pool_ddns_updates: None,
+            subnet_ddns_updates: None,
+            continue_after_store_failure: false,
+            reject_runtime_capability: None,
+            reserved_address: None,
+            address_pool: "2001:db8::1-2001:db8::ffff",
+            pool_id: Some(1),
+            multi_threading: true,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -147,7 +167,13 @@ impl Drop for Kea6RunPermit {
 }
 
 pub(crate) struct Kea6 {
+    #[cfg(target_os = "linux")]
+    pub(crate) lease_io: super::lease_io_fault::LeaseIoFault,
+    #[cfg(target_os = "linux")]
+    pub(crate) lease_read: super::lease_io_fault::LeaseIoFault,
+    reject_runtime_capability: Option<&'static str>,
     temp_conf_file: PathBuf,
+    lease_file: PathBuf,
     dhcp_in_port: u16,
     dhcp_out_port: u16,
     dhcp_in_port_reservation: Option<UdpSocket>,
@@ -156,6 +182,7 @@ pub(crate) struct Kea6 {
     temp_base_directory: TempDir,
     process: Option<Child>,
     logs: Arc<Mutex<Vec<String>>>,
+    log_readers: Vec<thread::JoinHandle<()>>,
     _run_permit: Option<Kea6RunPermit>,
 }
 
@@ -218,6 +245,12 @@ impl Kea6 {
         config: Kea6Config,
     ) -> Result<Kea6, eyre::Report> {
         let temp_base_directory = tempfile::tempdir()?;
+        // Kea 3 requires the Unix control socket directory to be 0750 or stricter.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            temp_base_directory.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
         let temp_conf_file = temp_base_directory.path().join("kea-dhcp6.conf");
 
         // Use a caller-supplied memfile only when a test needs to inspect
@@ -226,16 +259,51 @@ impl Kea6 {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| temp_base_directory.path().join("kea-leases6.csv"));
 
+        let reject_runtime_capability = config.reject_runtime_capability;
         let mut temp_conf_fd = File::create(&temp_conf_file)?;
-        temp_conf_fd.write_all(
-            Kea6::config(api_server_url, &lease_file, metrics_endpoint, config).as_bytes(),
+        let mut configuration: serde_json::Value = serde_json::from_str(&Kea6::config(
+            api_server_url,
+            &lease_file,
+            metrics_endpoint,
+            config,
+        ))?;
+        // Keep both libraries within Kea 3's enforced hook directory.
+        std::os::unix::fs::symlink(
+            super::hook_library_path(),
+            temp_base_directory.path().join("libdhcp.so"),
         )?;
+        configuration["Dhcp6"]["hooks-libraries"][0]["library"] =
+            json!(temp_base_directory.path().join("libdhcp.so"));
+        #[cfg(target_os = "linux")]
+        {
+            let barrier = temp_base_directory.path().join("lease_read_barrier.so");
+            std::os::unix::fs::symlink(env!("KEA_TEST_LEASE_READ_LIBRARY"), &barrier)?;
+            configuration["Dhcp6"]["hooks-libraries"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, json!({"library": barrier}));
+        }
+        configuration["Dhcp6"]["control-socket"] = json!({
+            "socket-type": "unix",
+            "socket-name": temp_base_directory.path().join("control.sock"),
+        });
+        temp_conf_fd.write_all(serde_json::to_string(&configuration)?.as_bytes())?;
 
         // Close the config before spawning Kea so the child reads complete JSON.
         drop(temp_conf_fd);
 
         Ok(Kea6 {
+            #[cfg(target_os = "linux")]
+            lease_io: super::lease_io_fault::LeaseIoFault::new(
+                &temp_base_directory.path().join("lease-io-control"),
+            )?,
+            #[cfg(target_os = "linux")]
+            lease_read: super::lease_io_fault::LeaseIoFault::new(
+                &temp_base_directory.path().join("lease-read-control"),
+            )?,
+            reject_runtime_capability,
             temp_conf_file,
+            lease_file,
             temp_base_directory,
             dhcp_in_port: ports.dhcp_in_port,
             dhcp_out_port: ports.dhcp_out_port,
@@ -244,6 +312,7 @@ impl Kea6 {
             metrics_endpoint_reservation,
             process: None,
             logs: Arc::new(Mutex::new(Vec::new())),
+            log_readers: Vec::new(),
             _run_permit: None,
         })
     }
@@ -305,7 +374,8 @@ impl Kea6 {
 
         let (port, status) = last_exit.expect("at least one Kea6 start attempt should have run");
         Err(eyre::eyre!(
-            "kea6 exited before binding DHCP port {port} after {KEA_START_ATTEMPTS} attempts: {status}"
+            "kea6 exited before binding DHCP port {port} after {KEA_START_ATTEMPTS} attempts: {status}\n{}",
+            self.logs.lock().unwrap().join("\n")
         ))
     }
 
@@ -317,9 +387,42 @@ impl Kea6 {
 
         // Point Kea runtime files at the per-test temp dir instead of system
         // paths that unprivileged integration tests cannot safely share.
-        let mut process = Command::new("/usr/sbin/kea-dhcp6")
+        let mut command = Command::new("/usr/sbin/kea-dhcp6");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            command
+                .env("LD_PRELOAD", env!("KEA_TEST_LEASE_IO_LIBRARY"))
+                .env("NICO_TEST_LEASE_FILE", &self.lease_file)
+                .env(
+                    "NICO_TEST_LEASE_IO_CONTROL",
+                    self.temp_base_directory.path().join("lease-io-control"),
+                );
+            command.env(
+                "NICO_TEST_LEASE_READ_CONTROL",
+                self.temp_base_directory.path().join("lease-read-control"),
+            );
+            if let Some(capability) = self.reject_runtime_capability {
+                command.env("NICO_TEST_REJECT_KEA_CAPABILITY", capability);
+            }
+            // SAFETY: Only the async-signal-safe signal syscall runs after fork.
+            // Ignore SIGXFSZ so a test's file-size limit produces an I/O error
+            // in the real memfile backend instead of terminating Kea.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let mut process = command
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
+            .env("KEA_CONTROL_SOCKET_DIR", self.temp_base_directory.path())
+            .env("KEA_DHCP_DATA_DIR", self.lease_file.parent().unwrap())
+            .env("KEA_HOOKS_PATH", self.temp_base_directory.path())
             .arg("-c")
             .arg(self.temp_conf_file.as_os_str())
             .arg("-p")
@@ -335,7 +438,7 @@ impl Kea6 {
         let stdout_logs = self.logs.clone();
         // Keep child logs in memory so tests can assert warnings and failures
         // include useful diagnostics. These reader threads end at pipe EOF.
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
                 let line = line.unwrap();
                 stdout_logs
@@ -344,9 +447,9 @@ impl Kea6 {
                     .push(format!("KEA6 STDOUT: {line}"));
                 println!("KEA6 STDOUT: {line}");
             }
-        });
+        }));
         let stderr_logs = self.logs.clone();
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
                 let line = line.unwrap();
                 stderr_logs
@@ -355,7 +458,7 @@ impl Kea6 {
                     .push(format!("KEA6 STDERR: {line}"));
                 println!("KEA6 STDERR: {line}");
             }
-        });
+        }));
 
         self.process = Some(process);
 
@@ -364,6 +467,7 @@ impl Kea6 {
             thread::sleep(Duration::from_millis(100));
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                 self.process = None;
+                self.join_log_readers();
                 return Ok(Some(status));
             }
 
@@ -376,6 +480,7 @@ impl Kea6 {
                     thread::sleep(KEA_EXIT_SETTLE);
                     if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                         self.process = None;
+                        self.join_log_readers();
                         return Ok(Some(status));
                     }
                     if let Some(status) = self.wait_for_metrics_endpoint(deadline)? {
@@ -412,6 +517,7 @@ impl Kea6 {
             }
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
                 self.process = None;
+                self.join_log_readers();
                 return Ok(Some(status));
             }
             if Instant::now() >= deadline {
@@ -426,26 +532,113 @@ impl Kea6 {
     }
 
     pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
+        self.wait_for_log_count(needle, 1, timeout) > 0
+    }
+
+    /// Wait for at least `minimum` matching log lines; return the observed count,
+    /// including a smaller count if the timeout expires first.
+    pub(crate) fn wait_for_log_count(
+        &self,
+        needle: &str,
+        minimum: usize,
+        timeout: Duration,
+    ) -> usize {
         let deadline = Instant::now() + timeout;
         loop {
-            if self
+            let count = self
                 .logs
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.contains(needle))
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
+                .filter(|line| line.contains(needle))
+                .count();
+            if count >= minimum || Instant::now() >= deadline {
+                return count;
             }
             thread::sleep(Duration::from_millis(20));
         }
     }
 
+    pub(crate) fn wait_for_failure(&mut self) -> Result<(), eyre::Report> {
+        let deadline = Instant::now() + KEA_READY_TIMEOUT;
+        loop {
+            if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
+                self.process = None;
+                self.join_log_readers();
+                eyre::ensure!(
+                    !status.success(),
+                    "storage failure must stop kea with an error"
+                );
+                return Ok(());
+            }
+            eyre::ensure!(
+                Instant::now() < deadline,
+                "kea did not stop after fatal storage failure"
+            );
+            thread::sleep(KEA_SHUTDOWN_POLL);
+        }
+    }
+
     pub(crate) fn metrics_endpoint(&self) -> SocketAddr {
         self.metrics_endpoint
+    }
+
+    /// Read native Kea counters through its control socket, including pool counters
+    /// on versions that expose them. Missing counters remain absent.
+    pub(crate) fn statistics(&self) -> Result<serde_json::Value, eyre::Report> {
+        Ok(self.control_command(json!({"command": "statistic-get-all"}))?["arguments"].clone())
+    }
+
+    /// Run one native reclamation sweep, using the same engine as the timer.
+    pub(crate) fn reclaim_expired_leases(&self, remove: bool) -> Result<(), eyre::Report> {
+        self.control_command(
+            json!({"command": "leases-reclaim", "arguments": {"remove": remove}}),
+        )?;
+        Ok(())
+    }
+
+    /// Bound regular-file writes in the child to inject real memfile I/O errors.
+    /// Passing None restores the soft limit to the unchanged hard limit.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_file_size_limit(&self, limit: Option<u64>) -> Result<(), eyre::Report> {
+        let pid = self.process.as_ref().expect("Kea must be running").id() as libc::pid_t;
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: The unreaped child owns this PID, and limits points to writable
+        // memory of the required layout; a null new limit only queries it.
+        if unsafe { libc::prlimit(pid, libc::RLIMIT_FSIZE, std::ptr::null(), &mut limits) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        limits.rlim_cur = limit.unwrap_or(limits.rlim_max);
+        // SAFETY: limits remains valid for this synchronous syscall. Only the
+        // child soft limit changes, so the test can restore it without privilege.
+        if unsafe { libc::prlimit(pid, libc::RLIMIT_FSIZE, &limits, std::ptr::null_mut()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    fn control_command(
+        &self,
+        command: serde_json::Value,
+    ) -> Result<serde_json::Value, eyre::Report> {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(self.temp_base_directory.path().join("control.sock"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.write_all(&serde_json::to_vec(&command)?)?;
+        let response = serde_json::Deserializer::from_reader(stream)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .ok_or_else(|| eyre::eyre!("empty kea control response"))?
+            .map_err(|error| eyre::eyre!("kea control {command}: {error}"))?;
+        eyre::ensure!(
+            response["result"] == 0,
+            "kea control command {command} failed: {response}"
+        );
+        Ok(response)
     }
 
     /// Restart the same Kea6 config and memfile, clearing process-local hook cache.
@@ -482,15 +675,22 @@ impl Kea6 {
                 match process.try_wait() {
                     Ok(Some(_)) => break,
                     Ok(None) if Instant::now() < deadline => thread::sleep(KEA_SHUTDOWN_POLL),
-                    Ok(None) => {
+                    Ok(None) | Err(_) => {
                         process.kill().unwrap();
+                        process.wait().unwrap();
                         break;
                     }
-                    Err(_) => break,
                 }
             }
         }
         self.process = None;
+        self.join_log_readers();
+    }
+
+    fn join_log_readers(&mut self) {
+        for reader in self.log_readers.drain(..) {
+            reader.join().expect("kea6 log reader panicked");
+        }
     }
 
     fn config(
@@ -517,6 +717,7 @@ impl Kea6 {
             },
             // Persist the memfile so restart and lease-inspection tests observe
             // Kea's on-disk state; tempdir cleanup still bounds artifacts.
+            "cache-threshold": 0.0,
             "lease-database": {
                 "type": "memfile",
                 "persist": true,
@@ -525,7 +726,7 @@ impl Kea6 {
             },
             // Exercise the hook's advertised Kea multithreading compatibility.
             "multi-threading": {
-                "enable-multi-threading": true,
+                "enable-multi-threading": config.multi_threading,
                 "thread-pool-size": 4,
                 "packet-queue-size": 28
             },
@@ -553,16 +754,23 @@ impl Kea6 {
             ],
             "subnet6": [
                 {
+                    "id": 1,
                     "subnet": "::/0",
                     // Kea owns the rapid-commit state transition; the hook
                     // remains the policy gate by stripping option 14.
                     "rapid-commit": config.kea_rapid_commit_v6,
                     "pools": [{
-                        "pool": "2001:db8::1-2001:db8::ffff"
+                        "pool": config.address_pool
                     }]
                 }
             ],
             "loggers": [
+                {
+                    "name": "kea-dhcp6.bad-packets",
+                    "output_options": [{"output": "stdout"}],
+                    "severity": "DEBUG",
+                    "debuglevel": 99
+                },
                 {
                     "name": "kea-dhcp6",
                     "output_options": [{"output": "stdout"}],
@@ -586,13 +794,44 @@ impl Kea6 {
         if let Some(url) = config.nico_pxe_service_url {
             dhcp6["hooks-libraries"][0]["parameters"]["nico-pxe-service-url"] = json!(url);
         }
-        if let Some(payload) = config.native_vendor_opts_hex {
-            dhcp6["option-data"] = json!([{
-                "code": 17,
-                "csv-format": false,
-                "data": payload,
-                "always-send": true,
-            }]);
+        if !config.option_data.is_empty() {
+            dhcp6["option-data"] = config.option_data.into();
+        }
+        if let Some(pool_id) = config.pool_id {
+            // Zero also means an unset lease pool. Use a real positive ID so
+            // restart assertions can detect a redirected lease retaining it.
+            dhcp6["subnet6"][0]["pools"][0]["pool-id"] = json!(pool_id);
+        }
+        if config.continue_after_store_failure {
+            // Kea 3 normally shuts down after fatal memfile I/O. Exercise its
+            // supported continued-service policy when proving in-process retry.
+            dhcp6["lease-database"]["on-fail"] = json!("serve-retry-continue");
+        }
+        if let Some(port) = config.ddns_port {
+            dhcp6["dhcp-ddns"] = json!({
+                "enable-updates": true, "server-ip": "127.0.0.1", "server-port": port,
+                "sender-ip": "127.0.0.1", "sender-port": 0,
+            });
+            dhcp6["ddns-send-updates"] = json!(true);
+            dhcp6["ddns-qualifying-suffix"] = json!("example.test");
+        }
+        if let Some(updates) = config.pool_ddns_updates {
+            dhcp6["subnet6"][0]["pools"][0]["ddns-send-updates"] = json!(updates);
+        }
+        if config.ddns_replace_name {
+            dhcp6["ddns-replace-client-name"] = json!("always");
+        }
+        if let Some(updates) = config.subnet_ddns_updates {
+            dhcp6["subnet6"][0]["ddns-send-updates"] = json!(updates);
+        }
+        if let Some((duid, address, global)) = config.reserved_address {
+            let reservations = json!([{"duid": duid, "ip-addresses": [address]}]);
+            if global {
+                dhcp6["reservations-global"] = json!(true);
+                dhcp6["reservations"] = reservations;
+            } else {
+                dhcp6["subnet6"][0]["reservations"] = reservations;
+            }
         }
         if config.prefix_pool {
             dhcp6["subnet6"][0]["pd-pools"] = json!([{

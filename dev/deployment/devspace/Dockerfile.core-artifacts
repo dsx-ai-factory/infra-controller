@@ -48,3 +48,5 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
 FROM scratch
 
 COPY --from=builder /artifacts /artifacts
+
+COPY --from=builder /opt/kea/isc-kea-common.deb /artifacts/isc-kea-common.deb

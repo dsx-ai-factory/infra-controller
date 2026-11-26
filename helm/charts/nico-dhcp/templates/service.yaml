@@ -6,6 +6,9 @@ metadata:
   labels:
     {{- include "nico-dhcp.labels" . | nindent 4 }}
 spec:
+  {{- with .Values.service.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
   ipFamilyPolicy: SingleStack
   ipFamilies: [IPv4]
   selector:

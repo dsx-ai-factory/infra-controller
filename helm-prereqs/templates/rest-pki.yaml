@@ -1,0 +1,72 @@
+{{- $rest := .Values.certManager.localCA.rest }}
+{{- if $rest.enabled }}
+{{- if not .Values.certManager.localCA.enabled }}
+{{- fail "certManager.localCA.rest requires certManager.localCA.enabled=true" }}
+{{- end }}
+{{- $certificate := required "certManager.localCA.certificate is required" .Values.certManager.localCA.certificate }}
+{{- $key := required "certManager.localCA.privateKey is required" .Values.certManager.localCA.privateKey }}
+{{- $restNamespace := required "certManager.localCA.rest.namespace is required" $rest.namespace }}
+{{- $temporalNamespace := required "certManager.localCA.rest.temporalNamespace is required" $rest.temporalNamespace }}
+{{- $issuerName := required "certManager.localCA.rest.issuerName is required" $rest.issuerName }}
+{{- $issuerNamespace := required "certManagerNamespace is required" .Values.certManagerNamespace }}
+{{- range list $issuerNamespace $restNamespace | uniq }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ca-signing-secret
+  namespace: {{ . | quote }}
+type: kubernetes.io/tls
+stringData:
+  tls.crt: {{ $certificate | quote }}
+  tls.key: {{ $key | quote }}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $issuerName | quote }}
+spec:
+  ca:
+    secretName: ca-signing-secret
+{{- range $scope := list "interservice" "cloud" "site" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: server-{{ $scope }}-cert
+  namespace: {{ $temporalNamespace | quote }}
+spec:
+  secretName: server-{{ $scope }}-certs
+  duration: 2160h
+  renewBefore: 360h
+  subject:
+    organizations:
+      - NVIDIA
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - {{ $scope }}.server.temporal.local
+    {{- if eq $scope "interservice" }}
+    {{- range $service := list "frontend" "history" "matching" "worker" }}
+    - temporal-{{ $service }}
+    - temporal-{{ $service }}.{{ $temporalNamespace }}
+    - temporal-{{ $service }}.{{ $temporalNamespace }}.svc
+    - temporal-{{ $service }}.{{ $temporalNamespace }}.svc.cluster.local
+    {{- end }}
+    {{- else }}
+    - {{ $scope }}.temporal-frontend
+    - {{ $scope }}.temporal-frontend.{{ $temporalNamespace }}
+    - {{ $scope }}.temporal-frontend.{{ $temporalNamespace }}.svc.cluster.local
+    {{- end }}
+  issuerRef:
+    name: {{ $issuerName | quote }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}
+{{- end }}

@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# OpenRC consumes these service variables.
+# shellcheck disable=SC2034
+
+description="Renew the isolated lab gateway's WAN IPv6 router advertisements"
+command="/usr/local/lib/vflab/renew-ipv6-router.sh"
+supervisor="supervise-daemon"
+retry="TERM/5/KILL/1"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+output_logger="logger -t vflab-ipv6-router"
+error_logger="logger -t vflab-ipv6-router"
+
+depend() {
+  need net
+  use logger
+}
+
+start_pre() {
+  command_args="$(cat /etc/vxlab/wan_if)" || return 1
+  [ -n "$command_args" ]
+}

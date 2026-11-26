@@ -4,6 +4,33 @@ Use this guide to enable NICo's opt-in Dynamic Host Configuration Protocol for I
 
 The Core chart runs Kea DHCPv4 in `nico-dhcp` and, when enabled, Kea DHCPv6 in `nico-dhcp6`. The Deployments have separate pods, selectors, configuration, Services, probes, and rollouts. Both use the same image, hook library, ServiceAccount, client certificate, and application programming interface (API) identity. Both hooks call the same API through gRPC with mutual Transport Layer Security (mTLS). API role-based access control (RBAC) continues to apply.
 
+## Kea Runtime Compatibility
+
+Use the NICo hook and patched Kea runtime built from the same repository
+revision. The build and runtime images use the ISC Kea 3.0 LTS packages pinned in
+[`kea.version`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea.version).
+[`build-kea.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/build-kea.sh)
+verifies the release source checksum and rebuilds the allocation and CSV utility libraries with
+[`kea-lease6-replacement.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-lease6-replacement.patch).
+It preserves the other ISC package libraries and files. The patch provides safe
+lease replacement, existing-lease validation, reclamation refusal, and correct
+memfile pool accounting after restart. The Kea 2
+null-result backport is unnecessary in Kea 3.
+
+The DHCPv6 hook checks `nico_kea_lease6_handoff_contract` at startup. Stock Kea
+and an older NICo patch lack that contract and fail with
+`NICo DHCPv6 requires patched Kea`. The package version alone does not establish
+compatibility. Reinstalling the stock libraries prevents DHCPv6 startup;
+rebuild and redeploy the matching NICo image. DHCPv4 does not require this DHCPv6
+contract. No chart value or lease-file schema change is required by the handoff.
+
+The repository build images, DevSpace, Tilt, and native Ubuntu preparation all
+install the patched package. Native preparation builds against its host
+distribution; do not copy a Debian library into Ubuntu. Manual package-manager
+installation alone does not apply the patch. For DHCP tests, use the repository
+build image or rerun
+[`prepare-ubuntu-host-for-dev.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/devspace/prepare-ubuntu-host-for-dev.sh).
+
 ## Network and Identity Requirements
 
 Before enabling the DHCPv6 workload, review the following requirements:
@@ -120,6 +147,85 @@ Verify the following before expanding the rollout:
 - Inspect the [Site Explorer endpoint report](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md#examples) separately for the IPv4 and IPv6 literals. At first discovery of a new address on a machine-owned BMC interface, `Preingestion State` starts at `Complete`, without starting another preingestion sequence. A refresh preserves an operator-requested retry. `Complete` does not mean the probe succeeded. Require both reports, with `Endpoint Type` identifying a BMC and no `Last Exploration Error`.
 - Check the [machine health report](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine/machine-health-report-show.md) across successive Site Explorer audits. A failing BMC address can raise `BmcExplorationFailure` and prevent allocations even if IPv4 still works. Pause if either endpoint is absent, fails exploration, has unexpected ownership or preingestion, or if machine health changes between audits.
 - For a BMC in a managed DNS domain, query the site resolver for A and AAAA records at the interface's current `<hostname>.<domain>`. Check that its IPv6 address resolves back to that name, not the machine-ID alias. [Reverse DNS](../configuration/dns.md#reverse-dns) explains how assignment, zone alignment, and site forwarding affect these checks. Verify IPv4 Redfish access using the original IPv4 literal. Verify the IPv6 path separately; DNS or stored state does not establish switch, routing, or firmware support.
+
+## Lease Handoff and Refusal
+
+Firmware and the installed OS can use different DUIDs or IAIDs for the same NIC.
+The hook redirects allocation to Core's IA_NA address. Replacing an assigned,
+released, or reclaimed lease at that target requires a matching stored MAC and subnet. A
+foreign or unknown MAC, another subnet, or a declined target is refused.
+Ordinary SOLICIT preserves the old owner; REQUEST or jointly enabled Rapid
+Commit persists the replacement in one native update. A failed update leaves
+the old target available for retry. This handoff does not expire Core's
+assignment for the target address. Reclamation of another expired allocation
+candidate is a separate operation and can succeed before the target write fails.
+Firmware RELEASE ends the local Kea lease without expiring Core's assignment.
+Once Kea considers the released lease expired, the OS can reuse it without
+waiting for a background reclamation pass. Hinted reuse validates the stored subnet
+and MAC before changing the selected expired or released target. It defers retirement
+until the replacement write succeeds, preserving the old row and DNS metadata on
+failure. If the OS never retries, the retained row remains eligible for background
+reclamation and its scoped Core expiry notification.
+Background reclamation retains the normal scoped expiry notification, including
+released firmware leases that the OS has not yet reclaimed. If Core's
+`dhcp_lease_expiry_handling` is enabled, that notification removes the matching
+Core allocation; the next discovery must allocate again. It is disabled by default.
+
+Kea 3 enables multithreading by default; the repository chart explicitly disables
+it. For configurations that enable multithreading, the hook holds MAC and address guards
+through native packet processing; contention is refused with
+`lease_transaction_busy`, allowing the client to retry. Existing-DUID paths
+also validate their persisted lease snapshots and acquire each address guard
+before native reservation cleanup or updates, including queued continuations.
+A different relay MAC cannot use an unhinted firmware DUID/IAID request to
+restore a stale owner after handoff. Unrelated clients can continue while Core
+discovery is pending. Background reclamation retains acquired guards until the
+pass finishes, so a competing client may need to retry. These guards coordinate
+one Kea process, not external lease writers or multiple active servers.
+
+A failed retirement write vetoes native reclamation before counters change and
+before allocation or renewal continues. Kea 3's default memfile failure policy
+stops the server on fatal storage I/O errors. With native or externally mounted
+lease storage, restore storage and restart with the retained lease files before
+retrying. The chart does not mount a volume at `/var/lib/kea`: its lease files
+live in ephemeral container storage and are lost on container or pod replacement.
+Retained-file recovery requires operator-provided storage and a single writer.
+A custom `serve-retry-continue` policy permits in-process retries, but still
+cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
+`stale_lease_identity` and does not extend or replace the new owner's lease.
+The identity check also applies to expired, released, and reclaimed rows.
+A new boot stage must use SOLICIT/REQUEST or Rapid Commit to acquire ownership.
+The receive-side drop sends no reply; a client that only retries RENEW/REBIND
+recovers when it restarts discovery, according to its fallback policy and
+remaining valid lifetime (the chart default is 7200 seconds). Refusal in the
+native existing-lease path can return an IA-scoped failure. Inspect the `reason` label on
+`carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
+
+The IPv6 memfile writer closes and truncates a failed append to its previous
+offset before reopening it. Refused buffered rows cannot be replayed by a later
+append or graceful shutdown. Recovery reopens the existing file without a create/truncate fallback.
+If truncation fails, Kea stops even with `serve-retry-continue`; inspect and
+repair any retained lease file before restart. Reopen failures retain fatal-error handling. This is not a power-loss
+or cross-process transaction guarantee.
+
+The chart does not enable native D2 updates. If a custom configuration enables
+D2, successful replacement uses Kea 3's native chained request to remove the
+old target's DUID/FQDN ownership before adding the new identity. This applies
+when the hostname stays the same, changes, or is generated by Kea after allocation. If the new lease
+does not request DNS updates or its hostname is scrubbed to empty, replacement
+queues only the old owner's removal.
+Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
+acceptance remain subject to Kea's configured queue, transport, and DNS policy.
+The same ordering applies to hinted reuse of the selected expired or released target.
+Reclamation of a different expired allocation candidate remains a separate operation
+and may send that candidate's removal before the selected target is written.
+With D2 enabled, the hook rejects differing shared-network, subnet, or pool
+overrides of `ddns-send-updates`, `ddns-override-no-update`,
+`ddns-override-client-update`, `ddns-replace-client-name`, `ddns-generated-prefix`,
+`ddns-qualifying-suffix`, `hostname-char-set`, and `hostname-char-replacement`.
+Configure these policies globally so post-allocation FQDN processing cannot
+invalidate the handoff's cleanup decision. Identical scoped values are accepted;
+TTL and conflict-resolution settings retain native Kea behavior.
 
 ## Deployment Verification and Metrics
 
@@ -271,7 +377,7 @@ Default: `false`. Creates the IPv6 Deployment, ConfigMap, and data and metrics S
 </ParamField>
 
 <ParamField path="dhcp.v6NtpServers" type="string">
-Default: empty. Comma-separated IPv6 literals, emitted in option 56 as Network Time Protocol (NTP) servers in input order. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
+Default: empty. Comma-separated IPv6 literals, emitted as one Network Time Protocol (NTP) option 56 per server. Kea groups unicast servers before multicast servers, preserving input order within each group. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
 </ParamField>
 
 <ParamField path="dhcp.v6ProvisioningServer" type="string">
@@ -301,6 +407,58 @@ Default: `false`. Adds the IPv6 LoadBalancer Service when DHCPv6 is also enabled
 The four v6 hook values render as `hook-dns-servers-ipv6`, `hook-ntp-servers-ipv6`, `hook-provisioning-server-ipv6`, and `hook-rapid-commit-v6`. Invalid IPv6 literals fail hook initialization. Helm rejects an invalid server identifier, non-Boolean Rapid Commit, and invalid metrics port types or bounds before startup.
 
 DHCPv6 reuses `config.kea.hookParameters.nicoApiUrl`. An empty value derives the API URL from `apiServiceName` and `namespaceOverride`, falling back to the release namespace when `namespaceOverride` is empty. Its metrics listener binds `[::]:<metrics.port>`. DHCPv4 structured configuration preserves the complete address and port from `config.kea.hookParameters.nicoMetricsEndpoint`. Set its port to match `metrics.port` for Service scraping. The v4 `config.enabled` and `config.keaConfigJsonRaw` controls apply only to the v4 ConfigMap. A raw or externally managed v4 configuration must itself match the metrics Service port.
+
+### Lease Timing
+
+`dhcp.v6LeaseTimers` controls the Kea DHCPv6 lease timers. All fields are optional
+integers in seconds, from 1 through 4294967294. Zero, infinite lifetimes,
+quoted numbers, fractional numbers, and unknown fields are rejected by the chart
+schema. An omitted or null map uses the defaults below; omitted fields in a
+partial map also use their defaults. Helm removes explicitly null fields during
+value coalescing, so those fields also fall back to their defaults.
+
+| Field under `dhcp.v6LeaseTimers` | Default | Meaning |
+| --- | --- | --- |
+| `preferredLifetime` | 3600 | Time before the client deprecates an address |
+| `validLifetime` | 7200 | Time before the address lease expires |
+| `renewTimer` | 1800 | T1: time before the client starts renewal |
+| `rebindTimer` | 2880 | T2: time before the client starts rebinding |
+
+When DHCPv6 is enabled, rendering also requires
+`preferredLifetime <= validLifetime` and
+`renewTimer < rebindTimer < validLifetime`. These fields do not change DHCPv4
+lease timing. A changed DHCPv6 configuration triggers its existing pod rollout.
+Clients with an existing lease keep the previously supplied timers until they
+receive an updated lease; changing the chart does not force an immediate renewal.
+Lease expiry also reaches Core through the DHCP hook. When Core's
+`dhcp_lease_expiry_handling` setting in the site TOML
+(`nico-api.siteConfig.nicoApiSiteConfig`) is enabled, expiry can remove the
+matching DHCP-assigned machine-interface address and refresh its DNS records.
+The DHCPv6 hook skips this notification when it cannot identify the client's MAC.
+The same Core setting also controls DHCPv4 expiry; without a MAC, the DHCPv4
+notification identifies the expiring address by IP alone.
+The setting defaults to disabled; these Helm values do not enable it. Losing a
+BMC address can invalidate its recorded topology, and the controller does not
+support all transitions involving an addressless interface. Leave expiry
+handling disabled unless the site's lifecycle supports these transitions;
+shorter leases make powered-off hosts reach expiry sooner.
+
+For an isolated lab that needs to observe real client renewals quickly, use:
+
+```yaml
+nico-dhcp:
+  dhcp:
+    v6LeaseTimers:
+      preferredLifetime: 120
+      validLifetime: 180
+      renewTimer: 30
+      rebindTimer: 60
+```
+
+These short values increase DHCP traffic and are intended for lab validation.
+Confirm RENEW and REPLY packets or server lease-renewal records, and verify the
+updated lifetime in the guest. A successful lease-renew command alone does not
+prove the client sent DHCPv6 traffic.
 
 ### HTTP Boot Options
 
