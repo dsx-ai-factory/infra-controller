@@ -84,7 +84,8 @@ Before starting, obtain the NVLink domain UUID and access to your site's Admin
 web UI over HTTPS. Configure the Admin CLI for the same site. The commands below
 also require `curl` and `jq`. Use the `curl` authentication option that matches
 your deployment's [Admin web UI authentication mode](debug_webui.md#authentication).
-Add any TLS options your deployment requires.
+The example ignores curl's default configuration. Add any required TLS options
+explicitly.
 
 - For `basic` (the default), use `--user admin` as shown below and enter the password
   when `curl` prompts. For a default Helm installation, use the command in the
@@ -95,20 +96,23 @@ Add any TLS options your deployment requires.
   `cookie_file` points to a curl cookie file containing the cookies for an active
   Admin web UI session on that endpoint. For automation, use the
   [client credentials flow](../playbooks/nico_web_oauth2.md#alternative-auth-flow)
-  to obtain a session cookie.
+  to obtain a session cookie. Submit the report in the same script, before the
+  script removes the cookie file on exit.
 - For `none`, omit `--user admin`. Supply any authentication your proxy requires.
 
 Choose the apply mode before submitting. Mode values are case-sensitive:
 
 | Submission mode | Effect |
 |---|---|
-| `Merge` | Adds this source to the domain's aggregate health. Resubmitting the same source replaces its previous report. |
+| `Merge` | Adds a source that contributes to the domain's aggregate health when no `Replace` report is active. |
 | `Replace` | Makes this report the domain's aggregate health, masking all merge-mode reports. Only one replacement report is stored; another `Replace` submission replaces it, even with a different source. |
 
 A `Replace` report with no alerts makes the aggregate report contain no alerts,
 even if other sources report failures. Removing the replacement allows the
 stored merge-mode reports to contribute again. Use `Merge` when adding health
-information alongside other sources.
+information alongside other sources. Resubmitting the same source overwrites its
+previous report even if you change modes. Use a separate source for a temporary
+replacement if you want the existing report to contribute again later.
 
 1. Set the Admin web UI origin, domain UUID, and your report source. Replace the
    example values with your site's values. Include the scheme and any port in
@@ -119,6 +123,10 @@ information alongside other sources.
    domain_id='12345678-1234-5678-90ab-cdef01234567'
    report_source='overrides.sre-team'
    ```
+
+   When available, copy the UUID from the **Domain** column in the target
+   machine's **NVLink GPUs** table. The submission route checks the UUID format
+   and accepts reports for domains missing from inventory.
 
 1. Save a template and prepare your report. This example removes the template's
    sample probes and uses the server's submission time for `observed_at`:
@@ -135,6 +143,7 @@ information alongside other sources.
    alerts. Use the [health report format](#report-format) for their fields.
    Keep `source` set to your reporting system or operator identity. Empty
    `successes` and `alerts` arrays submit a report with no probe results.
+   The server sets `triggered_by` from the authenticated web user when available.
 
 1. Wrap the report with the selected mode. The Admin HTTP endpoint requires
    `mode` and `health_report` at the top level:
@@ -150,7 +159,7 @@ information alongside other sources.
 1. Submit the wrapped report directly to the domain's insertion route:
 
    ```sh
-   curl --fail-with-body --silent --show-error \
+   curl --disable --fail-with-body --silent --show-error \
      --user admin \
      --header 'Content-Type: application/json' \
      --data-binary @nvlink-health-entry.json \
