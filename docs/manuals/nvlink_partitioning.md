@@ -126,7 +126,7 @@ A NICo user can call [`DELETE /v2/org/{org}/nico/nvlink-logical-partition/{nvLin
 
 ### Retrieving NVLink Partition Information for an Instance
 
-A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance's stored `nvLinkInterfaces`. Each record identifies the GPU by `deviceInstance` and its assigned partition by `nvLinkLogicalPartitionId`. The `nvLinkDomainId` field is null until the physical domain is known. A GPU can appear more than once while earlier bindings are `Deleting`. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition's current NMX-C membership.
+A NICo user can call [`GET /v2/org/{org}/nico/instance/{instance-id}`](api:GET/v2/org/:org/nico/instance/:instanceId) to retrieve the Instance's stored `nvLinkInterfaces`. Each record identifies the GPU by `deviceInstance` and its assigned partition by `nvLinkLogicalPartitionId`. The `nvLinkDomainId` field is `null` until the physical domain is known. A GPU can appear more than once while earlier bindings are `Deleting`. That status means REST has marked the binding for removal. To confirm physical removal, check the previous partition's current NMX-C membership.
 
 ### Default NVLink Logical Partition for a VPC
 
@@ -150,7 +150,7 @@ If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and
 
 | Configuration | Behavior |
 | ------------- | -------- |
-| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` or sends an empty list | API auto-populates all GPUs to the VPC's NVLink Logical Partition |
+| VPC has `nvLinkLogicalPartitionId`, Instance creation omits `nvLinkInterfaces` or sends an empty list | NICo assigns all NVLink-capable GPUs to the VPC's NVLink Logical Partition |
 | VPC has `nvLinkLogicalPartitionId`, Instance creation specifies `nvLinkInterfaces` as a non-empty list | NICo assigns only the GPUs in that list. Each entry must reference the VPC’s default partition. |
 | VPC doesn't have `nvLinkLogicalPartitionId` set, Instance creation specifies `nvLinkInterfaces` | Per-GPU NVLink Logical Partition assignments are used |
 | Same `nvLinkLogicalPartitionId` on multiple VPCs | Allowed — no implicit exclusivity |
