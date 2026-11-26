@@ -329,6 +329,10 @@ fn format_markdown_links(md: &str) -> String {
         "[issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/issues/7819",
+        "[issue #7819](https://github.com/dsx-ai-factory/infra-controller/issues/7819)",
+    )
+    .replace(
         "https://host:50051",
         "[https://host:50051](https://host:50051)",
     )

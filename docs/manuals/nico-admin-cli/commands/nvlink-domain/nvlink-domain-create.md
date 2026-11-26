@@ -19,8 +19,8 @@ Create immutable domain membership without configuring hardware.
 
 While a declaration exists, the racks field of its rack group cannot be
 changed and the group cannot be deleted. Site-wide expected-rack-group
-replace-all and erase are also blocked. Delete the declarations with
-nvlink-domain delete before these operations.
+replace-all and erase are also blocked. These restrictions apply until
+the declarations have been removed.
 
 ## OPTIONS
 
@@ -46,7 +46,6 @@ Existing external rack group ID; nonblank, at most 128 characters
 ## Examples
 
 ```sh
-nico-admin-cli nvlink-domain create group-01 --member 0:0:Compute --member 0:0:Switch
 nico-admin-cli nvlink-domain create group-01 --name mini-a --member 0:0:Compute --member 0:0:Switch
 ```
 

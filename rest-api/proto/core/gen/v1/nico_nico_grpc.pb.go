@@ -1186,13 +1186,16 @@ type ForgeClient interface {
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Administrator-managed NVLink domain inventory
-	// Declare immutable membership by rack index, slot index, and component type.
+	// Declare immutable membership and initialize the Domain controller in Created.
 	// This does not configure hardware, resolve positions against RackGroup members,
 	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
 	// Positions already claimed by another domain return ALREADY_EXISTS.
 	CreateNvLinkDomain(ctx context.Context, in *CreateNvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
-	// Delete an unadopted declaration and release its positions; no hardware operations occur.
-	// Controller-owned domains are marked for asynchronous deletion and retain their positions.
+	// Declarations without controller state are removed immediately. In Created or Discovering,
+	// the controller removes the domain and releases its positions on reconciliation.
+	// From Maintenance onward, deletion enters Deleting and positions stay reserved pending teardown.
+	// Until removal, the declaration blocks changes to its group's racks, deletion of its group,
+	// and site-wide ExpectedRackGroup replacement or erase.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
 	DeleteNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetNvLinkDomain(ctx context.Context, in *NvLinkDomainRequest, opts ...grpc.CallOption) (*NvLinkDomain, error)
@@ -8167,13 +8170,16 @@ type ForgeServer interface {
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Administrator-managed NVLink domain inventory
-	// Declare immutable membership by rack index, slot index, and component type.
+	// Declare immutable membership and initialize the Domain controller in Created.
 	// This does not configure hardware, resolve positions against RackGroup members,
 	// or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
 	// Positions already claimed by another domain return ALREADY_EXISTS.
 	CreateNvLinkDomain(context.Context, *CreateNvLinkDomainRequest) (*NvLinkDomain, error)
-	// Delete an unadopted declaration and release its positions; no hardware operations occur.
-	// Controller-owned domains are marked for asynchronous deletion and retain their positions.
+	// Declarations without controller state are removed immediately. In Created or Discovering,
+	// the controller removes the domain and releases its positions on reconciliation.
+	// From Maintenance onward, deletion enters Deleting and positions stay reserved pending teardown.
+	// Until removal, the declaration blocks changes to its group's racks, deletion of its group,
+	// and site-wide ExpectedRackGroup replacement or erase.
 	// Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
 	DeleteNvLinkDomain(context.Context, *NvLinkDomainRequest) (*emptypb.Empty, error)
 	GetNvLinkDomain(context.Context, *NvLinkDomainRequest) (*NvLinkDomain, error)

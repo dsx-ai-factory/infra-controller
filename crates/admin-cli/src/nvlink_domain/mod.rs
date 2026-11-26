@@ -32,12 +32,18 @@ pub(crate) enum Cmd {
         long_about = "Create immutable domain membership without configuring hardware.\n\n\
         While a declaration exists, the racks field of its rack group cannot be changed and the group \
         cannot be deleted. Site-wide expected-rack-group replace-all and erase are also blocked. \
-        Delete the declarations with nvlink-domain delete before these operations."
+        These restrictions apply until the declarations have been removed."
     )]
     Create(Create),
     /// Show one declaration or list declarations in UUID order
     Show(Show),
-    /// Delete a declaration and release its members without changing hardware
+    /// Request deletion of a domain; its positions remain reserved until cleanup
+    ///
+    /// Legacy declarations without controller state are removed immediately. In Created or
+    /// Discovering, the controller removes the domain and releases its positions on reconciliation.
+    /// From Maintenance onward, the domain enters Deleting and retains its positions pending
+    /// hardware teardown (https://github.com/dsx-ai-factory/infra-controller/issues/7819).
+    /// Use nvlink-domain show <ID> to check for removal: NOT_FOUND means the declaration is gone.
     Delete(Delete),
 }
 
@@ -45,11 +51,7 @@ pub(crate) enum Cmd {
 #[command(after_long_help = "\
 EXAMPLES:
 
-Declare a compute tray and an NVSwitch tray in an existing rack group:
-    $ nico-admin-cli nvlink-domain create group-01 \
-    --member 0:0:Compute --member 0:0:Switch
-
-Give the declaration an operator-facing name:
+Declare a named domain with a compute tray and an NVSwitch tray in an existing rack group:
     $ nico-admin-cli nvlink-domain create group-01 --name mini-a \
     --member 0:0:Compute --member 0:0:Switch
 
@@ -158,7 +160,7 @@ impl Run for Show {
 #[command(after_long_help = "\
 EXAMPLES:
 
-Delete a declaration and release its tray membership claims:
+Request deletion of a domain:
     $ nico-admin-cli nvlink-domain delete 12345678-1234-5678-90ab-cdef01234567
 
 ")]
