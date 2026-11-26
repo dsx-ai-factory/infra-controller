@@ -26,6 +26,7 @@ package taskschedule
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -434,6 +435,7 @@ func (d *Dispatcher) submitScopeTasks(
 	scopeTaskIDs := make(map[uuid.UUID]uuid.UUID, len(scopes))
 	allTaskIDs := make([]uuid.UUID, 0, len(scopes))
 	taskIDStrings := make([]string, 0, len(scopes))
+	var submissionErrors []error
 	for _, scope := range scopes {
 		targetSpec, err := scopeToTargetSpec(scope)
 		if err != nil {
@@ -443,6 +445,7 @@ func (d *Dispatcher) submitScopeTasks(
 				Str("scope_id", scope.ID.String()).
 				Str("rack_id", scope.RackID.String()).
 				Msg("task schedule dispatcher: skipping scope — failed to build target spec")
+			submissionErrors = append(submissionErrors, fmt.Errorf("scope %s: %w", scope.ID, err))
 			continue
 		}
 
@@ -476,6 +479,7 @@ func (d *Dispatcher) submitScopeTasks(
 				Str("scope_id", scope.ID.String()).
 				Str("rack_id", scope.RackID.String()).
 				Msg("task schedule dispatcher: skipping scope")
+			submissionErrors = append(submissionErrors, fmt.Errorf("scope %s: %w", scope.ID, err))
 			continue
 		}
 
@@ -501,8 +505,8 @@ func (d *Dispatcher) submitScopeTasks(
 	// schedules that are already consumed at this point.
 	if len(allTaskIDs) == 0 && len(scopes) > 0 {
 		return nil, nil, fmt.Errorf(
-			"all %d scope submissions failed for schedule %s",
-			len(scopes), ts.ID,
+			"all %d scope submissions failed for schedule %s: %w",
+			len(scopes), ts.ID, errors.Join(submissionErrors...),
 		)
 	}
 
@@ -724,7 +728,7 @@ func (d *Dispatcher) FireNow(
 			if !ts.Enabled &&
 				ts.SpecType == dbmodel.SpecTypeOneTime &&
 				ts.NextRunAt == nil {
-				return fmt.Errorf("cannot trigger a one-time schedule that has already fired; create a new one instead") //nolint:lll
+				return ErrScheduleConsumed
 			}
 
 			scopes, err := d.store.ListScopes(ctx, id)
@@ -834,6 +838,15 @@ func scopeToTargetSpec(scope *dbmodel.TaskScheduleScope) (operation.TargetSpec, 
 	}
 }
 
+var (
+	// ErrScheduleConsumed marks a one-time schedule that cannot be triggered again.
+	ErrScheduleConsumed = errors.New("cannot trigger a one-time schedule that has already fired; create a new one instead")
+	// ErrInvalidSpec marks a schedule expression or type rejected by the parser.
+	ErrInvalidSpec = errors.New("invalid schedule spec")
+	// ErrInvalidTimezone marks a timezone rejected when computing a cron time.
+	ErrInvalidTimezone = errors.New("invalid schedule timezone")
+)
+
 // ComputeFirstRunAt returns the first execution time for a new schedule.
 func ComputeFirstRunAt(
 	specType dbmodel.SpecType,
@@ -846,17 +859,17 @@ func ComputeFirstRunAt(
 	case dbmodel.SpecTypeOneTime:
 		t, err := time.Parse(time.RFC3339, spec)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid one-time spec %q: %w", spec, err)
+			return time.Time{}, fmt.Errorf("%w: invalid one-time spec %q: %w", ErrInvalidSpec, spec, err)
 		}
 		return t.UTC(), nil
 
 	case dbmodel.SpecTypeInterval:
 		dur, err := time.ParseDuration(spec)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid interval spec %q: %w", spec, err)
+			return time.Time{}, fmt.Errorf("%w: invalid interval spec %q: %w", ErrInvalidSpec, spec, err)
 		}
 		if dur <= 0 {
-			return time.Time{}, fmt.Errorf("interval spec %q must be a positive duration", spec)
+			return time.Time{}, fmt.Errorf("%w: interval spec %q must be a positive duration", ErrInvalidSpec, spec)
 		}
 		return now.Add(dur), nil
 
@@ -864,7 +877,7 @@ func ComputeFirstRunAt(
 		return nextCronTime(spec, timezone, now)
 
 	default:
-		return time.Time{}, fmt.Errorf("unknown spec_type %q", specType)
+		return time.Time{}, fmt.Errorf("%w: unknown spec_type %q", ErrInvalidSpec, specType)
 	}
 }
 
@@ -873,18 +886,18 @@ func ComputeFirstRunAt(
 func nextCronTime(spec string, tz string, after time.Time) (time.Time, error) {
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tz, err)
+		return time.Time{}, fmt.Errorf("%w: invalid timezone %q: %w", ErrInvalidTimezone, tz, err)
 	}
 
 	// ParseStandard expects a 5-field cron expression (minute hour dom month dow).
 	schedule, err := cron.ParseStandard(spec)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid cron spec %q: %w", spec, err)
+		return time.Time{}, fmt.Errorf("%w: invalid cron spec %q: %w", ErrInvalidSpec, spec, err)
 	}
 
 	next := schedule.Next(after.In(loc))
 	if next.IsZero() {
-		return time.Time{}, fmt.Errorf("invalid cron spec %q: no future run time exists", spec)
+		return time.Time{}, fmt.Errorf("%w: invalid cron spec %q: no future run time exists", ErrInvalidSpec, spec)
 	}
 
 	return next.UTC(), nil

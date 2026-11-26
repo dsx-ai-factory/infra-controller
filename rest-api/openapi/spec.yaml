@@ -14005,6 +14005,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
         '503':
@@ -14628,6 +14631,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14758,6 +14764,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14811,6 +14820,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14864,6 +14876,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14923,6 +14938,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14978,6 +14996,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -16580,6 +16601,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
         '503':
@@ -16630,6 +16654,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
         '503':
@@ -16688,6 +16715,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
         '503':
@@ -17290,6 +17320,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -17417,7 +17450,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
-          description: The identifier matches more than one component.
+          description: The identifier matches more than one component, or task preconditions prevent every selected rack from accepting the request, including active task conflicts.
           $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
@@ -17478,6 +17511,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Precondition failed, including active task conflicts that prevent every selected rack from accepting the request.
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -17535,7 +17571,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
-          description: The identifier matches more than one component.
+          description: The identifier matches more than one component, or task preconditions prevent every selected rack from accepting the request, including active task conflicts.
           $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'

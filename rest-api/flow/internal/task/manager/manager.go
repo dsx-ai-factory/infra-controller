@@ -46,6 +46,9 @@ var (
 	// conflicting task on the target rack.
 	ErrRackConflict = errors.New("rack conflict")
 
+	// ErrQueueFull marks a submission rejected by the per-rack waiting limit.
+	ErrQueueFull = errors.New("rack waiting queue is full")
+
 	// ErrTaskNotCancellable marks a cancellation rejected because the task has
 	// already reached a terminal state other than Terminated.
 	ErrTaskNotCancellable = errors.New("task cannot be cancelled")
@@ -262,6 +265,7 @@ func (m *ManagerImpl) SubmitTask(
 
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
+	var submissionErrors []error
 	for _, targetRack := range rackMap {
 		taskID, err := create(ctx, req, targetRack)
 		if err != nil {
@@ -280,11 +284,15 @@ func (m *ManagerImpl) SubmitTask(
 					targetRack.Info.ID, err,
 				)
 			}
+			submissionErrors = append(submissionErrors, fmt.Errorf("rack %s: %w", targetRack.Info.ID, err))
 			continue
 		}
 		taskIDs = append(taskIDs, taskID)
 	}
 
+	if len(taskIDs) == 0 && len(submissionErrors) > 0 {
+		return nil, errors.Join(submissionErrors...)
+	}
 	return taskIDs, nil
 }
 
@@ -811,8 +819,8 @@ func (m *ManagerImpl) lockRackAndResolveConflict(
 		// Preserve a bounded per-rack queue; otherwise a stuck rack could
 		// accumulate unbounded waiting work.
 		return fmt.Errorf(
-			"rack %s waiting queue is full (%d/%d tasks)",
-			targetRack.Info.ID, count, m.maxWaitingPerRack,
+			"rack %s waiting queue is full (%d/%d tasks): %w",
+			targetRack.Info.ID, count, m.maxWaitingPerRack, ErrQueueFull,
 		)
 	}
 
