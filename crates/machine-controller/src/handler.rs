@@ -15201,7 +15201,8 @@ async fn set_host_boot_order(
             // lifecycle's inspection, return to the shared BIOS/job stages
             // before attempting the order write.
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, mh_snapshot, Some(&boot_interface))
+                    .await?;
 
             if !is_bios_setup {
                 // The HTTP-boot device drifted after the owning lifecycle's
@@ -15333,7 +15334,8 @@ async fn set_host_boot_order(
             };
 
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, mh_snapshot, Some(&boot_interface))
+                    .await?;
 
             if is_bios_setup {
                 tracing::info!(
@@ -15640,7 +15642,8 @@ async fn set_host_boot_order(
             // every platform and return to the shared job-aware repair before
             // declaring the overall boot configuration complete.
             let is_bios_setup =
-                platform_settings_in_effect(ctx.services, bmc, Some(&boot_interface)).await?;
+                platform_settings_in_effect(ctx.services, bmc, mh_snapshot, Some(&boot_interface))
+                    .await?;
 
             if !is_bios_setup {
                 tracing::warn!(
