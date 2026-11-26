@@ -2,33 +2,54 @@
 
 For managing client secrets and redirect URIs registered in the Entra portal.
 
-# NICo Web
+## NICo Web
 
-The oauth2 in nico-web has defaults for most settings:
+Use the [Admin web UI OAuth2 configuration](../operations/debug_webui.md#oauth2-entra-configuration)
+to configure the site. Register `https://<ADMIN_WEB_HOST>/admin/auth-callback`
+as a web redirect URI for the site's Microsoft Entra application.
 
-|ENV|DESCRIPTION|
-|----|----|
-|NICO_WEB_ALLOWED_ACCESS_GROUPS|The list of DL groups allowed to access nico-web|
-|NICO_WEB_ALLOWED_ACCESS_GROUPS_ID_LIST|The list of UUIDs in Azure that correspond to the DL groups allowed to access nico-web|
-|NICO_WEB_OAUTH2_CLIENT_ID|The app ID of nico-web in Azure/Entra|
-|NICO_WEB_OAUTH2_TOKEN_ENDPOINT|  The URI for our tenant ID |
-|NICO_WEB_OAUTH2_CLIENT_SECRET|A secret used to talk to MS entra/graph.|
-|NICO_WEB_PRIVATE_COOKIEJAR_KEY|A secret used for encrypting the cookie values used for sessions.|
-|NICO_WEB_HOSTNAME|A hostname specific for each site that's needed for redirects.  The value must match what's set in the Azure/Entra portal for the URL of the nico-api web interface|
+## Alternative Auth Flow
 
-# Alternative Auth Flow
+Use the OAuth2 client credentials flow to obtain an Admin web UI session for
+automation. The session expires after 10 minutes.
 
-Some teams use gitlab automation to pull data from the Web UI.
+Create a dedicated client secret for this team or automation on the site's
+configured Microsoft Entra application. Have your secret manager provide it in
+a header file readable only by the account running `curl`. The file must contain
+one line in the form
+`client_secret: <CLIENT_SECRET>`. Set `client_secret_header_file` to the path to
+this file and `admin_url` to your Admin web UI origin over HTTPS, without a
+trailing slash or `/admin` path.
 
-To provide access using the alternative auth flow, perform the following steps:
-- Create a new secret for the team/process
-- Securely provide the team the new secret
+In your script, create a private directory for the session cookie. Read the
+header from the file and save the cookie returned by the callback without
+following the redirect. Reuse the cookie file for requests to the same origin.
+The commands require curl 7.76.0 or later for `--fail-with-body` and ignore
+curl's default configuration. Add any required TLS options explicitly.
 
-The automated process will then be able to fetch an encrypted cookie that will grant access for 10 minutes.
+```sh
+umask 077
+cookie_dir=$(mktemp -d) || exit 1
+cookie_file="$cookie_dir/session.cookies"
+response_file="$cookie_dir/managed-host.json"
+trap 'rm -f -- "$cookie_file" "$response_file"; rmdir -- "$cookie_dir"' EXIT
 
-Example:
+curl --disable --fail-with-body --silent --show-error \
+  --header "@$client_secret_header_file" \
+  --cookie-jar "$cookie_file" \
+  "$admin_url/admin/auth-callback" >&2 || exit 1
 
+http_status=$(curl --disable --silent --show-error \
+  --cookie "$cookie_file" \
+  --output "$response_file" \
+  --write-out '%{http_code}' \
+  "$admin_url/admin/managed-host.json") || exit 1
+printf 'HTTP %s\n' "$http_status" >&2
+[ "$http_status" = 200 ] || exit 1
+cat "$response_file"
 ```
-curl --cookie-jar /tmp/cjar --cookie /tmp/cjar --header 'client_secret: ...' 'https://<the_web_ui_address>/admin/auth-callback'
-curl --cookie /tmp/cjar 'https://<the_web_ui_address>/admin/managed-host.json'
-```
+
+The script sends callback diagnostics and the GET status to stderr. It writes
+the GET response body to stdout only on HTTP 200. If the session expires, obtain
+a new cookie before retrying. The script removes the temporary files and
+directory on exit.
