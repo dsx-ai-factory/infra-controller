@@ -12,6 +12,7 @@ spec:
   ports:
     {{- range .Values.service.ports }}
     - port: {{ .port }}
+      targetPort: {{ .targetPort | default $.Values.service.targetPort | default .port }}
       name: {{ .name }}
       protocol: {{ .protocol }}
     {{- end }}

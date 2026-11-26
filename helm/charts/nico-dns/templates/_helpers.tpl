@@ -86,3 +86,28 @@ issuerRef:
   group: {{ .global.certificate.issuerRef.group }}
 secretName: {{ .name }}
 {{- end }}
+
+{{/*
+Resolve the pod listener port for a named Service entry using the same
+precedence as the Service template: the per-entry ports[].targetPort
+wins, then the chart-level service.targetPort, then the entry's own
+port, then 53. Keeps the StatefulSet's named container ports describing
+where nico-dns actually binds when entries are overridden individually.
+Usage: include "nico-dns.listenerPort" (dict "name" "udp" "context" $)
+*/}}
+{{- define "nico-dns.listenerPort" -}}
+{{- $entry := dict -}}
+{{- range .context.Values.service.ports -}}
+{{- if eq (default "" .name) $.name -}}
+{{- $entry = . -}}
+{{- end -}}
+{{- end -}}
+{{- $target := $entry.targetPort -}}
+{{- if not $target -}}
+{{- $target = .context.Values.service.targetPort -}}
+{{- end -}}
+{{- if not $target -}}
+{{- $target = $entry.port -}}
+{{- end -}}
+{{- default 53 $target -}}
+{{- end -}}

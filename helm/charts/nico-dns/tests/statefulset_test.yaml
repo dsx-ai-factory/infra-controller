@@ -36,3 +36,49 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '(?m)^\s*exec /opt/carbide/carbide-dns .* --listen="0\.0\.0\.0:53"\s*$'
+
+  - it: moves the container ports with the service targetPort override
+    set:
+      service:
+        targetPort: 5353
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: udp
+            containerPort: 5353
+            protocol: UDP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: tcp
+            containerPort: 5353
+            protocol: TCP
+
+  - it: per-entry targetPort overrides move only that container port
+    # The Service template resolves each entry's targetPort independently;
+    # the named container ports must follow the same precedence so they keep
+    # describing the pod.
+    set:
+      service:
+        ports:
+          - port: 53
+            name: tcp
+            protocol: TCP
+          - port: 53
+            name: udp
+            protocol: UDP
+            targetPort: 5353
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: udp
+            containerPort: 5353
+            protocol: UDP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: tcp
+            containerPort: 53
+            protocol: TCP

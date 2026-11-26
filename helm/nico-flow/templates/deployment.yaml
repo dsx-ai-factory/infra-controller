@@ -35,6 +35,14 @@ spec:
         - name: flow
           image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           args:
             - "--metrics-port={{ .Values.ports.metrics }}"
           env:
@@ -50,7 +58,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.flow.credentialsSecret }}
-                  key: username
+                  key: {{ .Values.database.flow.usernameKey | default "username" | quote }}
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

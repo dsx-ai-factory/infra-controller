@@ -38,6 +38,7 @@ tests:
           value: Local
       - equal:
           path: spec.ipFamilyPolicy
+
           value: SingleStack
       - equal:
           path: spec.ipFamilies
@@ -63,3 +64,15 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'nico-ssh-console-rs: externalService.port must be a port number, got "70000"'
+
+  - it: routes the external port to an unprivileged service.port listener
+    set:
+      externalService:
+        enabled: true
+        port: 22
+      service:
+        port: 2222
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 22, targetPort: 2222, name: ssh, protocol: TCP }
