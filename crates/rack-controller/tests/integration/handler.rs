@@ -73,6 +73,8 @@ use tonic::Request;
 use crate::env::{TestEnv, TestEnvOverrides, create_test_env_with_overrides, get_config, new_host};
 use crate::fixtures::switch::expected_switch_configs;
 
+mod fabric_observation;
+
 #[derive(Debug)]
 struct StaticFirmwareObjectFetcher {
     response: Mutex<Result<String, String>>,

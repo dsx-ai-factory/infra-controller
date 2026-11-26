@@ -745,6 +745,57 @@ pub async fn update(switch: &Switch, txn: &mut PgConnection) -> Result<Switch, D
     Ok(switch.clone())
 }
 
+/// Locks the active switches in a rack in ID order until the transaction ends.
+///
+/// Returns the locked IDs so callers can revalidate the complete observed set
+/// and pending lifecycle requests before writing rack-scoped metadata.
+pub async fn lock_ids_for_rack(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+) -> DatabaseResult<Vec<SwitchId>> {
+    sqlx::query_scalar(
+        "SELECT id FROM switches WHERE rack_id = $1 AND deleted IS NULL ORDER BY id FOR UPDATE",
+    )
+    .bind(rack_id)
+    .fetch_all(txn)
+    .await
+    .map_err(|error| DatabaseError::new("switch::lock_ids_for_rack", error))
+}
+
+/// Publishes a primary observation only for the exact observed rack members.
+///
+/// Returns `false` when membership changed or a member is no longer active.
+/// The caller must roll back its transaction on `false`. Members arriving after
+/// this statement's snapshot are untouched and require another observation.
+pub async fn set_primary_switch_for_observed_ids(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+    observed_ids: &[SwitchId],
+    primary_id: &SwitchId,
+) -> DatabaseResult<bool> {
+    if !observed_ids.contains(primary_id) {
+        return Err(DatabaseError::InvalidArgument(
+            "observed primary is outside the observed switch set".to_string(),
+        ));
+    }
+    let updated: Vec<SwitchId> = sqlx::query_scalar(
+        "UPDATE switches SET is_primary = (id = $3)
+         WHERE rack_id = $1 AND deleted IS NULL AND id = ANY($2)
+           AND NOT EXISTS (
+             SELECT 1 FROM switches current
+             WHERE current.rack_id = $1 AND current.deleted IS NULL
+               AND NOT (current.id = ANY($2))
+           ) RETURNING id",
+    )
+    .bind(rack_id)
+    .bind(observed_ids)
+    .bind(primary_id)
+    .fetch_all(txn)
+    .await
+    .map_err(|error| DatabaseError::new("switch::set_primary_switch_for_observed_ids", error))?;
+    Ok(updated.len() == observed_ids.len())
+}
+
 /// Resolve SwitchIds to BMC IPs via the FK path:
 ///   switches.bmc_mac_address -> expected_switches.bmc_mac_address
 ///   -> machine_interfaces -> machine_interface_addresses (underlay) -> IP
@@ -2411,6 +2462,61 @@ mod tests {
         assert_eq!(batch.len(), 2);
 
         txn.rollback().await?;
+        Ok(())
+    }
+    #[crate::sqlx_test]
+    async fn observed_primary_rejects_new_rack_member_after_lock(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rack = RackId::new("observed-membership");
+        let mut setup = pool.txn_begin().await?;
+        crate::rack::create(setup.as_mut(), &rack, None, &RackConfig::default(), None).await?;
+        let observed = create_seeded_discovered(setup.as_mut(), 1, "Observed").await?;
+        sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
+            .bind(&rack)
+            .bind(observed.id)
+            .execute(setup.as_mut())
+            .await?;
+        setup.commit().await?;
+
+        let mut observation = pool.txn_begin().await?;
+        assert!(crate::rack::lock_for_update(observation.as_mut(), &rack).await?);
+        let ids = lock_ids_for_rack(observation.as_mut(), &rack).await?;
+        assert_eq!(ids, vec![observed.id]);
+        // No rack FK or shared membership lock prevents this concurrent arrival.
+        let newcomer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut arrival = pool.txn_begin().await?;
+            let newcomer = create_seeded_discovered(arrival.as_mut(), 2, "Newcomer").await?;
+            sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
+                .bind(&rack)
+                .bind(newcomer.id)
+                .execute(arrival.as_mut())
+                .await?;
+            arrival.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(newcomer)
+        })
+        .await??;
+        update_fabric_manager_status(
+            observation.as_mut(),
+            observed.id,
+            Some(&FabricManagerStatus {
+                fabric_manager_state: FabricManagerState::Ok,
+                addition_info: Some(CONTROL_PLANE_STATE_CONFIGURED.to_string()),
+                reason: None,
+                error_message: None,
+            }),
+        )
+        .await?;
+        assert!(
+            !set_primary_switch_for_observed_ids(observation.as_mut(), &rack, &ids, &observed.id)
+                .await?
+        );
+        observation.rollback().await?;
+        for id in [observed.id, newcomer.id] {
+            let switch = find_by_id(&pool, &id).await?.unwrap();
+            assert!(!switch.is_primary);
+            assert!(switch.fabric_manager_status.is_none());
+        }
         Ok(())
     }
 }

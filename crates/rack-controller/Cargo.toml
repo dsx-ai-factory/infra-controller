@@ -51,6 +51,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 carbide-api-model = { path = "../api-model", features = ["test-support"] }
@@ -63,7 +64,6 @@ carbide-test-harness = { path = "../test-harness" }
 carbide-test-support = { path = "../test-support" }
 component-manager = { path = "../component-manager", features = ["test-support"] }
 librms = { workspace = true }
-tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 url = { workspace = true }

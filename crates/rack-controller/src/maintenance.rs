@@ -33,8 +33,9 @@ use carbide_rack::firmware_update::{
 use carbide_rack::rms_node_type::switch_node_identity_for_profile;
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::fabric_manager::{
-    observed_primary_switch, persist_fabric_manager_statuses, persist_primary_switch,
-    switch_endpoint_from_firmware_device, validate_switch_inventory_for_nmx_cluster,
+    load_nmx_fabric_inventory, observed_primary_switch, persist_fabric_manager_statuses,
+    persist_primary_switch, switch_endpoint_from_firmware_device,
+    validate_switch_inventory_for_nmx_cluster,
 };
 use carbide_rack_controller::validating::strip_rv_labels;
 use carbide_secrets::credentials::{CredentialKey, CredentialManager, Credentials};
@@ -72,6 +73,8 @@ use state_controller::state_handler::{
 };
 
 use crate as carbide_rack_controller;
+#[cfg(test)]
+use crate::fabric_manager::validate_complete_nmx_fabric_inventory;
 
 /// Strips all `rv.*` metadata labels from every machine in the rack.
 ///
@@ -1791,66 +1794,6 @@ fn skip_configure_nmx_cluster_outcome(
     StateHandlerOutcome::transition(RackState::Maintenance {
         maintenance_state: next,
     })
-}
-
-fn validate_complete_nmx_fabric_inventory(
-    switch_inventory: &RackSwitchFirmwareInventory,
-) -> Result<(), String> {
-    let resolved_switch_ids = switch_inventory
-        .switches
-        .iter()
-        .map(|switch| switch.node_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-
-    let missing_switch_ids = switch_inventory
-        .switch_ids
-        .iter()
-        .filter_map(|switch_id| {
-            let switch_id = switch_id.to_string();
-            (!resolved_switch_ids.contains(switch_id.as_str())).then_some(switch_id)
-        })
-        .collect::<Vec<_>>();
-
-    if missing_switch_ids.is_empty() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "missing endpoint info for switches: {}",
-        missing_switch_ids.join(", ")
-    ))
-}
-
-/// Loads the complete rack switch set required by the RMS V2 fabric contract.
-///
-/// Endpoint resolution must return every rack switch so V2 cannot reconcile a
-/// partial fabric.
-async fn load_nmx_fabric_inventory(
-    rack_id: &RackId,
-    operation: &str,
-    db_pool: &sqlx::PgPool,
-    credential_manager: &dyn CredentialManager,
-) -> Result<RackSwitchFirmwareInventory, StateHandlerError> {
-    let switch_inventory =
-        load_rack_switch_firmware_inventory(db_pool, credential_manager, rack_id)
-            .await
-            .map_err(|error| {
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "failed to load rack switch firmware inventory for {}: {}",
-                    operation,
-                    error
-                ))
-            })?;
-
-    validate_complete_nmx_fabric_inventory(&switch_inventory).map_err(|error| {
-        StateHandlerError::GenericError(eyre::eyre!(
-            "failed to load complete rack switch inventory for {}: {}",
-            operation,
-            error
-        ))
-    })?;
-
-    Ok(switch_inventory)
 }
 
 enum CertificateEndpointLoadError {

@@ -31,8 +31,16 @@ struct BlockedPowerStateCall {
     resume: oneshot::Receiver<()>,
 }
 
+/// Pauses a simulated fabric status read to exercise lifecycle races.
+#[derive(Debug)]
+struct BlockedFabricStatusRead {
+    entered: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
+    blocked_fabric_status_read: Arc<Mutex<Option<BlockedFabricStatusRead>>>,
     blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
@@ -106,6 +114,7 @@ pub struct RmsSim {
 impl Default for RmsSim {
     fn default() -> Self {
         Self {
+            blocked_fabric_status_read: Arc::new(Mutex::new(None)),
             blocked_power_state_call: Arc::new(Mutex::new(None)),
             blocked_power_state_read: Arc::new(Mutex::new(None)),
             batch_get_node_device_info_delay: Arc::new(Mutex::new(Duration::ZERO)),
@@ -177,6 +186,7 @@ impl RmsSim {
 
     fn build_mock_client(&self) -> MockRmsClient {
         MockRmsClient {
+            blocked_fabric_status_read: self.blocked_fabric_status_read.clone(),
             blocked_power_state_call: self.blocked_power_state_call.clone(),
             blocked_power_state_read: self.blocked_power_state_read.clone(),
             batch_get_node_device_info_delay: self.batch_get_node_device_info_delay.clone(),
@@ -527,6 +537,17 @@ impl RmsSim {
             .push_back(response);
     }
 
+    /// Pauses the next fabric status read after recording it until resumed.
+    pub async fn block_next_get_scale_up_fabric_status(
+        &self,
+        entered: oneshot::Sender<()>,
+        resume: oneshot::Receiver<()>,
+    ) {
+        let mut blocked = self.blocked_fabric_status_read.lock().await;
+        assert!(blocked.is_none(), "a fabric status read is already paused");
+        *blocked = Some(BlockedFabricStatusRead { entered, resume });
+    }
+
     /// Returns recorded scale-up fabric status requests in submission order.
     pub async fn submitted_get_scale_up_fabric_status_requests(
         &self,
@@ -656,6 +677,7 @@ impl RmsSim {
 
 #[derive(Debug, Clone)]
 pub struct MockRmsClient {
+    blocked_fabric_status_read: Arc<Mutex<Option<BlockedFabricStatusRead>>>,
     blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
@@ -847,6 +869,12 @@ impl RmsApi for MockRmsClient {
             .lock()
             .await
             .push(cmd);
+
+        let blocked = self.blocked_fabric_status_read.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
 
         self.queued_get_scale_up_fabric_status_responses
             .lock()
