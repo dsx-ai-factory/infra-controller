@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+{{- if and .Values.siteIdentityFromRegistrationSecret .Values.bootstrap.enabled }}
+{{- fail "siteIdentityFromRegistrationSecret requires bootstrap.enabled=false" }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -50,6 +53,15 @@ spec:
                   fieldPath: metadata.name
             - name: BOOTSTRAP_SECRET_NAME
               value: {{ .Values.secrets.siteRegistration | quote }}
+            {{- if .Values.siteIdentityFromRegistrationSecret }}
+            {{- range list "CLUSTER_ID" "TEMPORAL_SUBSCRIBE_NAMESPACE" }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.siteRegistration }}
+                  key: site-uuid
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - name: site-registration
               mountPath: /etc/sitereg

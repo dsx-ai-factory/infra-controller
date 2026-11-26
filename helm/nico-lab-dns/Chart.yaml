@@ -1,0 +1,5 @@
+apiVersion: v2
+name: nico-lab-dns
+description: IPv6 DNS access and provisioning aliases for the isolated native lab
+type: application
+version: 0.1.0

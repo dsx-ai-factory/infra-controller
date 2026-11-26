@@ -1,14 +1,18 @@
 {{/*
 Generate an ed25519 SSH host private key (PKCS8 PEM format).
-Reuses the existing secret on helm upgrade (idempotent).
+An explicitly supplied key wins; otherwise reuses the existing secret on upgrade.
 No Job required — avoids network dependency for apk.
 */}}
 {{- define "prereqs.sshPrivateKey" -}}
+{{- if .Values.sshHostKey.privateKey -}}
+  {{- .Values.sshHostKey.privateKey -}}
+{{- else -}}
 {{- $existing := (lookup "v1" "Secret" .Values.namespace "ssh-host-key") -}}
 {{- if $existing -}}
   {{- index $existing.data "ssh_host_ed25519_key" | b64dec -}}
 {{- else -}}
   {{- genPrivateKey "ed25519" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

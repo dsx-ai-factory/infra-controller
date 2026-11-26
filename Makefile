@@ -129,7 +129,7 @@ DEV_TARGET ?= api
 DEV_IMAGE ?= nico-dev-$(DEV_TARGET):$(IMAGE_TAG)
 DEV_BUILD_CONTAINER ?= nico-dev-build:$(IMAGE_TAG)
 DEV_RUNTIME_CONTAINER ?= nico-dev-runtime:$(IMAGE_TAG)
-DEV_TARGETS := api bmc-proxy dhcp machine-a-tron ssh-console mat-protocol-gateway nico-postgres-exporter
+DEV_TARGETS := api pxe bmc-proxy dhcp machine-a-tron ssh-console mat-protocol-gateway nico-postgres-exporter bmc-target scout-package scout-builder
 
 .PHONY: images-dev
 images-dev: ## Build one local native development image (DEV_TARGET=api; does not push or deploy)
@@ -324,7 +324,7 @@ images-bfb-arm: ## Build the aarch64 DPU BFB boot-artifact image in a native ARM
 	@arch="$$(docker info --format '{{.Architecture}}')"; \
 		case "$$arch" in arm64|aarch64) ;; *) echo "images-bfb-arm requires an ARM64 Docker host; got $$arch" >&2; exit 1 ;; esac
 	$(MAKE) images-registry
-	docker buildx build --platform linux/arm64 --builder default --load -t carbide-pxe-builder -f dev/docker/Dockerfile.pxe-build-container dev/docker
+	docker buildx build --platform linux/arm64 --builder default --load --build-arg KEA_VERSION=$(KEA_VERSION) -t carbide-pxe-builder -f dev/docker/Dockerfile.pxe-build-container .
 	docker buildx build --platform linux/arm64 --builder default --load -t carbide-pxe-builder-aarch64 -f dev/docker/Dockerfile.pxe-build-container-aarch64 dev/docker
 	# carbide-pxe.forge is deployment-local, so the portable native build masks it with an empty regular file.
 	@set -e; \

@@ -83,6 +83,9 @@ tests:
           pattern: '"server-id":\s*\{\s*"type": "LL",\s*"htype": 1,\s*"identifier": "020000000001",\s*"persist": false\s*\}'
       - matchRegex:
           path: data["kea_config6.json"]
+          pattern: '"library": "/usr/lib/kea/hooks/libdhcp\.so"'
+      - matchRegex:
+          path: data["kea_config6.json"]
           pattern: '"rapid-commit": true'
       - matchRegex:
           path: data["kea_config6.json"]
@@ -96,6 +99,7 @@ tests:
       dhcp.v6ServerIdentifier: "020000000001"
       dhcp.v6RapidCommit: true
       dhcp.v6DnsServers: "2001:db8::53"
+      dhcp.v6ProvisioningServer: "2001:db8::80"
       dhcp.v6NtpServers: "2001:db8::123"
       config.kea.declineProbationPeriod: 0
       config.kea.hookParameters.nicoMetricsEndpoint: "0.0.0.0:18089"
@@ -113,6 +117,9 @@ tests:
       - matchRegex:
           path: data["kea_config6.json"]
           pattern: '"hook-dns-servers-ipv6": "2001:db8::53"'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"hook-provisioning-server-ipv6": "2001:db8::80"'
       - matchRegex:
           path: data["kea_config6.json"]
           pattern: '"hook-ntp-servers-ipv6": "2001:db8::123"'

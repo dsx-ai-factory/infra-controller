@@ -110,6 +110,15 @@ impl DHCPv6Factory {
         vec![0, 4, 0, 1, 2, 3]
     }
 
+    /// Build a SOLICIT that requests an allocator candidate explicitly.
+    pub(crate) fn solicit_with_address_hint(idx: u8, address: Ipv6Addr, duid: Vec<u8>) -> Vec<u8> {
+        let mut message =
+            Self::client_message_with_address(idx, MessageType::Solicit, address, None);
+        message.opts_mut().remove(OptionCode::ClientId);
+        message.opts_mut().insert(DhcpOption::ClientId(duid));
+        Self::relay_wrap(message, true)
+    }
+
     /// Build a stateful SOLICIT with IA_NA.
     pub(crate) fn solicit(idx: u8) -> Vec<u8> {
         Self::relay_wrap(Self::stateful_solicit_message(idx), true)
@@ -343,6 +352,21 @@ impl DHCPv6Factory {
         )
     }
 
+    /// Build a REQUEST that passes discovery but fails Kea's mandatory Server-ID check.
+    pub(crate) fn request_without_server_id(idx: u8) -> Vec<u8> {
+        Self::relay_wrap(
+            Self::client_message(
+                idx,
+                MessageType::Request,
+                Self::duid_ll(idx),
+                None,
+                true,
+                false,
+            ),
+            true,
+        )
+    }
+
     /// Build a REQUEST without relay option 79.
     pub(crate) fn request_without_relay_option79(
         idx: u8,
@@ -374,6 +398,68 @@ impl DHCPv6Factory {
             ),
             relay_option79,
         )
+    }
+
+    /// Change only IAID in an existing single-relay packet, preserving MAC and DUID.
+    pub(crate) fn with_iaid(packet: &[u8], iaid: u32) -> Vec<u8> {
+        let payload = Self::relay_msg_payload(packet).expect("relay packet");
+        let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
+        let Some(DhcpOption::IANA(ia)) = message.opts_mut().get_mut(OptionCode::IANA) else {
+            panic!("IA_NA required");
+        };
+        ia.id = iaid;
+        Self::relay_wrap(message, true)
+    }
+
+    /// Replace a packet's IA shape to test rejection before cached/native processing.
+    pub(crate) fn with_unsupported_ia_shape(packet: &[u8], duplicate_na: bool) -> Vec<u8> {
+        let payload = Self::relay_msg_payload(packet).expect("relay packet");
+        let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
+        if duplicate_na {
+            message.opts_mut().insert(DhcpOption::IANA(IANA {
+                id: 0x10000,
+                t1: 0,
+                t2: 0,
+                opts: Default::default(),
+            }));
+        } else {
+            message.opts_mut().remove(OptionCode::IANA);
+            Self::add_ia_pd(&mut message, 1);
+        }
+        Self::relay_wrap(message, true)
+    }
+
+    /// Set the client's native D2 registration name for a lease exchange.
+    pub(crate) fn with_fqdn(packet: &[u8], hostname: &str) -> Vec<u8> {
+        let payload = Self::relay_msg_payload(packet).expect("relay packet");
+        let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
+        let mut fqdn = vec![1]; // S: server performs forward and reverse updates.
+        if !hostname.is_empty() {
+            for label in hostname.trim_end_matches('.').split('.') {
+                fqdn.push(u8::try_from(label.len()).unwrap());
+                fqdn.extend_from_slice(label.as_bytes());
+            }
+            fqdn.push(0);
+        }
+        message.opts_mut().remove(OptionCode::ClientFqdn);
+        message
+            .opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::ClientFqdn,
+                fqdn,
+            )));
+        Self::relay_wrap(message, true)
+    }
+
+    /// Build a REQUEST with IA_NA and no IAADDR allocation hint.
+    pub(crate) fn request_without_address_hint(
+        idx: u8,
+        server_id: Vec<u8>,
+        duid: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut message = Self::client_message(idx, MessageType::Request, duid, None, true, false);
+        message.opts_mut().insert(DhcpOption::ServerId(server_id));
+        Self::relay_wrap(message, true)
     }
 
     /// Build a REQUEST carrying vendor-class option 16.
