@@ -798,6 +798,275 @@ async fn test_preingestion_uefi_activation_powers_on_an_off_host(
     Ok(())
 }
 
+/// On Lenovo, a GPU push whose catalog entry sets `power_drains_needed = 1`
+/// gets one power sequence: the persisted drain (ForceOff, AC power cycle, On).
+/// The fixed-delay HGX/GPU AC power cycle must not run again after the drain.
+#[sqlx_test]
+async fn test_preingestion_lenovo_gpu_power_drain_runs_once(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let mut preingestion_config = config.preingestion_manager();
+    preingestion_config.hgx_bmc_gpu_reboot_delay = Duration::ZERO;
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_ac_powercycle_supported(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        preingestion_config,
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("Lenovo")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    let mut txn = pool.txn_begin().await?;
+    common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    let mut endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, txn.as_mut())
+        .await?
+        .remove(0);
+    endpoint.report.vendor = Some(bmc_vendor::BMCVendor::Lenovo);
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            ip_addr,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    // The GPU bundle task has completed.
+    db::explored_endpoints::set_preingestion_for_addresses(
+        &[ip_addr],
+        PreingestionState::ResetForNewFirmware {
+            final_version: "1.0".to_string(),
+            upgrade_type: FirmwareComponentType::Gpu,
+            power_drains_needed: Some(1),
+            delay_until: None,
+            last_power_drain_operation: None,
+        },
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // One drain takes three passes (Off, Powercycle, On) and a fourth pass that
+    // leaves ResetForNewFirmware. The extra passes let a drain that keeps
+    // running show up in `drain_states` instead of being cut off.
+    const MAX_ITERATIONS: usize = 6;
+
+    let timepoint = redfish_sim.timepoint();
+    let mut drain_states = Vec::new();
+    for _ in 0..MAX_ITERATIONS {
+        mgr.run_single_iteration().await?;
+
+        let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
+            .await?
+            .remove(0);
+        let PreingestionState::ResetForNewFirmware {
+            final_version,
+            upgrade_type,
+            power_drains_needed,
+            last_power_drain_operation,
+            ..
+        } = endpoint.preingestion_state
+        else {
+            break;
+        };
+        drain_states.push((power_drains_needed, last_power_drain_operation.clone()));
+        // Skip the wait between drain steps.
+        let mut txn = pool.txn_begin().await?;
+        db::explored_endpoints::set_preingestion_for_addresses(
+            &[ip_addr],
+            PreingestionState::ResetForNewFirmware {
+                final_version,
+                upgrade_type,
+                power_drains_needed,
+                delay_until: None,
+                last_power_drain_operation,
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+    }
+
+    assert_eq!(
+        drain_states,
+        vec![
+            (Some(1), Some(PowerDrainState::Off)),
+            (Some(1), Some(PowerDrainState::Powercycle)),
+            (Some(0), Some(PowerDrainState::On)),
+        ]
+    );
+    let power_actions: Vec<_> = redfish_sim
+        .actions_since(&timepoint)
+        .for_host(addr)
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                action,
+                RedfishSimAction::Power(_) | RedfishSimAction::PowerFailed(_)
+            )
+        })
+        .collect();
+    assert_eq!(
+        power_actions,
+        vec![
+            RedfishSimAction::Power(SystemPowerControl::ForceOff),
+            RedfishSimAction::Power(SystemPowerControl::ACPowercycle),
+            RedfishSimAction::Power(SystemPowerControl::On),
+        ],
+        "only the drain sequence may power-cycle the host"
+    );
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
+        .await?
+        .remove(0);
+    assert!(
+        matches!(
+            endpoint.preingestion_state,
+            PreingestionState::RecheckVersions
+        ),
+        "{:?}",
+        endpoint.preingestion_state
+    );
+
+    Ok(())
+}
+
+/// On Lenovo, a GPU push whose catalog entry sets `power_drains_needed = 0`
+/// runs no drain, so the fixed-delay HGX/GPU AC power cycle must still run to
+/// activate the firmware.
+#[sqlx_test]
+async fn test_preingestion_lenovo_gpu_zero_power_drains_keeps_fixed_delay_cycle(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let mut preingestion_config = config.preingestion_manager();
+    preingestion_config.hgx_bmc_gpu_reboot_delay = Duration::ZERO;
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_ac_powercycle_supported(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        preingestion_config,
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+        env.api().instrumentation().clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("Lenovo")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    let mut txn = pool.txn_begin().await?;
+    common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    let mut endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, txn.as_mut())
+        .await?
+        .remove(0);
+    endpoint.report.vendor = Some(bmc_vendor::BMCVendor::Lenovo);
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            ip_addr,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    // The GPU bundle task has completed; no drain step has run yet.
+    db::explored_endpoints::set_preingestion_for_addresses(
+        &[ip_addr],
+        PreingestionState::ResetForNewFirmware {
+            final_version: "1.0".to_string(),
+            upgrade_type: FirmwareComponentType::Gpu,
+            power_drains_needed: Some(0),
+            delay_until: None,
+            last_power_drain_operation: None,
+        },
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let timepoint = redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+
+    let power_actions: Vec<_> = redfish_sim
+        .actions_since(&timepoint)
+        .for_host(addr)
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                action,
+                RedfishSimAction::Power(_) | RedfishSimAction::PowerFailed(_)
+            )
+        })
+        .collect();
+    assert_eq!(
+        power_actions,
+        vec![
+            RedfishSimAction::Power(SystemPowerControl::ACPowercycle),
+            RedfishSimAction::Power(SystemPowerControl::On),
+        ],
+        "with no drain run, the fixed-delay cycle must power-cycle the host"
+    );
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &pool)
+        .await?
+        .remove(0);
+    assert!(
+        matches!(
+            endpoint.preingestion_state,
+            PreingestionState::RecheckVersions
+        ),
+        "{:?}",
+        endpoint.preingestion_state
+    );
+
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
     pool: PgPool,
