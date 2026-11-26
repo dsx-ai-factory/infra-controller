@@ -560,6 +560,10 @@ pub async fn all_dpa_states_in_sync(
 /// Returns `NotApplied(ControllerStateNotCurrent)` if the row is missing or its
 /// version differs. `new_version` must advance `expected_version`; the caller must
 /// commit any surrounding transaction. Database failures are returned as errors.
+///
+/// An Astra card leaving `Assigned` clears `overlay_ip` in the same statement,
+/// because the address Weave handed out belongs to the tenancy the card is
+/// leaving. An SVPC card keeps its `overlay_ip`, which DHCP owns instead.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     id: DpaInterfaceId,
@@ -567,12 +571,13 @@ pub async fn try_update_controller_state(
     new_version: ConfigVersion,
     new_state: &DpaInterfaceControllerState,
 ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
-    let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
+    let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json, overlay_ip=CASE WHEN $5 OR interface_type <> 'Astra' THEN overlay_ip ELSE NULL END where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, DpaInterfaceId>(query)
         .bind(new_version)
         .bind(sqlx::types::Json(new_state))
         .bind(id)
         .bind(expected_version)
+        .bind(matches!(new_state, DpaInterfaceControllerState::Assigned))
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -581,6 +586,29 @@ pub async fn try_update_controller_state(
         Some(_) => ConditionalWrite::Applied(()),
         None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
     })
+}
+
+/// `update_astra_overlay_ip` records in `overlay_ip` the host address DOCA Weave
+/// assigned to an attached Astra card, reported back to Core by the DPU agent.
+/// On an SVPC card the same column is DHCP's, so the statement never touches one.
+///
+/// The statement carries the `assigned` guard itself rather than trusting the
+/// caller's snapshot: the DPA controller can retire the tenancy, and clear the
+/// column, between the caller reading the interface and writing here. A card
+/// that is no longer assigned is left untouched.
+pub async fn update_astra_overlay_ip(
+    txn: &mut PgConnection,
+    id: DpaInterfaceId,
+    host_ipv4: IpAddr,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE dpa_interfaces SET overlay_ip=$1 WHERE id=$2::uuid AND interface_type = 'Astra' AND controller_state->>'state' = 'assigned'";
+    sqlx::query(query)
+        .bind(host_ipv4)
+        .bind(id)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
 }
 
 pub async fn update_controller_state_outcome(
@@ -679,6 +707,7 @@ pub async fn try_update_network_config(
 
 #[cfg(test)]
 mod test {
+    use std::net::IpAddr;
     use std::str::FromStr;
 
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
@@ -689,8 +718,8 @@ mod test {
     };
     use mac_address::MacAddress;
     use model::dpa_interface::{
-        CardState, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
-        DpaLockMode, DpaSearchConfig, NewDpaInterface,
+        CardState, DpaInterface, DpaInterfaceControllerState, DpaInterfaceNetworkConfig,
+        DpaInterfaceType, DpaLockMode, DpaSearchConfig, NewDpaInterface,
     };
     use model::machine::ManagedHostState;
 
@@ -1017,6 +1046,153 @@ mod test {
             persisted.network_config.version.version_nr(),
             old_version.version_nr() + 1
         );
+        Ok(())
+    }
+
+    /// `overlay_ip` serves two owners. On an Astra card it holds the host address
+    /// Weave hands the tenancy, so it is writable only while the card is assigned
+    /// and is dropped on the way out. On an SVPC card DHCP owns it, so neither
+    /// the Astra writer nor a state transition may disturb it.
+    #[crate::sqlx_test]
+    async fn astra_overlay_ip_is_held_only_while_the_interface_is_assigned(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn stored_overlay_ip(
+            pool: &sqlx::PgPool,
+            id: DpaInterfaceId,
+        ) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(super::find_by_ids(pool, &[id], false)
+                .await?
+                .pop()
+                .expect("DPA interface exists")
+                .overlay_ip)
+        }
+
+        let mut txn = pool.txn_begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let interface = super::persist(
+            NewDpaInterface {
+                machine_id,
+                mac_address: "00:11:22:33:44:55".parse()?,
+                device_type: "ConnectX9".to_string(),
+                pci_name: "0000:cc:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Astra,
+                interface_name: None,
+            },
+            &mut txn,
+        )
+        .await?;
+        let svpc = super::persist(
+            NewDpaInterface {
+                machine_id,
+                mac_address: "00:11:22:33:44:66".parse()?,
+                device_type: "BlueField3".to_string(),
+                pci_name: "0000:dd:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+                interface_name: None,
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let host_ipv4 = IpAddr::from_str("192.0.2.10")?;
+        let dhcp_overlay_ip = IpAddr::from_str("192.0.2.20")?;
+
+        // A freshly persisted card is `Provisioning`, so the guard rejects the write.
+        let mut txn = pool.txn_begin().await?;
+        super::update_astra_overlay_ip(&mut txn, interface.id, host_ipv4).await?;
+        txn.commit().await?;
+        assert_eq!(
+            stored_overlay_ip(&pool, interface.id).await?,
+            None,
+            "a card outside Assigned must not record a tenancy address"
+        );
+
+        // Stand in for DHCP, the SVPC owner of this column.
+        let mut txn = pool.txn_begin().await?;
+        super::update_ip(
+            DpaInterface {
+                overlay_ip: Some(dhcp_overlay_ip),
+                ..svpc.clone()
+            },
+            false,
+            &mut txn,
+        )
+        .await?;
+        super::update_astra_overlay_ip(&mut txn, svpc.id, host_ipv4).await?;
+        txn.commit().await?;
+        assert_eq!(
+            stored_overlay_ip(&pool, svpc.id).await?,
+            Some(dhcp_overlay_ip),
+            "the Astra writer must not reach an SVPC card's DHCP address"
+        );
+
+        let assigned_version = interface.controller_state.version.increment();
+        let mut txn = pool.txn_begin().await?;
+        assert_eq!(
+            super::try_update_controller_state(
+                &mut txn,
+                interface.id,
+                interface.controller_state.version,
+                assigned_version,
+                &DpaInterfaceControllerState::Assigned,
+            )
+            .await?,
+            ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+
+        let mut txn = pool.txn_begin().await?;
+        super::update_astra_overlay_ip(&mut txn, interface.id, host_ipv4).await?;
+        txn.commit().await?;
+        assert_eq!(
+            stored_overlay_ip(&pool, interface.id).await?,
+            Some(host_ipv4),
+            "an assigned card records the address Weave handed out"
+        );
+
+        let mut txn = pool.txn_begin().await?;
+        for (id, from) in [
+            (interface.id, assigned_version),
+            (svpc.id, svpc.controller_state.version),
+        ] {
+            assert_eq!(
+                super::try_update_controller_state(
+                    &mut txn,
+                    id,
+                    from,
+                    from.increment(),
+                    &DpaInterfaceControllerState::Ready,
+                )
+                .await?,
+                ConditionalWrite::Applied(())
+            );
+        }
+        txn.commit().await?;
+        assert_eq!(
+            stored_overlay_ip(&pool, interface.id).await?,
+            None,
+            "returning to Ready retires the tenancy along with its address"
+        );
+        assert_eq!(
+            stored_overlay_ip(&pool, svpc.id).await?,
+            Some(dhcp_overlay_ip),
+            "an SVPC transition must leave the DHCP address in place"
+        );
+
         Ok(())
     }
 

@@ -1011,13 +1011,16 @@ async fn build_notify_weave_ew_vpc_astra_config_uds(
         });
     };
     debug_check_astra_config_attachment_revisions(astra_config);
-    let desired = build_astra_config_status(astra_config)?;
+    let mut desired = build_astra_config_status(astra_config)?;
 
     // A matching revision alone does not prove convergence: stale networks,
     // changed bindings, and pending operations can survive between iterations.
     let (networks, attachments) = read_weave_ew_vpc_resources(socket_path).await?;
     match verify_weave_ew_vpc_resources_match(&desired, &networks, &attachments) {
-        Ok(()) => return Ok(desired),
+        Ok(()) => {
+            apply_weave_ew_vpc_host_addresses(&mut desired, &attachments);
+            return Ok(desired);
+        }
         Err(err) => tracing::debug!(
             error = %err,
             "DOCA Weave state has not converged; running full reconcile"
@@ -1041,7 +1044,10 @@ async fn build_notify_weave_ew_vpc_astra_config_uds(
     match verify_weave_ew_vpc_resources_match(&desired, &networks, &attachments) {
         // A failed RPC may still have applied its mutation. Fresh, complete
         // observations let us report Ready instead of retaining that RPC error.
-        Ok(()) => Ok(desired),
+        Ok(()) => {
+            apply_weave_ew_vpc_host_addresses(&mut desired, &attachments);
+            Ok(desired)
+        }
         Err(err) => {
             if astra_config_status.astra_attachments_status.is_empty() {
                 // No attachment can carry the Pending reason. Return it as an
@@ -1061,8 +1067,42 @@ async fn build_notify_weave_ew_vpc_astra_config_uds(
                     });
                 }
             }
+            apply_weave_ew_vpc_host_addresses(&mut astra_config_status, &attachments);
             Ok(astra_config_status)
         }
+    }
+}
+
+/// Report the host addresses Weave assigned, matching each reported attachment
+/// to the listed one on the same NIC and virtual network.
+///
+/// Weave owns the assignment, so this is an observation taken from the final
+/// listing rather than anything Core asked for. Every return path applies it,
+/// because a converged iteration reports the desired status without running
+/// reconciliation. An attachment Weave has not addressed, including one on an
+/// IPv6 virtual network, keeps the field clear.
+fn apply_weave_ew_vpc_host_addresses(
+    astra_config_status: &mut AstraConfigStatus,
+    virtual_network_attachments: &[VirtualNetworkAttachment],
+) {
+    for astra_attachment_status in &mut astra_config_status.astra_attachments_status {
+        let astra_virtual_network_id =
+            astra_weave_ew_vpc_virtual_network_id(astra_attachment_status.vni);
+        astra_attachment_status.host_ipv4 = virtual_network_attachments
+            .iter()
+            .find(|virtual_network_attachment| {
+                virtual_network_attachment
+                    .spec
+                    .as_ref()
+                    .is_some_and(|spec| {
+                        spec.nic_id
+                            .eq_ignore_ascii_case(astra_attachment_status.mac_address.as_str())
+                            && spec.vnet_id == astra_virtual_network_id
+                    })
+            })
+            .and_then(|virtual_network_attachment| virtual_network_attachment.status.as_ref())
+            .and_then(|status| status.host_ipv4.clone())
+            .none_if_empty();
     }
 }
 
@@ -1144,6 +1184,9 @@ fn build_astra_config_status(astra_config: &AstraConfig) -> eyre::Result<AstraCo
                 reason: String::new(),
                 message: String::new(),
             }),
+            // Weave assigns the host address, so it is an observation this
+            // reconciliation fills in rather than part of the desired config.
+            host_ipv4: None,
         };
         astra_config_status
             .astra_attachments_status
@@ -2428,6 +2471,60 @@ pub(crate) mod tests {
         );
 
         server.shutdown().await?;
+        Ok(())
+    }
+
+    /// Weave owns host address assignment, so the agent returns to Core
+    /// whatever the attachment listing carries: the assigned address once
+    /// Weave has one, and nothing while it does not.
+    #[tokio::test]
+    async fn test_update_weave_ew_vpc_astra_config_reports_weave_assigned_host_ipv4()
+    -> eyre::Result<()> {
+        async fn reported_host_ipv4(assigned: Option<&str>) -> eyre::Result<Option<String>> {
+            let mut attachment = weave_ew_vpc_virtual_network_attachment(
+                "matching-attachment",
+                "02:aa:bb:cc:dd:ee",
+                "astra-weave-vni-100",
+            );
+            attachment
+                .status
+                .as_mut()
+                .expect("the fixture attachment carries a status")
+                .host_ipv4 = assigned.map(str::to_string);
+
+            let (socket_path, _calls, server) = start_recording_weave_ew_vpc_mock_server(
+                vec![weave_ew_vpc_virtual_network("astra-weave-vni-100", 100)],
+                vec![attachment],
+            );
+            let astra_config = rpc::AstraConfig {
+                multiplane_interfaces: Vec::new(),
+                is_attachment_config_present: None,
+                is_maintenance_config_present: None,
+                astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+            };
+
+            let status = build_notify_weave_ew_vpc_astra_config_uds(
+                socket_path.to_str().unwrap(),
+                Some(&astra_config),
+            )
+            .await?;
+            server.shutdown().await?;
+
+            assert_eq!(status.astra_attachments_status.len(), 1);
+            Ok(status.astra_attachments_status[0].host_ipv4.clone())
+        }
+
+        assert_eq!(
+            reported_host_ipv4(Some("192.0.2.10")).await?,
+            Some("192.0.2.10".to_string()),
+            "an address Weave assigned reaches Core"
+        );
+        assert_eq!(
+            reported_host_ipv4(None).await?,
+            None,
+            "an attachment Weave has not addressed reports nothing"
+        );
+
         Ok(())
     }
 
