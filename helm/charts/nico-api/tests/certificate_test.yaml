@@ -24,7 +24,7 @@ tests:
           value:
             - spiffe://nico.local/nico-system/sa/nico-api
 
-  - it: includes carbide-api.forge in extraDnsNames by default for backwards compatibility
+  - it: includes carbide-api.forge and grpc.nico in extraDnsNames by default
     asserts:
       - equal:
           path: spec.dnsNames
@@ -32,6 +32,7 @@ tests:
             - nico-api.nico-system.svc.cluster.local
             - nico-api.nico-system
             - carbide-api.forge
+            - grpc.nico
 
   - it: appends extraDnsNames and extraUris to the generated lists
     set:
