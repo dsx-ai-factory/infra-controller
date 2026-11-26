@@ -355,7 +355,7 @@ impl From<forgerpc::Instance> for InstanceDetail {
                         ..Default::default()
                     },
                     forgerpc::instance_operating_system_config::Variant::OsImageId(_)
-                    | forgerpc::instance_operating_system_config::Variant::DhcpOptionSet(_) => {
+                    | forgerpc::instance_operating_system_config::Variant::External(_) => {
                         InstanceOs {
                             userdata: os.user_data.clone().unwrap_or_default(),
                             run_provisioning_instructions_on_every_boot: os

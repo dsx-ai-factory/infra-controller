@@ -25,6 +25,7 @@ use carbide_dpf::types::DpuServiceInterfaceTemplateType;
 use carbide_machine_controller::handler::is_bf4_dmi_product;
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
@@ -468,6 +469,39 @@ pub(crate) async fn validate_os_definition_usable(
             "operating system `{os_id}` is not ready (status: {})",
             row.status
         )));
+    }
+    Ok(())
+}
+
+/// Validates the DHCP option sets that External OS choices boot from and locks them until
+/// commit, so a set cannot be deleted or lose its boot URL before the instance stores it.
+pub(crate) async fn lock_external_boot_option_sets<'a>(
+    txn: &mut PgConnection,
+    uses: impl IntoIterator<Item = (DhcpOptionSetId, &'a TenantOrganizationId)>,
+) -> Result<(), CarbideError> {
+    let mut uses: Vec<_> = uses.into_iter().collect();
+    // Lock in ID order so concurrent requests cannot deadlock.
+    uses.sort_by_key(|(id, _)| *id);
+    uses.dedup();
+    for (id, tenant_org) in uses {
+        let set = db::dhcp_option_set::find_by_ids(
+            &mut *txn,
+            std::slice::from_ref(&id),
+            Some(tenant_org),
+            true,
+        )
+        .await?
+        .pop()
+        .ok_or_else(|| {
+            CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            ))
+        })?;
+        if !set.options.has_boot_url() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` has no boot URL for the external OS to boot from"
+            )));
+        }
     }
     Ok(())
 }
@@ -2295,6 +2329,17 @@ pub(crate) async fn batch_allocate_instances(
             )));
         }
     }
+
+    lock_external_boot_option_sets(
+        &mut txn,
+        requests.iter().filter_map(|r| match &r.config.os.variant {
+            OperatingSystemVariant::External(id) => {
+                Some((*id, &r.config.tenant.tenant_organization_id))
+            }
+            _ => None,
+        }),
+    )
+    .await?;
 
     // Collect every requested service ID before resolving them while their
     // service and version rows are locked.

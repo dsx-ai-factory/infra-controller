@@ -461,7 +461,7 @@ impl ManagedHostStateSnapshot {
             instance.deleted.is_none()
                 && matches!(
                     instance.config.os.variant,
-                    crate::os::OperatingSystemVariant::DhcpOptionSet
+                    crate::os::OperatingSystemVariant::External(_)
                 )
         }) && !self.use_admin_network()
             && self.managed_host_network_config_version_synced()

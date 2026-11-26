@@ -3949,8 +3949,7 @@ async fn test_dhcp_allows_zero_dpu_host_with_instance(
 }
 
 // Kea answers zero-DPU hosts from Core's record, so a Ready instance that boots
-// via its option set must get the tenant values there. The set comes from the
-// VPC in the instance's auto config, because zero-DPU segments can be shared by VPCs.
+// via its option set must get the tenant values there.
 #[crate::sqlx_test]
 async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
     pool: sqlx::PgPool,
@@ -3977,7 +3976,6 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
     create_host_inband_network_segment(&env.api, None).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
 
-    // The tenant's VPC carries the option set.
     common::api_fixtures::tenant::create_fixture_tenant(&env, "Tenant1").await?;
     let set_id = env
         .api
@@ -3986,7 +3984,7 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
                 id: None,
                 tenant_organization_id: "Tenant1".to_string(),
                 metadata: Some(rpc::forge::Metadata {
-                    name: "vpc boot".to_string(),
+                    name: "tenant boot".to_string(),
                     ..Default::default()
                 }),
                 options: Some(rpc::forge::DhcpOptions {
@@ -4003,32 +4001,14 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
         .dhcp_option_set
         .and_then(|set| set.id)
         .unwrap();
-    let mut vpc = common::rpc_builder::VpcCreationRequest::builder("Tenant1")
-        .metadata(rpc::forge::Metadata {
-            name: "tenant vpc".to_string(),
-            ..Default::default()
-        })
-        .rpc();
-    vpc.dhcp_option_set_id = Some(set_id.to_string());
-    let vpc_id = env
-        .api
-        .create_vpc(tonic::Request::new(vpc))
-        .await?
-        .into_inner()
-        .id
-        .unwrap();
 
-    // A Ready instance whose auto config names that VPC.
+    // A Ready instance on the host.
     let mut txn = env.pool.txn_begin().await?;
     sqlx::query(
         "INSERT INTO instances (machine_id, tenant_org, os_ipxe_script, network_config, nvlink_config) \
-         VALUES ($1, 'Tenant1', 'exit', $2, '{\"gpu_configs\": []}'::jsonb)",
+         VALUES ($1, 'Tenant1', 'exit', '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb)",
     )
     .bind(mh.host().id.to_machine_id())
-    .bind(sqlx::types::Json(serde_json::json!({
-        "interfaces": [],
-        "auto_config": { "vpc_id": vpc_id },
-    })))
     .execute(txn.as_mut())
     .await?;
     db::machine::update_state(
@@ -4057,23 +4037,21 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
 
     // Tenant values reach the record only when the OS boots via the option set.
     let (host_mac, gateway) = host_interface_and_gateway(&env, mh.host().id).await?;
-    for (boots_from_option_set, expected) in [
+    for (external_boot_set, expected) in [
         (
-            true,
+            Some(set_id),
             (
                 Some("http://boot.example.com/x.efi".to_string()),
                 vec!["10.0.0.53".to_string()],
             ),
         ),
-        (false, (None, vec![])),
+        (None, (None, vec![])),
     ] {
-        sqlx::query(
-            "UPDATE instances SET os_boots_from_dhcp_option_set = $1 WHERE machine_id = $2",
-        )
-        .bind(boots_from_option_set)
-        .bind(mh.host().id.to_machine_id())
-        .execute(&env.pool)
-        .await?;
+        sqlx::query("UPDATE instances SET os_external_boot_id = $1 WHERE machine_id = $2")
+            .bind(external_boot_set)
+            .bind(mh.host().id.to_machine_id())
+            .execute(&env.pool)
+            .await?;
         let record = env
             .api
             .discover_dhcp(
@@ -4086,7 +4064,7 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
         assert_eq!(
             (record.booturl, record.dns_servers),
             expected,
-            "os_boots_from_dhcp_option_set = {boots_from_option_set}"
+            "os_external_boot_id = {external_boot_set:?}"
         );
     }
 

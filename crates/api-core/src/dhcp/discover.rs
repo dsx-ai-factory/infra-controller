@@ -18,11 +18,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ::rpc::forge as rpc;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
-use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use db::dhcp_entry::DhcpEntry;
-use db::{self, ObjectColumnFilter, expected_machine, machine_interface, vpc};
+use db::{self, expected_machine, machine_interface};
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use model::dhcp_option_set::DhcpOverrides;
@@ -35,6 +34,7 @@ use model::machine_interface::InterfaceType;
 use model::network_segment::{
     AllocationStrategy, NetworkSegment, NetworkSegmentSearchConfig, NetworkSegmentType,
 };
+use model::os::OperatingSystemVariant;
 use sqlx::PgConnection;
 use tonic::{Request, Response};
 
@@ -564,36 +564,19 @@ async fn zero_dpu_dhcp_overrides(
     else {
         return Ok(DhcpOverrides::default());
     };
-    // Zero-DPU segments can be shared by VPCs, so the VPC comes from the instance.
-    let vpc_option_set_id = match &instance.config.network.auto_config {
-        Some(auto) => db::vpc::find_by(
-            &mut *txn,
-            ObjectColumnFilter::One(vpc::IdColumn, &auto.vpc_id),
-        )
-        .await?
-        .pop()
-        .and_then(|vpc| vpc.config.dhcp_option_set_id),
-        None => None,
+    let OperatingSystemVariant::External(set_id) = instance.config.os.variant else {
+        return Ok(DhcpOverrides::default());
     };
-    let ids: Vec<_> = [instance.config.dhcp_option_set_id, vpc_option_set_id]
-        .into_iter()
-        .flatten()
-        .collect();
-    let sets = db::dhcp_option_set::find_by_ids(
+    Ok(db::dhcp_option_set::find_by_ids(
         &mut *txn,
-        &ids,
+        std::slice::from_ref(&set_id),
         Some(&instance.config.tenant.tenant_organization_id),
         false,
     )
-    .await?;
-    let options = |id: Option<DhcpOptionSetId>| {
-        id.and_then(|id| sets.iter().find(|set| set.id == id))
-            .map(|set| &set.options)
-    };
-    Ok(DhcpOverrides::resolve(
-        options(instance.config.dhcp_option_set_id),
-        options(vpc_option_set_id),
-    ))
+    .await?
+    .pop()
+    .map(|set| DhcpOverrides::from(&set.options))
+    .unwrap_or_default())
 }
 
 /// Copies the requested family's tenant DHCP values into the Kea record.

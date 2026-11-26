@@ -4131,8 +4131,8 @@ message InstanceOperatingSystemConfig {
     // Reference any operating system definition by ID (any variant except OS image).
     // On read the actual variant (iPXE / ipxe_os_definition) is resolved from the row.
     common.OperatingSystemId operating_system_id = 4;
-    // Boot from the boot URL of the instance's or VPC's DHCP option set.
-    DhcpOptionSetBoot dhcp_option_set = 5;
+    // Boot from a tenant DHCP option set's boot URL. This choice always runs on every boot.
+    ExternalBoot external = 5;
   }
 
   // If this flag is set to `true` the instance will not transition to a Ready state until
@@ -4162,10 +4162,12 @@ message InstanceOperatingSystemConfig {
   optional string user_data = 13;
 }
 
-// Selects booting from the DHCP option set's boot URL; carries no settings.
-message DhcpOptionSetBoot {
+// Boots from the boot URL of a tenant's DHCP option set.
+message ExternalBoot {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // The set must belong to the instance's tenant and have a boot URL.
+  common.DhcpOptionSetId dhcp_option_set_id = 1;
 }
 
 message InlineIpxe {

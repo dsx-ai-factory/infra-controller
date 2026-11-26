@@ -933,8 +933,7 @@ pub async fn update_config(
     let mut os_ipxe_script = String::new();
     let os_user_data = config.os.user_data;
     let mut os_image_id = None;
-    let os_boots_from_dhcp_option_set =
-        matches!(config.os.variant, OperatingSystemVariant::DhcpOptionSet);
+    let mut os_external_boot_id = None;
     let operating_system_id = match &config.os.variant {
         OperatingSystemVariant::Ipxe(ipxe) => {
             os_ipxe_script = ipxe.ipxe_script.clone();
@@ -945,14 +944,19 @@ pub async fn update_config(
             None
         }
         OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
-        OperatingSystemVariant::DhcpOptionSet => None,
+        OperatingSystemVariant::External(id) => {
+            os_external_boot_id = Some(*id);
+            None
+        }
     };
 
+    // An External host never reaches NICo's iPXE to consume the one-time flag.
     let query = "UPDATE instances SET config_version=$1,
             operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6,
             os_image_id=$7, keyset_ids=$8,
             name=$9, description=$10, labels=$11::json, network_security_group_id=$14,
-            power_profile=$15, os_boots_from_dhcp_option_set=$16
+            power_profile=$15, os_external_boot_id=$16,
+            use_custom_pxe_on_boot = use_custom_pxe_on_boot AND $16::uuid IS NULL
             WHERE id=$12 AND config_version=$13 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -971,7 +975,7 @@ pub async fn update_config(
         .bind(expected_version)
         .bind(config.network_security_group_id)
         .bind(config.power_profile)
-        .bind(os_boots_from_dhcp_option_set)
+        .bind(os_external_boot_id)
         .fetch_one(&mut *txn)
         .await;
 
@@ -1005,7 +1009,7 @@ pub async fn update_os(
     let mut os_ipxe_script = String::new();
     let os_user_data = os.user_data;
     let mut os_image_id = None;
-    let os_boots_from_dhcp_option_set = matches!(os.variant, OperatingSystemVariant::DhcpOptionSet);
+    let mut os_external_boot_id = None;
     let operating_system_id = match &os.variant {
         OperatingSystemVariant::Ipxe(ipxe) => {
             os_ipxe_script = ipxe.ipxe_script.clone();
@@ -1016,12 +1020,17 @@ pub async fn update_os(
             None
         }
         OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
-        OperatingSystemVariant::DhcpOptionSet => None,
+        OperatingSystemVariant::External(id) => {
+            os_external_boot_id = Some(*id);
+            None
+        }
     };
 
+    // An External host never reaches NICo's iPXE to consume the one-time flag.
     let query = "UPDATE instances SET config_version=$1,
             operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6, os_image_id=$7,
-            os_boots_from_dhcp_option_set=$10
+            os_external_boot_id=$10,
+            use_custom_pxe_on_boot = use_custom_pxe_on_boot AND $10::uuid IS NULL
             WHERE id=$8 AND config_version=$9 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -1034,7 +1043,7 @@ pub async fn update_os(
         .bind(os_image_id)
         .bind(instance_id)
         .bind(expected_version)
-        .bind(os_boots_from_dhcp_option_set)
+        .bind(os_external_boot_id)
         .fetch_one(&mut *txn)
         .await;
 
@@ -1653,7 +1662,7 @@ pub async fn batch_persist<'a>(
                         spx_config,
                         spx_config_version,
                         power_profile,
-                        os_boots_from_dhcp_option_set
+                        os_external_boot_id
                     )
                     SELECT 
                             vals.id, vals.machine_id, vals.operating_system_id, vals.os_user_data, vals.os_ipxe_script,
@@ -1662,11 +1671,11 @@ pub async fn batch_persist<'a>(
                             vals.ib_config::json, vals.ib_config_version, vals.keyset_ids, 
                             vals.os_phone_home_enabled, vals.name, vals.description, 
                             vals.labels::json, vals.config_version, vals.hostname, 
-                            vals.network_security_group_id, NOT vals.os_boots_from_dhcp_option_set,
+                            vals.network_security_group_id, vals.os_external_boot_id IS NULL,
                             vals.instance_type_id, vals.extension_services_config::json, 
                             vals.extension_services_config_version, vals.nvlink_config::json, 
                             vals.nvlink_config_version, vals.spx_config::json, vals.spx_config_version,
-                            vals.power_profile, vals.os_boots_from_dhcp_option_set
+                            vals.power_profile, vals.os_external_boot_id
                     FROM (VALUES ";
 
     let expected_count = values.len() as u64;
@@ -1681,10 +1690,7 @@ pub async fn batch_persist<'a>(
             let mut os_ipxe_script = String::new();
             let os_user_data = value.config.os.user_data.clone();
             let mut os_image_id: Option<uuid::Uuid> = None;
-            let os_boots_from_dhcp_option_set = matches!(
-                value.config.os.variant,
-                OperatingSystemVariant::DhcpOptionSet
-            );
+            let mut os_external_boot_id = None;
             let operating_system_id = match &value.config.os.variant {
                 OperatingSystemVariant::Ipxe(ipxe) => {
                     os_ipxe_script = ipxe.ipxe_script.clone();
@@ -1695,7 +1701,10 @@ pub async fn batch_persist<'a>(
                     None
                 }
                 OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
-                OperatingSystemVariant::DhcpOptionSet => None,
+                OperatingSystemVariant::External(id) => {
+                    os_external_boot_id = Some(*id);
+                    None
+                }
             };
 
             separated.push("(");
@@ -1768,7 +1777,7 @@ pub async fn batch_persist<'a>(
             separated.push_unseparated(",");
             separated.push_bind_unseparated(&value.config.power_profile);
             separated.push_unseparated(",");
-            separated.push_bind_unseparated(os_boots_from_dhcp_option_set);
+            separated.push_bind_unseparated(os_external_boot_id);
             separated.push_unseparated(")");
         }
 
@@ -1778,7 +1787,7 @@ pub async fn batch_persist<'a>(
                        description, labels, config_version, hostname, network_security_group_id,
                        instance_type_id, extension_services_config, extension_services_config_version,
                        nvlink_config, nvlink_config_version, spx_config, spx_config_version,
-                       power_profile, os_boots_from_dhcp_option_set)
+                       power_profile, os_external_boot_id)
             INNER JOIN machines m ON m.id = vals.machine_id
                 AND (vals.instance_type_id IS NULL OR m.instance_type_id = vals.instance_type_id)");
 

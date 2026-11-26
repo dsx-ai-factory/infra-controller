@@ -104,6 +104,12 @@ impl DhcpOptions {
         }
         Ok(())
     }
+
+    /// Returns whether the set has an IPv4 or IPv6 boot URL, which the External OS requires.
+    pub fn has_boot_url(&self) -> bool {
+        self.v4.as_ref().is_some_and(|v4| v4.boot_url.is_some())
+            || self.v6.as_ref().is_some_and(|v6| v6.boot_url.is_some())
+    }
 }
 
 /// Values that replace NICo's DHCP defaults for one host; unset values keep NICo's.
@@ -115,39 +121,23 @@ pub struct DhcpOverrides {
     pub dns_servers_v6: Vec<Ipv6Addr>,
 }
 
-impl DhcpOverrides {
-    /// Takes each value from the instance's option set, else the VPC's.
-    pub fn resolve(instance: Option<&DhcpOptions>, vpc: Option<&DhcpOptions>) -> Self {
-        let instance_v4 = instance.and_then(|o| o.v4.as_ref());
-        let instance_v6 = instance.and_then(|o| o.v6.as_ref());
-        let vpc_v4 = vpc.and_then(|o| o.v4.as_ref());
-        let vpc_v6 = vpc.and_then(|o| o.v6.as_ref());
+impl From<&DhcpOptions> for DhcpOverrides {
+    fn from(options: &DhcpOptions) -> Self {
         Self {
-            boot_url_v4: instance_v4
-                .and_then(|o| o.boot_url.clone())
-                .or_else(|| vpc_v4.and_then(|o| o.boot_url.clone())),
-            boot_url_v6: instance_v6
-                .and_then(|o| o.boot_url.clone())
-                .or_else(|| vpc_v6.and_then(|o| o.boot_url.clone())),
-            dns_servers_v4: first_non_empty(
-                instance_v4.map(|o| &o.dns_servers),
-                vpc_v4.map(|o| &o.dns_servers),
-            ),
-            dns_servers_v6: first_non_empty(
-                instance_v6.map(|o| &o.dns_servers),
-                vpc_v6.map(|o| &o.dns_servers),
-            ),
+            boot_url_v4: options.v4.as_ref().and_then(|v4| v4.boot_url.clone()),
+            boot_url_v6: options.v6.as_ref().and_then(|v6| v6.boot_url.clone()),
+            dns_servers_v4: options
+                .v4
+                .as_ref()
+                .map(|v4| v4.dns_servers.clone())
+                .unwrap_or_default(),
+            dns_servers_v6: options
+                .v6
+                .as_ref()
+                .map(|v6| v6.dns_servers.clone())
+                .unwrap_or_default(),
         }
     }
-}
-
-fn first_non_empty<T: Clone>(instance: Option<&Vec<T>>, vpc: Option<&Vec<T>>) -> Vec<T> {
-    [instance, vpc]
-        .into_iter()
-        .flatten()
-        .find(|servers| !servers.is_empty())
-        .cloned()
-        .unwrap_or_default()
 }
 
 fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationError> {
@@ -170,64 +160,5 @@ fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationEr
         _ => Err(ConfigValidationError::invalid_value(format!(
             "boot URL `{boot_url}` must be a valid http or https URL"
         ))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use carbide_test_support::value_scenarios;
-
-    use super::*;
-
-    fn options(
-        boot_url_v4: Option<&str>,
-        dns_servers_v4: &[&str],
-        boot_url_v6: Option<&str>,
-    ) -> DhcpOptions {
-        DhcpOptions {
-            v4: Some(DhcpOptionsV4 {
-                boot_url: boot_url_v4.map(str::to_string),
-                dns_servers: dns_servers_v4.iter().map(|s| s.parse().unwrap()).collect(),
-            }),
-            v6: Some(DhcpOptionsV6 {
-                boot_url: boot_url_v6.map(str::to_string),
-                dns_servers: vec![],
-            }),
-        }
-    }
-
-    #[test]
-    fn resolve_prefers_instance_values_then_vpc_values() {
-        value_scenarios!(
-            run = |(instance, vpc): (Option<DhcpOptions>, Option<DhcpOptions>)| {
-                DhcpOverrides::resolve(instance.as_ref(), vpc.as_ref())
-            };
-            "instance values win over the VPC's" {
-                (
-                    Some(options(Some("http://instance/x.efi"), &["10.0.0.53"], None)),
-                    Some(options(Some("http://vpc/x.efi"), &["10.0.0.54"], None)),
-                ) => DhcpOverrides {
-                    boot_url_v4: Some("http://instance/x.efi".to_string()),
-                    dns_servers_v4: vec!["10.0.0.53".parse().unwrap()],
-                    ..Default::default()
-                },
-            }
-
-            "each unset instance value falls back to the VPC's" {
-                (
-                    Some(options(Some("http://instance/x.efi"), &[], None)),
-                    Some(options(None, &["10.0.0.54"], Some("http://vpc/x6.efi"))),
-                ) => DhcpOverrides {
-                    boot_url_v4: Some("http://instance/x.efi".to_string()),
-                    boot_url_v6: Some("http://vpc/x6.efi".to_string()),
-                    dns_servers_v4: vec!["10.0.0.54".parse().unwrap()],
-                    ..Default::default()
-                },
-            }
-
-            "no option sets keep NICo's values" {
-                (None, None) => DhcpOverrides::default(),
-            }
-        );
     }
 }

@@ -34,11 +34,20 @@ use tokio::process::Command;
 #[tokio::test]
 async fn instance_detail_displays_reported_prefixes_separately_from_addresses() {
     let instance_id = "12345678-1234-5678-90ab-cdef01234567".parse().unwrap();
+    let dhcp_option_set_id = "87654321-4321-8765-ba09-76543210fedc";
     let instance = forge::Instance {
         id: Some(instance_id),
         config: Some(forge::InstanceConfig {
             network: Some(forge::InstanceNetworkConfig {
                 interfaces: vec![Default::default(), Default::default()],
+                ..Default::default()
+            }),
+            os: Some(forge::InstanceOperatingSystemConfig {
+                variant: Some(forge::instance_operating_system_config::Variant::External(
+                    forge::ExternalBoot {
+                        dhcp_option_set_id: Some(dhcp_option_set_id.parse().unwrap()),
+                    },
+                )),
                 ..Default::default()
             }),
             ..Default::default()
@@ -123,6 +132,7 @@ async fn instance_detail_displays_reported_prefixes_separately_from_addresses() 
                 "/unused/client.key",
                 "instance",
                 "show",
+                "--extrainfo",
                 &instance_id.to_string(),
             ])
             .stdin(Stdio::null())
@@ -143,9 +153,11 @@ async fn instance_detail_displays_reported_prefixes_separately_from_addresses() 
         String::from_utf8_lossy(&output.stderr)
     );
     let output = String::from_utf8(output.stdout).unwrap();
+    let external_boot = format!("External boot DHCP Option Set ID: {dhcp_option_set_id}");
     for (label, expected) in [
         ("ADDRESSES", vec!["192.0.2.10", ""]),
         ("PREFIXES", vec!["192.0.2.0/24, 2001:db8::/64", ""]),
+        ("IPXE SCRIPT", vec![external_boot.as_str()]),
     ] {
         let values: Vec<_> = output
             .lines()

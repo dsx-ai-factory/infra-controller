@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,8 +49,8 @@ pub enum OperatingSystemVariant {
     /// Reference to any operating system definition by ID (any variant except OS image).
     /// On read, the actual type (iPXE / ipxe_os_definition) is resolved from the row.
     OperatingSystemId(Uuid),
-    /// Boots from the boot URL of the instance's or VPC's DHCP option set.
-    DhcpOptionSet,
+    /// Boots from the boot URL of the tenant DHCP option set with this ID.
+    External(DhcpOptionSetId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,16 +95,7 @@ impl OperatingSystem {
             OperatingSystemVariant::Ipxe(ipxe) => ipxe.validate(),
             OperatingSystemVariant::OsImage(_id) => Ok(()),
             OperatingSystemVariant::OperatingSystemId(_id) => Ok(()),
-            OperatingSystemVariant::DhcpOptionSet => {
-                // Every DHCP reply carries the set's boot URL, so every boot reaches it.
-                if !self.run_provisioning_instructions_on_every_boot {
-                    return Err(ConfigValidationError::InvalidValue(
-                        "booting via a DHCP option set requires run_provisioning_instructions_on_every_boot"
-                            .to_string(),
-                    ));
-                }
-                Ok(())
-            }
+            OperatingSystemVariant::External(_id) => Ok(()),
         }
     }
 

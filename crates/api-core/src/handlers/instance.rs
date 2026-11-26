@@ -54,7 +54,7 @@ use model::machine::{
 };
 use model::metadata::Metadata;
 use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentType};
-use model::os::OperatingSystem;
+use model::os::{OperatingSystem, OperatingSystemVariant};
 use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
@@ -68,7 +68,7 @@ use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
     allocate_spx_port_mac, assign_implicit_instance_vfs_from_effective_dpu_inventory,
     expected_machine_declares_cx9, ib_memberships_from_config, instance_vf_inventory_source,
-    load_extension_services, load_ib_partition_pkeys,
+    load_extension_services, load_ib_partition_pkeys, lock_external_boot_option_sets,
     reject_unsupported_external_validation_binding, requests_implicit_vf_allocation,
     validate_ib_partition_ownership, validate_instance_extension_services,
     validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
@@ -1392,6 +1392,14 @@ pub(crate) async fn update_operating_system(
         .into());
     }
 
+    if let OperatingSystemVariant::External(id) = os.variant {
+        lock_external_boot_option_sets(
+            &mut txn,
+            [(id, &instance.config.tenant.tenant_organization_id)],
+        )
+        .await?;
+    }
+
     let expected_version = match request.if_version_match {
         Some(version) => version.parse().map_err(CarbideError::from)?,
         None => instance.config_version,
@@ -1679,6 +1687,11 @@ pub(crate) async fn update_instance_config(
             ))
             .into());
         }
+    }
+
+    if let OperatingSystemVariant::External(id) = config.os.variant {
+        lock_external_boot_option_sets(&mut txn, [(id, &config.tenant.tenant_organization_id)])
+            .await?;
     }
 
     // Resolve and lock service/version rows before network allocation, matching
