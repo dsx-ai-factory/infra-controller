@@ -1183,6 +1183,8 @@ impl PreingestionManagerStatic {
                                     endpoint.address,
                                     msg,
                                     failed_pushes,
+                                    *upgrade_type,
+                                    final_version,
                                     txn,
                                 )
                                 .await?;
@@ -3976,8 +3978,11 @@ impl PreingestionManagerStatic {
                 firmware_type,
                 to_install.power_drains_needed,
                 firmware_number,
-                // A retry and a later chain step both keep the count.
-                endpoint_clone.preingestion_state.failed_firmware_pushes(),
+                // A retry and a later chain step of the same component and
+                // version keep the count. Another component starts at 0.
+                endpoint_clone
+                    .preingestion_state
+                    .failed_firmware_pushes_for(*firmware_type, &to_install.version),
                 txn,
             ))
         })

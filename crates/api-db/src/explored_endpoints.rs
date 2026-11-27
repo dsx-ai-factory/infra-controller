@@ -869,11 +869,15 @@ pub async fn set_preingestion_recheck_versions_reason(
     address: IpAddr,
     reason: String,
     failed_pushes: u32,
+    upgrade_type: FirmwareComponentType,
+    final_version: &str,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::RecheckVersionsAfterFailure {
         reason,
         failed_pushes,
+        upgrade_type: Some(upgrade_type),
+        final_version: Some(final_version.to_string()),
     };
     set_preingestion(address, state, txn).await
 }

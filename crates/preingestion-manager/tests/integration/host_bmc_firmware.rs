@@ -801,6 +801,157 @@ async fn test_preingestion_failed_firmware_push_stops_after_limit(
     Ok(())
 }
 
+/// The failed-push count belongs to one component. The UEFI update uses all
+/// its retries. An operator then removes the UEFI from the update order of
+/// the model and restarts. When the BMC update starts, its count must start
+/// at 0.
+#[sqlx_test]
+async fn test_preingestion_failed_push_count_starts_at_zero_for_another_component(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const MAX_RETRIES: u32 = 2;
+    const MODEL: &str = "PowerEdge R750";
+
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_firmware_task_fails(true);
+    redfish_sim.set_firmware_upload_delay(Duration::ZERO);
+    let new_manager = |config: &carbide_test_harness::CarbideConfig| {
+        let mut manager_config = config.preingestion_manager();
+        manager_config.max_firmware_upgrade_retries = MAX_RETRIES;
+        PreingestionManager::new(
+            pool.clone(),
+            manager_config,
+            redfish_sim.clone(),
+            env.test_meter.meter(),
+            None,
+            None,
+            None,
+            env.api().work_lock_manager_handle(),
+            config.ntp_servers.clone(),
+            env.api().instrumentation().clone(),
+        )
+    };
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    // The BMC and the UEFI are both below the pre-ingestion minimum. For this
+    // model the UEFI update starts first.
+    let mut txn = pool.txn_begin().await.unwrap();
+    common::insert_endpoint_version(&mut txn, response.address.as_str(), "4.9", "1.0", false)
+        .await?;
+    txn.commit().await?;
+
+    // Runs one manager pass, then acts as site explorer: stores the same
+    // report again, which clears the "waiting for explorer refresh" flag.
+    // Returns the state after the pass.
+    async fn run_pass(
+        mgr: &PreingestionManager,
+        pool: &PgPool,
+    ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
+        mgr.run_single_iteration().await?;
+        let mut txn = pool.txn_begin().await?;
+        let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+        assert_eq!(endpoints.len(), 1);
+        let endpoint = endpoints.into_iter().next().unwrap();
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                endpoint.address,
+                endpoint.report_version,
+                &endpoint.report,
+                false,
+                &mut txn,
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+        Ok(endpoint.preingestion_state)
+    }
+
+    // The UEFI push fails until all its retries are used. One more failure
+    // would move the endpoint to `Failed`.
+    let mgr = new_manager(&config);
+    let mut state = run_pass(&mgr, &pool).await?;
+    for _ in 0..20 {
+        if matches!(
+            state,
+            PreingestionState::RecheckVersionsAfterFailure { failed_pushes, .. }
+                if failed_pushes == MAX_RETRIES
+        ) {
+            break;
+        }
+        state = run_pass(&mgr, &pool).await?;
+    }
+    assert!(
+        matches!(
+            state,
+            PreingestionState::RecheckVersionsAfterFailure {
+                failed_pushes: MAX_RETRIES,
+                upgrade_type: Some(FirmwareComponentType::Uefi),
+                ..
+            }
+        ),
+        "state: {state:?}"
+    );
+    assert_eq!(redfish_sim.firmware_upload_count(), MAX_RETRIES as usize);
+
+    // The operator removes the UEFI from the update order and restarts.
+    drop(mgr);
+    let mut config_without_uefi = config.clone();
+    let firmware = config_without_uefi
+        .host_models
+        .values_mut()
+        .find(|firmware| firmware.model == MODEL)
+        .expect("firmware config for the model");
+    firmware.ordering = vec![FirmwareComponentType::Bmc];
+    let mgr = new_manager(&config_without_uefi);
+
+    // Run until the BMC push is sent. Its count starts at 0.
+    for _ in 0..20 {
+        state = run_pass(&mgr, &pool).await?;
+        if matches!(
+            state,
+            PreingestionState::UpgradeFirmwareWait {
+                upgrade_type: FirmwareComponentType::Bmc,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            state,
+            PreingestionState::UpgradeFirmwareWait {
+                failed_pushes: 0,
+                upgrade_type: FirmwareComponentType::Bmc,
+                ..
+            }
+        ),
+        "state: {state:?}"
+    );
+    assert_eq!(
+        redfish_sim.firmware_upload_count(),
+        MAX_RETRIES as usize + 1
+    );
+
+    Ok(())
+}
+
 /// UEFI firmware activates on the next host boot. A host that pre-ingestion
 /// found powered off refuses `ForceRestart`, so activation powers it on
 /// instead; a running host, and a host whose power state cannot be read,

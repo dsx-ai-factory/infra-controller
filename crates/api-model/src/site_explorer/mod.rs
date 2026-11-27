@@ -764,6 +764,15 @@ pub enum PreingestionState {
         /// before this field existed read as 0.
         #[serde(default)]
         failed_pushes: u32,
+        /// Component of the failed push. `failed_pushes` counts only for a
+        /// retry of the same component and `final_version`. `None` in rows
+        /// stored before this field existed.
+        #[serde(default)]
+        upgrade_type: Option<FirmwareComponentType>,
+        /// Target version of the failed push. `None` in rows stored before
+        /// this field existed.
+        #[serde(default)]
+        final_version: Option<String>,
     },
     Failed {
         reason: String,
@@ -790,6 +799,36 @@ impl PreingestionState {
         match self {
             Self::UpgradeFirmwareWait { failed_pushes, .. }
             | Self::RecheckVersionsAfterFailure { failed_pushes, .. } => *failed_pushes,
+            _ => 0,
+        }
+    }
+
+    /// Failed firmware pushes that count for an update of `upgrade_type` to
+    /// `final_version`. Returns 0 when the stored count is for another
+    /// component or another target version, so an update of the next
+    /// component starts with all its retries.
+    pub fn failed_firmware_pushes_for(
+        &self,
+        upgrade_type: FirmwareComponentType,
+        final_version: &str,
+    ) -> u32 {
+        match self {
+            Self::UpgradeFirmwareWait {
+                failed_pushes,
+                upgrade_type: counted_type,
+                final_version: counted_version,
+                ..
+            } if *counted_type == upgrade_type && counted_version == final_version => {
+                *failed_pushes
+            }
+            Self::RecheckVersionsAfterFailure {
+                failed_pushes,
+                upgrade_type: Some(counted_type),
+                final_version: Some(counted_version),
+                ..
+            } if *counted_type == upgrade_type && counted_version == final_version => {
+                *failed_pushes
+            }
             _ => 0,
         }
     }

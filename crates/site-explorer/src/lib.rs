@@ -4777,6 +4777,8 @@ mod tests {
                         PreingestionState::RecheckVersionsAfterFailure {
                             reason: "job failed".to_string(),
                             failed_pushes: 1,
+                            upgrade_type: None,
+                            final_version: None,
                         },
                         true,
                         false,
