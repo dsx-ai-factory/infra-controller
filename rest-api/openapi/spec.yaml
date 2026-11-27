@@ -1165,6 +1165,8 @@ paths:
                 $ref: '#/components/schemas/Site'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-site
       description: |-
         Retrieve a specific Site by ID.
@@ -11395,6 +11397,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-operating-system
       description: |-
         Get an Operating System by ID
