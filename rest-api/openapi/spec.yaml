@@ -4745,8 +4745,16 @@ paths:
       summary: Delete Subnet
       operationId: delete-subnet
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Deletion request was accepted
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
