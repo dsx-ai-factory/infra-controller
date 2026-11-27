@@ -43,8 +43,17 @@ pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseRe
         .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    claim_members(txn, domain, &domain.members).await
+}
+
+/// Claim all positions in the caller's transaction; roll back on any error.
+pub async fn claim_members(
+    txn: &mut PgConnection,
+    domain: &NvLinkDomain,
+    members: &[model::nvlink_domain::NvLinkDomainMember],
+) -> DatabaseResult<()> {
     // Sorted insertion order prevents deadlocks between overlapping requests.
-    let mut members: Vec<_> = domain.members.iter().collect();
+    let mut members: Vec<_> = members.iter().collect();
     members.sort_by_key(|m| (m.rack_index, m.slot_index, m.component_type.to_string()));
     for member in members {
         let query = "INSERT INTO nvlink_domain_members (domain_id, rack_group_id, rack_index, slot_index, component_type) VALUES ($1, $2, $3, $4, $5)";
@@ -62,7 +71,13 @@ pub async fn create(txn: &mut PgConnection, domain: &NvLinkDomain) -> DatabaseRe
                 {
                     DatabaseError::AlreadyFoundError {
                         kind: "NVLink domain member",
-                        id: "one or more positions are already claimed".into(),
+                        id: format!(
+                            "group {} rack {} {} slot {} is already claimed",
+                            domain.rack_group_id,
+                            member.rack_index,
+                            member.component_type,
+                            member.slot_index
+                        ),
                     }
                 } else {
                     DatabaseError::query(query, e)

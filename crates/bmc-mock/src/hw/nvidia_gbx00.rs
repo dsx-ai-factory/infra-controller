@@ -31,7 +31,7 @@ const CBC_CHASSIS_PHYSICAL_SLOT_OFFSET: u32 = 10;
 
 // NVL72 layout: eighteen compute trays in two banks, with the nine NVLink
 // switch trays between them.
-const FIRST_COMPUTE_RANGE_START: u8 = 11;
+pub(super) const FIRST_COMPUTE_RANGE_START: u8 = 11;
 const FIRST_COMPUTE_RANGE_END: u8 = 18;
 const SWITCH_RANGE_START: u8 = 19;
 const SWITCH_RANGE_END: u8 = 27;
@@ -46,7 +46,7 @@ const FIRST_COMPUTE_BANK_SIZE: u8 = FIRST_COMPUTE_RANGE_END - FIRST_COMPUTE_RANG
 /// bottom of their bank; a switch tray's chassis publishes no slot of its own,
 /// so the rack unit it occupies is the one physical slot that exists for it.
 /// Any other position holds no tray.
-pub(crate) fn nvl72_placement(position: u8) -> RackPlacement {
+pub(crate) fn nvl72_placement(rack_type: crate::RackType, position: u8) -> RackPlacement {
     let tray = match position {
         FIRST_COMPUTE_RANGE_START..=FIRST_COMPUTE_RANGE_END => {
             Some(compute_tray(position - FIRST_COMPUTE_RANGE_START))
@@ -60,7 +60,7 @@ pub(crate) fn nvl72_placement(position: u8) -> RackPlacement {
         }),
         _ => None,
     };
-    RackPlacement::new(position, NVL72_TOPOLOGY_ID, tray)
+    RackPlacement::new(rack_type, position, NVL72_TOPOLOGY_ID, tray)
 }
 
 fn compute_tray(tray_index: u8) -> TrayPlacement {
@@ -206,7 +206,7 @@ mod tests {
     }
 
     fn switch(position: u8) -> Option<(u8, u32)> {
-        match nvl72_placement(position).tray()? {
+        match nvl72_placement(RackType::WiwynnGb200Nvl72, position).tray()? {
             TrayPlacement::Switch {
                 tray_index,
                 slot_number,
@@ -216,7 +216,7 @@ mod tests {
     }
 
     fn compute(position: u8) -> Option<(u8, u32)> {
-        match nvl72_placement(position).tray()? {
+        match nvl72_placement(RackType::WiwynnGb200Nvl72, position).tray()? {
             TrayPlacement::Compute {
                 tray_index,
                 chassis_physical_slot_number,
@@ -232,8 +232,14 @@ mod tests {
                 !(compute(position).is_some() && switch(position).is_some()),
                 "position {position} cannot be both a compute and a switch tray"
             );
-            assert_eq!(nvl72_placement(position).position(), position);
-            assert_eq!(nvl72_placement(position).topology_id(), NVL72_TOPOLOGY_ID);
+            assert_eq!(
+                nvl72_placement(RackType::WiwynnGb200Nvl72, position).position(),
+                position
+            );
+            assert_eq!(
+                nvl72_placement(RackType::WiwynnGb200Nvl72, position).topology_id(),
+                NVL72_TOPOLOGY_ID
+            );
         }
     }
 
@@ -258,7 +264,10 @@ mod tests {
         // Switch trays and power shelves are not compute trays.
         for position in [19, 27, 6, 9, 39, 42] {
             assert_eq!(compute(position), None, "{position}");
-            assert_eq!(nvl72_placement(position).compute_tray_index(), None);
+            assert_eq!(
+                nvl72_placement(RackType::WiwynnGb200Nvl72, position).compute_tray_index(),
+                None
+            );
         }
     }
 }

@@ -30,7 +30,7 @@ impl WiwynnGB200Nvl72Rack {
     }
 
     pub(crate) fn placement(&self, position: u8) -> RackPlacement {
-        hw::nvidia_gbx00::nvl72_placement(position)
+        hw::nvidia_gbx00::nvl72_placement(crate::RackType::WiwynnGb200Nvl72, position)
     }
 }
 

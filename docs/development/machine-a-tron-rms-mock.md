@@ -19,8 +19,10 @@ listener, on the same port (`service.bmcMock.port`, default `1266`) and with
 the same certificate as the Redfish, control, and UFM mock routes. It is
 always present, has no enable flag, and is called only when
 `nico-api.rms.apiUrl` points at it. Placement, addresses, and power state come
-from the same simulated devices that answer Redfish, so RMS and Redfish never
-disagree about a device.
+from the same simulated devices that answer Redfish. On the simulated GB200 NVL72,
+RMS numbers compute and switch slots together from the first compute tray at U11
+(slot 1). Tray indexes start at zero separately for compute and switch trays.
+Redfish continues to report the platform's chassis numbering.
 
 | Area | RPCs |
 | --- | --- |

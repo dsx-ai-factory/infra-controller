@@ -24,11 +24,25 @@ pub(crate) async fn add_expected_rack_group(
         .try_into()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
-    db_expected_rack_group::create(&mut txn, &group)
-        .await
-        .map_err(CarbideError::from)?;
+    create_group(&mut txn, &group, api.runtime_config.managed_domain).await?;
     txn.commit().await?;
     Ok(Response::new(()))
+}
+
+async fn create_group(
+    txn: &mut sqlx::PgConnection,
+    group: &ExpectedRackGroup,
+    managed_domain: bool,
+) -> Result<(), CarbideError> {
+    if managed_domain {
+        model::nvlink_domain::derive_managed_members(group)
+            .map_err(CarbideError::InvalidArgument)?;
+    }
+    db_expected_rack_group::create(txn, group).await?;
+    if managed_domain {
+        db::nvlink_domain::lifecycle::create_managed(txn, group).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn update_expected_rack_group(
@@ -142,13 +156,25 @@ pub(crate) async fn replace_all_expected_rack_groups(
         }
     }
 
+    let existing = if api.runtime_config.managed_domain {
+        db_expected_rack_group::lock_for_replacement(&mut txn)
+            .await
+            .map_err(CarbideError::from)?;
+        db_expected_rack_group::find_ids(txn.as_pgconn())
+            .await
+            .map_err(CarbideError::from)?
+            .into_iter()
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     db_expected_rack_group::clear(&mut txn)
         .await
         .map_err(CarbideError::from)?;
     for group in &groups {
-        db_expected_rack_group::create(&mut txn, group)
-            .await
-            .map_err(CarbideError::from)?;
+        let create_default =
+            api.runtime_config.managed_domain && !existing.contains(&group.rack_group_id);
+        create_group(&mut txn, group, create_default).await?;
     }
     txn.commit().await?;
     Ok(Response::new(()))

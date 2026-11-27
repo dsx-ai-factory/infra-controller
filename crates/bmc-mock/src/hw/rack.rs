@@ -15,16 +15,16 @@
  * limitations under the License.
  */
 
-use crate::HardwareType;
+use crate::{HardwareType, RackType};
 
 /// Where a unit sits in its rack and what its platform reports for it.
 ///
 /// Built by the rack's platform implementation (see `RackInfo::placement`),
 /// which owns the arithmetic that turns a rack position into the numbers a
-/// chassis reports. Redfish and RMS both read the result from here, so they
-/// cannot disagree about where a node sits.
+/// chassis and RMS inventory report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RackPlacement {
+    rack_type: RackType,
     position: u8,
     topology_id: u32,
     tray: Option<TrayPlacement>,
@@ -46,8 +46,14 @@ pub enum TrayPlacement {
 }
 
 impl RackPlacement {
-    pub(crate) fn new(position: u8, topology_id: u32, tray: Option<TrayPlacement>) -> Self {
+    pub(crate) fn new(
+        rack_type: RackType,
+        position: u8,
+        topology_id: u32,
+        tray: Option<TrayPlacement>,
+    ) -> Self {
         Self {
+            rack_type,
             position,
             topology_id,
             tray,
@@ -64,6 +70,27 @@ impl RackPlacement {
 
     pub fn tray(self) -> Option<TrayPlacement> {
         self.tray
+    }
+
+    /// RMS inventory slot and type-specific tray index.
+    pub fn rms_location(self) -> Option<(u32, u32)> {
+        let (tray_index, chassis_slot) = match self.tray? {
+            TrayPlacement::Compute {
+                tray_index,
+                chassis_physical_slot_number,
+            } => (tray_index, chassis_physical_slot_number),
+            TrayPlacement::Switch {
+                tray_index,
+                slot_number,
+            } => (tray_index, slot_number),
+        };
+        let slot = match self.rack_type {
+            RackType::WiwynnGb200Nvl72 => {
+                u32::from(self.position - super::nvidia_gbx00::FIRST_COMPUTE_RANGE_START) + 1
+            }
+            RackType::LenovoGb300Nvl72 => chassis_slot,
+        };
+        Some((slot, u32::from(tray_index)))
     }
 
     pub(crate) fn compute_tray_index(self) -> Option<u8> {

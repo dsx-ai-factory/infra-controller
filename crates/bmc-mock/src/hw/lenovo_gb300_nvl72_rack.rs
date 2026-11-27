@@ -30,7 +30,7 @@ impl LenovoGB300Nvl72Rack {
     }
 
     pub(crate) fn placement(&self, position: u8) -> RackPlacement {
-        hw::nvidia_gbx00::nvl72_placement(position)
+        hw::nvidia_gbx00::nvl72_placement(crate::RackType::LenovoGb300Nvl72, position)
     }
 }
 

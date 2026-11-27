@@ -152,3 +152,71 @@ async fn expected_rack_group_duplicate_create(pool: sqlx::PgPool) {
         );
     }
 }
+
+#[crate::sqlx_test()]
+async fn managed_domain_is_created_only_for_new_groups(pool: sqlx::PgPool) {
+    use db::nvlink_domain::lifecycle;
+
+    use crate::tests::common::api_fixtures::{
+        TestEnvOverrides, create_test_env_with_overrides, get_config,
+    };
+    let mut config = get_config();
+    config.managed_domain = true;
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+    let first = ExpectedRackGroup {
+        rack_group_id: Some(RackGroupId::new("first")),
+        topology: "NVL72".into(),
+        ..Default::default()
+    };
+    env.api
+        .add_expected_rack_group(Request::new(first.clone()))
+        .await
+        .unwrap();
+    let initial = lifecycle::find_ids(&pool).await.unwrap();
+    assert_eq!(initial.len(), 1);
+    let snapshot = lifecycle::find_snapshot(&pool, initial[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.controller_state.value,
+        model::nvlink_domain::NvLinkDomainState::Created
+    );
+    assert!(snapshot.config.value.managed && snapshot.domain.members.is_empty());
+    let second = ExpectedRackGroup {
+        rack_group_id: Some(RackGroupId::new("second")),
+        ..first.clone()
+    };
+    let groups = rpc::forge::ExpectedRackGroupList {
+        expected_rack_groups: vec![first, second],
+    };
+    let blocked = env
+        .api
+        .replace_all_expected_rack_groups(Request::new(groups.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(blocked.code(), Code::FailedPrecondition);
+    assert_eq!(lifecycle::find_ids(&pool).await.unwrap(), initial);
+    let mut txn = db::TransactionVending::txn_begin(&pool).await.unwrap();
+    db::nvlink_domain::delete(&mut txn, initial[0])
+        .await
+        .unwrap();
+    assert!(
+        lifecycle::delete_pre_hardware(&mut txn, initial[0])
+            .await
+            .unwrap()
+    );
+    txn.commit().await.unwrap();
+    env.api
+        .replace_all_expected_rack_groups(Request::new(groups))
+        .await
+        .unwrap();
+    let ids = lifecycle::find_ids(&pool).await.unwrap();
+    assert_eq!(ids.len(), 1);
+    let created = lifecycle::find_snapshot(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(created.domain.rack_group_id.as_str(), "second");
+}

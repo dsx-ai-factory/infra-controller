@@ -48,7 +48,7 @@ pub(crate) fn status_json(primary: bool) -> String {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Candidate<'a> {
     pub(crate) node_id: &'a str,
-    /// Position in the rack, as the simulated chassis reports it.
+    /// Rack slot reported by RMS inventory.
     pub(crate) slot: Option<u32>,
 }
 

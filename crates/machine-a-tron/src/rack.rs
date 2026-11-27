@@ -46,7 +46,7 @@ pub(crate) struct RackMemberRegistration {
 
 impl RackMemberRegistration {
     /// Member declared for this unit, identified by its machine config section.
-    fn expected_member(&self, cartridge_index: u32) -> eyre::Result<ExpectedRackGroupMember> {
+    fn expected_member(&self) -> eyre::Result<ExpectedRackGroupMember> {
         use RackCapabilityType::{Compute, PowerShelf, Switch};
 
         let (device_type, manufacturer) = match self.hardware_type {
@@ -70,7 +70,7 @@ impl RackMemberRegistration {
             }
         };
         Ok(ExpectedRackGroupMember {
-            cartridge_index: Some(cartridge_index),
+            cartridge_index: Some(u32::from(self.placement.position())),
             r#type: device_type.to_string(),
             manufacturer: manufacturer.to_string(),
             id: self.machine_config_section.clone(),
@@ -94,8 +94,7 @@ impl RackRegistration {
         let members = self
             .members
             .iter()
-            .enumerate()
-            .map(|(index, member)| member.expected_member(u32::try_from(index)?))
+            .map(RackMemberRegistration::expected_member)
             .collect::<eyre::Result<Vec<_>>>()?;
         Ok(ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new(self.rack_id.as_str())),
