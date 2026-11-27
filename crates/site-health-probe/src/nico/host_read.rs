@@ -56,10 +56,11 @@ pub(crate) const HOST_STATE_INCOMPLETE: &str = "host_state_incomplete";
 const OTHER: &str = "other";
 
 /// `NotAllocatableReason::code()` in nico-api.
-const ALLOCATION_REASONS: [&str; 8] = [
+const ALLOCATION_REASONS: [&str; 9] = [
     "invalid_state",
     "pending_instance_creation",
     "pending_decommission",
+    "pending_force_deletion",
     "pending_boot_configuration",
     "dpu_reprovisioning_started",
     "no_dpu_snapshots",
@@ -812,35 +813,48 @@ mod tests {
         );
     }
 
+    /// Preserves documented blocking reasons and maps unrecognized codes to other so blocked hosts remain explainable without unbounded labels.
     #[test]
     fn unknown_blocking_reason_maps_to_other() {
         check_values(
             [
+                // Preserve an established allocation reason for existing Core versions.
                 Check {
                     scenario: "a known allocation code",
                     input: ("allocation", Some("maintenance_mode")),
                     expect: "maintenance_mode".into(),
                 },
+                // Distinguish retained force deletion from unknown allocation failures.
+                Check {
+                    scenario: "a pending force deletion retains its reason",
+                    input: ("allocation", Some("pending_force_deletion")),
+                    expect: "pending_force_deletion".into(),
+                },
+                // Keep future allocation codes bounded until the probe supports them.
                 Check {
                     scenario: "a new allocation code",
                     input: ("allocation", Some("quarantined")),
                     expect: OTHER.into(),
                 },
+                // Keep update-only reasons out of allocation labels.
                 Check {
                     scenario: "an update code is no allocation code",
                     input: ("allocation", Some("disable_list")),
                     expect: OTHER.into(),
                 },
+                // Preserve the blocked result even when Core omits its explanation.
                 Check {
                     scenario: "blocked without a code",
                     input: ("allocation", None),
                     expect: OTHER.into(),
                 },
+                // Preserve a documented update reason independently of allocation reasons.
                 Check {
                     scenario: "a known update code",
                     input: ("update", Some("outside_update_window")),
                     expect: "outside_update_window".into(),
                 },
+                // Exclude caller-supplied details from bounded metric labels.
                 Check {
                     scenario: "free text never becomes a label",
                     input: ("update", Some("BMC at 10.0.0.5 said no")),
@@ -848,6 +862,7 @@ mod tests {
                 },
             ],
             |(field, code): (&str, Option<&str>)| {
+                // Configure the blocked check with its reason; the remaining fields complete the host response.
                 let mut row = compact_row();
                 let code = code.map(str::to_string);
                 if field == "allocation" {
@@ -857,12 +872,14 @@ mod tests {
                 } else {
                     row.update.as_mut().unwrap().blocking_reason = code;
                 }
+                // Map the Core response through the same conversion used by the compact reader.
                 let detail = compact_host_detail(row).expect("maps");
                 let known = if field == "allocation" {
                     detail.allocatable
                 } else {
                     detail.update_eligible
                 };
+                // Require a blocked result carrying only the documented reason or the bounded fallback.
                 match known {
                     Known::Value(Err(reason)) => reason,
                     other => panic!("{other:?}"),

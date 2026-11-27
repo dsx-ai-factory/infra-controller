@@ -25,7 +25,9 @@ use clap::Parser;
     long_about = "Reset a managed host: remove its Instance and DPF resources, then re-ingest it.\n\n\
     If the host still has an Instance, Reset waits for every attached DPU to acknowledge \
     Admin networking before deleting the Instance and releasing its network resources. \
-    An unreachable DPU can keep Reset waiting indefinitely. A started Reset cannot be canceled."
+    Retained Service VPC endpoints also require placement withdrawal, required network \
+    acknowledgements, and DPF chain isolation. An unreachable DPU or unavailable DPF observer \
+    can keep Reset waiting indefinitely. A started Reset cannot be canceled."
 )]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -52,8 +54,11 @@ pub(crate) enum Args {
             If the host still has an Instance, including one already terminating, Reset requests \
             Admin networking. The Instance can lose tenant connectivity while Reset waits for \
             every attached DPU to acknowledge the change. Reset retains the Instance and its \
-            network resources until then. An unreachable DPU can keep Reset waiting indefinitely. \
-            Hosts without an Instance skip this network wait.\n\n\
+            network resources until Admin networking is acknowledged and cleanup of any retained \
+            Service VPC endpoints is confirmed. Endpoint cleanup requires placement withdrawal, \
+            required network acknowledgements, and DPF chain isolation. An unreachable DPU or \
+            unavailable DPF observer can keep Reset waiting indefinitely. Hosts without an Instance \
+            skip this network wait.\n\n\
             After Reset starts, it cannot be canceled with managed-host reset clear, including \
             while waiting for the DPUs."
     )]
@@ -91,7 +96,7 @@ pub(crate) struct ResetSet {
         action,
         help = "Acknowledge destruction of the live Instance. Host cleanup also deletes its \
                 data unless --ignore-cleanup is set. Required for a live Instance; does not \
-                bypass the Admin network acknowledgement."
+                bypass the Admin network acknowledgement or Service VPC endpoint cleanup."
     )]
     pub(super) allow_reset_with_instance: bool,
 
@@ -101,7 +106,7 @@ pub(crate) struct ResetSet {
         requires = "allow_reset_with_instance",
         help = "Skip host cleanup after the Instance is deleted. Data from the previous tenant \
                 stays on the host. Requires --allow-reset-with-instance and does not bypass \
-                the Admin network acknowledgement."
+                the Admin network acknowledgement or Service VPC endpoint cleanup."
     )]
     pub(super) ignore_cleanup: bool,
 

@@ -17,6 +17,8 @@
 
 //! Instance extension-service reconciliation and status handling.
 
+pub(super) mod service_vpc;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -45,12 +47,14 @@ use crate::dpf::DpfOperations;
 
 /// Builds instance extension-service status from its two authoritative sources.
 ///
-/// Kubernetes Pod services retain their agent-reported status. DPF Helm services
+/// Kubernetes Pod services retain their agent-reported status. Nonnetworked DPF Helm services
 /// deliberately do not: DPF has no per-DPU, per-service workload observation.
 /// Instead, this reports the placement labels persisted on DPUDevice CRs. It
 /// must not be interpreted as DPU-cluster Node-label or Helm-workload health.
-/// If no DPF SDK is available, reconciliation is skipped and existing
-/// observations remain authoritative; no observation is written just because
+/// Networked Helm services consume the current per-endpoint placement, chain, and network
+/// evidence persisted by service_vpc::reconcile before this aggregation.
+/// If no DPF SDK is available, nonnetworked reconciliation is skipped and existing
+/// observations remain authoritative; no nonnetworked observation is written just because
 /// the SDK is unavailable.
 pub(super) async fn get_extension_services_status(
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -58,7 +62,7 @@ pub(super) async fn get_extension_services_status(
     db_pool: &sqlx::PgPool,
     dpf_sdk: Option<&dyn DpfOperations>,
 ) -> Result<InstanceExtensionServicesStatus, StateHandlerError> {
-    // An instance deletion is the only force-detach path. Keep the timestamp
+    // Instance deletion supplies a fallback removal timestamp. Keep the timestamp
     // rather than a separate mode so the derived status can report precisely
     // when every service became removed without changing durable config.
     let instance_deleted_at = instance.deleted.as_ref();
@@ -98,7 +102,8 @@ pub(super) async fn get_extension_services_status(
         .collect_vec();
     let mut observations = instance.observations.extension_services.clone();
 
-    if !dpf_service_configs.is_empty()
+    if instance.config.network.service_interfaces.is_empty()
+        && !dpf_service_configs.is_empty()
         && let Some(dpf_sdk) = dpf_sdk
     {
         let mut target_dpu_ids = HashMap::new();
@@ -163,6 +168,10 @@ pub(super) async fn get_extension_services_status(
             mh_snapshot.host_snapshot.primary_attached_dpu_machine_id(),
             instance_deleted_at,
             &observations,
+            Some(Versioned::new(
+                &instance.config.network,
+                instance.network_config_version,
+            )),
         ),
     )
 }
@@ -351,6 +360,7 @@ async fn persist_dpf_helm_chart_placement_observation(
 ) -> Result<InstanceExtensionServiceStatusObservation, StateHandlerError> {
     let observed_at = Utc::now();
     let observation = InstanceExtensionServiceStatusObservation {
+        service_vpc_endpoints: Vec::new(),
         config_version,
         instance_config_version: None,
         observed_at,
@@ -480,8 +490,8 @@ pub(super) async fn cleanup_terminated_extension_services(
 
     // Generic DPF placement termination does not prove that the service's
     // network child, HBN state, and DHCP state have all been removed.
-    // TODO(#6133): Reclaim the attachment and endpoint together after observed
-    // service-network cleanup has been persisted.
+    // service_vpc::reconcile reclaims the attachment and endpoint together after current
+    // chain-isolation and service-network removal evidence has been persisted.
     // A VPC-local record names its attachment the same way, and snapshot loading
     // rejects a record whose attachment is gone, so whatever removes the record
     // releases the attachment rather than this cleanup.

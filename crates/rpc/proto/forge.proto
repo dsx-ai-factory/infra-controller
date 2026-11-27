@@ -291,6 +291,8 @@ service Forge {
   // rpc StreamInstanceEvents(UUID) returns (stream InstanceEvent);
 
   /* Power Control */
+  // Rejects requests with FAILED_PRECONDITION while the Instance's Machine is pending
+  // force deletion, before changing boot settings, approving updates, or rebooting.
   rpc InvokeInstancePower(InstancePowerRequest) returns (InstancePowerResult);
 
   rpc ForgeAgentControl(ForgeAgentControlRequest) returns (ForgeAgentControlResponse);
@@ -433,17 +435,31 @@ service Forge {
   // The attached-Instance override removes the attached Instance control-plane
   // record without first requesting a graceful workload shutdown. Force-delete
   // cleanup may forcibly restart the host.
-  // By default, cleanup does not wait for DPU network acknowledgement. Set
-  // wait_for_instance_dpu to request Admin networking when an Instance exists
-  // and retain the records until every attached DPU acknowledges it. While
-  // waiting, return all_done=false; poll to finish deletion. An unreachable DPU
-  // can block an opted-in deletion indefinitely, and omitting the option on a
-  // retry does not cancel an already-recorded wait.
+  // By default, retained Service VPC endpoints defer deletion until the machine
+  // controller observes placement withdrawal, current DPU network configuration,
+  // and ServiceChain isolation for every endpoint DPU. The Instance and its
+  // allocations remain retained before ForceDeletion while cleanup and active
+  // DPU reprovisioning can advance. Set allow_delete_with_orphaned_dpf_crds on
+  // every poll to bypass endpoint cleanup and accept orphaned DPF resources.
+  // A DPF-ingested host without a configured DPF SDK returns FailedPrecondition
+  // unless allow_delete_with_orphaned_dpf_crds is set.
+  // Without retained Service VPC endpoints, cleanup does not wait for DPU network
+  // acknowledgement unless wait_for_instance_dpu was recorded. Set that option
+  // when an Instance exists to require every attached DPU to acknowledge Admin
+  // networking. It also applies when allowing orphaned DPF resources.
+  // While cleanup or acknowledgement is pending, return all_done=false; callers
+  // must poll to finish deletion. Unavailable DPUs or DPF observers can block
+  // Service VPC cleanup indefinitely. An unavailable DPU can also block the
+  // optional Admin wait indefinitely. Omitting wait_for_instance_dpu on a retry
+  // does not cancel an already-recorded wait.
   // Only servers supporting this option enforce the recorded wait. An older
   // server can complete cleanup without acknowledgement, including on a retry.
-  // The request remains in ForceDeletion across API restarts and cannot be canceled.
-  // Returning to Admin stops tenant networking through the DPUs, but does not shut
-  // down or wipe the tenant's operating system. A later PXE boot runs discovery again.
+  // Pending deletion survives API restarts and cannot be canceled. A later poll
+  // enters ForceDeletion after Service VPC cleanup, or with explicit orphan consent.
+  // Acknowledging Admin networking does not confirm Service VPC endpoint
+  // withdrawal on secondary DPUs when allow_delete_with_orphaned_dpf_crds
+  // bypasses endpoint cleanup. Returning to Admin does not shut down or wipe the
+  // tenant's operating system. A later PXE boot runs discovery again.
   //
   // Due to the not well defined state that hosts are in after calling this command,
   // it should not be used by Tenants or Site Providers to release instances. Those
@@ -523,8 +539,11 @@ service Forge {
   // Trigger a reset of a managed host: tear down its Instance and DPF
   // resources, then re-ingest it from DPU discovery.
   // With an Instance present, retain it and its network resources until every
-  // DPU attached to the host acknowledges Admin networking. An unreachable DPU
-  // keeps the reset waiting; hosts without an Instance skip this network wait.
+  // DPU attached to the host acknowledges Admin networking and retained Service
+  // VPC endpoints complete placement withdrawal, required network acknowledgements,
+  // and DPF chain isolation. An unreachable DPU or unavailable DPF observer can
+  // keep the reset waiting indefinitely. Hosts without an Instance skip this
+  // network wait.
   rpc TriggerManagedHostReset(ManagedHostResetRequest) returns (google.protobuf.Empty);
   // List managed hosts waiting for reset
   rpc ListManagedHostsWaitingForReset(ManagedHostResetListRequest) returns (ManagedHostResetListResponse);
@@ -4426,8 +4445,8 @@ message InstanceStatus {
   InstanceDpuExtensionServicesStatus dpu_extension_services = 22;
   // Whether all configurations related to an instance are in-sync.
   // This is a logical AND for the settings of all sub-configurations.
-  // At this time it equals `InstanceNetworkStatus::configs_synced`,
-  // but might in the future also include readiness for other subsystems.
+  // It combines network, InfiniBand, extension-service, NVLink, and SPX
+  // synchronization with the Instance configuration version check.
   SyncState configs_synced = 101;
 
   // This indicates if updates are pending for the instance
@@ -6474,7 +6493,7 @@ message DpuAgentUpgradePolicyResponse {
 
 message AdminForceDeleteMachineRequest {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // UUID, IP address, host name or MAC address of either the host or DPU to force delete
+  // Machine ID, IP address, MAC address, or hostname of either the host or DPU to force delete
   string host_query = 1;
 
   // Should we delete oob_net0 and host interfaces?
@@ -6513,7 +6532,11 @@ message AdminForceDeleteMachineRequest {
 
   // When true and an Instance exists, request Admin networking and wait for
   // every attached DPU to acknowledge it before removing the Instance and
-  // Machines. Defaults to false: preserve cleanup without DPU acknowledgement.
+  // Machines, including when allow_delete_with_orphaned_dpf_crds is true.
+  // Defaults to false; Service VPC cleanup still requires its current network
+  // evidence unless allow_delete_with_orphaned_dpf_crds bypasses that cleanup.
+  // Without Service VPC endpoints or a recorded wait, false permits deletion
+  // without DPU acknowledgement.
   // A new deletion without an Instance does not wait, even when true. Once
   // recorded, the wait survives retries, omission of this option, and later
   // removal of the Instance. An unreachable DPU can leave deletion pending
@@ -6601,8 +6624,14 @@ message DecommissionManagedHostResponse {
 // Describes which resources have been released
 message AdminForceDeleteMachineResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // True when deletion has completed. False while an opted-in deletion waits for
-  // DPU Admin-network acknowledgement; poll AdminForceDeleteMachine to resume.
+  // True when Core deletion has completed. False while default Service VPC
+  // endpoint cleanup or a recorded DPU Admin-network acknowledgement is pending.
+  // Host DPF cleanup also waits for DPUNode, DPUDevice, DPU, and NICo-owned BMC
+  // credential Secret removal when per-DPU BMC credentials are supported, unless
+  // allow_delete_with_orphaned_dpf_crds is set. Older DPF versions attempt
+  // DPUNode and DPUDevice deletion without confirming absence.
+  // Service VPC cleanup runs before ForceDeletion. Poll AdminForceDeleteMachine
+  // to resume and finish deletion.
   bool all_done = 1;
 
   string managed_host_machine_id = 11;
@@ -7272,9 +7301,11 @@ message DpuNetworkStatus {
   optional bytes lldp_snapshot_fingerprint = 19;
   // Service interfaces from a successfully reconciled network response, independent
   // of instance_network_config_version. Omission supplies no service applied evidence.
-  // A present empty report acknowledges a configuration with no service interfaces.
-  // Missing or malformed identities, duplicate identities, or invalid NSG metadata
-  // discard the complete service report without rejecting host acknowledgement.
+  // A present empty report replaces this DPU's service-interface observations with an empty set.
+  // Attachment lifecycle decisions that use this report also require its network_config_version
+  // to match the current Instance network generation.
+  // Missing or malformed identities, duplicate identities, invalid NSG metadata, or a malformed
+  // service-network generation discard the complete service report without rejecting host acknowledgement.
   optional ServiceVpcNetworkStatusObservation service_vpc_network_observation = 20;
 }
 
@@ -7284,6 +7315,13 @@ message ServiceVpcNetworkStatusObservation {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Complete replacement of the reporting DPU's service-interface observations.
   repeated ServiceVpcInterfaceStatusObservation interfaces = 1;
+  // Instance network generation fetched with these interfaces, including an empty removal set.
+  // With live HBN application enabled, reported only after HBN application
+  // and successful DHCP submission for that response. Local-development
+  // `container-exec` with `skip-reload = true` in `[hbn]` can report after
+  // saving HBN configuration and successful DHCP submission without applying HBN.
+  // Omission supplies no service-network generation evidence for attachment lifecycle decisions.
+  optional string network_config_version = 2;
 }
 
 // Identifies one applied service interface within the reporting DPU.
@@ -12886,10 +12924,11 @@ message ManagedHostResetRequest {
 
   // Operator acknowledgment that resetting an assigned host destroys the live
   // tenant instance and its data. The server rejects a Set on an assigned host
-  // unless this is set. This does not bypass the Admin network acknowledgement.
+  // unless this is set. This does not bypass the Admin network acknowledgement
+  // or Service VPC endpoint cleanup.
   bool allow_reset_with_instance = 4;
   // Skip host cleanup after the live instance is deleted, not the Admin
-  // network acknowledgement required before deletion.
+  // network acknowledgement or Service VPC endpoint cleanup required before deletion.
   bool ignore_cleanup = 5;
 }
 

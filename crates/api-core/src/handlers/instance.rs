@@ -922,38 +922,10 @@ async fn release_one_instance(
         return Ok(());
     }
 
-    // Mark every networked attachment as removed before marking the Instance deleted so cleanup
-    // retains its service-interface records until external cleanup has been observed.
-    if let Some(terminating_services) =
-        crate::instance::service_vpc::terminate_networked_attachments(
-            &instance.extension_services_config,
-            &instance.network_config,
-            chrono::Utc::now(),
-        )
-    {
-        match db::instance::update_service_network_config(
-            txn.as_mut(),
-            instance.id,
-            instance.extension_services_config_version,
-            &instance.extension_services_config,
-            &terminating_services,
-            instance.network_config_version,
-            &instance.network_config,
-            &instance.network_config,
-            true,
-        )
-        .await?
-        {
-            ConditionalWrite::Applied(_) => {}
-            ConditionalWrite::NotApplied(_) => {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "service-VPC state for instance {} changed during release; retry the release",
-                    instance.id
-                ))
-                .into());
-            }
-        }
-    }
+    // Persist service removal generations before setting the deletion marker so every accepted endpoint
+    // retains its allocation until the machine controller validates external cleanup.
+    db::instance::terminate_service_vpc_attachments(txn.as_mut(), instance.id, chrono::Utc::now())
+        .await?;
 
     let pkeys = load_ib_partition_pkeys(
         txn.as_mut(),
@@ -1108,6 +1080,18 @@ pub(crate) async fn invoke_power(
         return Err(CarbideError::FailedPrecondition(
             "instance power control is blocked by its NIC firmware operation".into(),
         )
+        .into());
+    }
+
+    // Reject Instance reboot requests before boot writes or Redfish because pending force deletion skips Ready work.
+    if snapshot
+        .host_snapshot
+        .force_delete_requires_admin_ack
+        .is_some()
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "host {machine_id} is pending force deletion; instance power control is unavailable"
+        ))
         .into());
     }
 

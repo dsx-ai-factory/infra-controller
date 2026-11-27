@@ -81,7 +81,7 @@ pub(crate) struct Args {
         long,
         value_enum,
         help = "Declare one service interface for a demand-driven DPF Helm chart. Omit for no service network",
-        long_help = "Declare one service interface for a demand-driven DPF Helm chart. Omit for no service network. A new IPv4 registration stays in Creating until at least one supported DPF deployment lists ipv4 in service_vpc_enabled_address_families. Before enabling a family, install and qualify the DHCP CNI runtime and family-specific NetworkAttachmentDefinition (NAD). Core accepts IPv6 declarations and holds them in Creating while IPv6 registration reconciliation is unavailable. Instance activation also requires family enablement on every target DPU's deployment. Core rejects new service VPC attachments for both families with FAILED_PRECONDITION while required service VPC reconciliation is unavailable."
+        long_help = "Declare one service interface for a demand-driven DPF Helm chart. Omit for no service network. A new IPv4 registration stays in Creating until at least one supported DPF deployment lists ipv4 in service_vpc_enabled_address_families. Before enabling IPv4, install and qualify the DHCP CNI runtime and IPv4 NetworkAttachmentDefinition (NAD). Core accepts IPv6 declarations and holds them in Creating while IPv6 registration reconciliation is unavailable. Instance activation also requires family enablement on every target DPU's deployment. Core admits new IPv4 service VPC attachments when their activation prerequisites are satisfied and rejects new IPv6 attachments with FAILED_PRECONDITION. Admitted attachments can remain Pending when current service endpoint observations are missing."
     )]
     service_vpc_family: Option<ServiceVpcAddressFamily>,
 

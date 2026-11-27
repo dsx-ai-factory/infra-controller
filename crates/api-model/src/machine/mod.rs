@@ -54,6 +54,10 @@ use crate::controller_outcome::PersistentStateHandlerOutcome;
 use crate::dpa_interface::{DpaInterface, DpaInterfaceType};
 use crate::errors::{ModelError, ModelResult};
 use crate::expected_machine::ExpectedMachineData;
+use crate::extension_service::service_vpc::{
+    ServiceVpcChainIntent, ServiceVpcChainStatus, network_acknowledged,
+};
+use crate::extension_service::{ExtensionServiceChainSelector, ExtensionServiceType};
 use crate::firmware::FirmwareComponentType;
 use crate::instance::config::network::DeviceLocator;
 use crate::instance::snapshot::InstanceSnapshotPgJson;
@@ -222,10 +226,44 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
         if let Some(instance) = &mut instance {
             instance.observations.network =
                 InstanceNetworkStatusObservation::aggregate_instance_observation(&dpu_snapshots);
-            instance.observations.extension_services =
+            let selectors: sqlx::types::Json<Vec<ExtensionServiceChainSelector>> =
+                row.try_get("service_vpc_chain_selectors")?;
+            let mut observations =
                 InstanceExtensionServiceStatusObservationByType::aggregate_instance_observation(
                     &dpu_snapshots,
                 );
+            // Downgrade only cloned completion flags so stale status retains its Node and sticky
+            // cleanup evidence without authorizing completion for an obsolete host or selector.
+            for (dpu_id, by_type) in &mut observations {
+                let Some(observation) = by_type
+                    .by_service_type
+                    .get_mut(&ExtensionServiceType::DpfHelmChart.to_string())
+                else {
+                    continue;
+                };
+                for evidence in &mut observation.service_vpc_endpoints {
+                    let current = dpu_snapshots
+                        .iter()
+                        .find(|dpu| dpu.id == *dpu_id)
+                        .is_some_and(|dpu| {
+                            selectors.0.iter().any(|selector| {
+                                evidence.matches_current_context(
+                                    &host_snapshot,
+                                    &host_snapshot.state.value,
+                                    instance,
+                                    dpu,
+                                    selector,
+                                )
+                            })
+                        });
+                    if !current {
+                        evidence.placement_observed = false;
+                        evidence.network_acknowledged = false;
+                        evidence.chain_status = ServiceVpcChainStatus::Unconfirmed;
+                    }
+                }
+            }
+            instance.observations.extension_services = observations;
         }
 
         // TODO: consider dropping this field from ManagedHostStateSnapshot
@@ -263,6 +301,9 @@ pub enum NotAllocatableReason {
     PendingInstanceCreation,
     #[error("the machine has a pending decommission request")]
     PendingDecommission,
+    /// An initiated force-delete retains the Machine until administrative cleanup completes.
+    #[error("the machine has a pending force-delete request")]
+    PendingForceDeletion,
     #[error("the machine has a pending boot configuration")]
     PendingBootConfiguration,
     /// A DPU reprovision request has started and must finish before allocation.
@@ -283,6 +324,7 @@ impl NotAllocatableReason {
             Self::InvalidState(_) => "invalid_state",
             Self::PendingInstanceCreation => "pending_instance_creation",
             Self::PendingDecommission => "pending_decommission",
+            Self::PendingForceDeletion => "pending_force_deletion",
             Self::PendingBootConfiguration => "pending_boot_configuration",
             Self::DpuReprovisioningStarted => "dpu_reprovisioning_started",
             Self::NoDpuSnapshots => "no_dpu_snapshots",
@@ -534,6 +576,7 @@ impl ManagedHostStateSnapshot {
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
     /// - no pending decommission, even when `allow_unhealthy` is true
+    /// - no initiated force-delete, even when `allow_unhealthy` is true
     /// - no health alerts which classification `PreventAllocations` to be set
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
@@ -559,6 +602,11 @@ impl ManagedHostStateSnapshot {
         }
 
         let host = &self.host_snapshot;
+        // A force-delete poll still targets this Machine after graceful service cleanup.
+        // Keep it unavailable even if another cleanup path has removed the Instance.
+        if host.force_delete_requires_admin_ack.is_some() {
+            return Err(NotAllocatableReason::PendingForceDeletion);
+        }
         if host.decommission_requested {
             return Err(NotAllocatableReason::PendingDecommission);
         }
@@ -768,8 +816,10 @@ impl ManagedHostStateSnapshot {
     /// included until every expected DPU acknowledges the return to Admin, or
     /// decommissioning finishes replacing the managed DPU configuration.
     /// `WaitingForNetworkReconfig` and `Failed` hosts need no further update
-    /// once every DPU acknowledges their current Admin configuration. A later
-    /// transition to Tenant requests a new network version before forwarding.
+    /// once every DPU acknowledges their current Admin configuration and every
+    /// secondary service port has current withdrawal evidence. Active secondary
+    /// service ports still need routing updates while the host remains on Admin.
+    /// A later transition to Tenant requests a new network version before forwarding.
     pub fn needs_site_prefix_isolation(&self) -> bool {
         if self.host_snapshot.associated_dpu_machine_ids().is_empty()
             || matches!(
@@ -791,7 +841,42 @@ impl ManagedHostStateSnapshot {
                 }
             )
         {
-            return !self.managed_host_network_config_version_synced();
+            // Secondary Admin responses can still route service traffic; only current withdrawal
+            // evidence makes a retained endpoint safe to omit from routing updates and completion.
+            return !self.managed_host_network_config_version_synced()
+                || self.instance.as_ref().is_some_and(|instance| {
+                    instance
+                        .config
+                        .network
+                        .service_interfaces
+                        .iter()
+                        .filter(|endpoint| {
+                            Some(endpoint.dpu_id)
+                                != self.host_snapshot.primary_attached_dpu_machine_id()
+                        })
+                        .any(|endpoint| {
+                            instance
+                                .config
+                                .extension_services
+                                .service_configs
+                                .iter()
+                                .find(|attachment| attachment.id == Some(endpoint.attachment_id))
+                                .is_none_or(|attachment| attachment.removed.is_none())
+                                || !self
+                                    .dpu_snapshots
+                                    .iter()
+                                    .find(|dpu| dpu.id == endpoint.dpu_id)
+                                    .is_some_and(|dpu| {
+                                        network_acknowledged(
+                                            &self.host_snapshot,
+                                            &self.managed_state,
+                                            instance,
+                                            dpu,
+                                            ServiceVpcChainIntent::Retiring,
+                                        )
+                                    })
+                        })
+                });
         }
 
         self.instance.is_some()
@@ -987,6 +1072,11 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// and DPF resources, then re-ingests it.
     pub reset_requested: Option<ResetRequest>,
 
+    /// Records force-delete intent and its Admin acknowledgement requirement until Machine deletion.
+    /// `None` means no intent has been recorded; `Some(false)` still prevents allocation without
+    /// requiring the Admin acknowledgement wait.
+    pub force_delete_requires_admin_ack: Option<bool>,
+
     /// When set by an external entity, the state controller transitions the host into
     /// [`ManagedHostState::Maintenance`] to execute the requested operation.
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
@@ -1078,6 +1168,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             reprovision_requested: self.reprovision_requested,
             host_reprovision_requested: self.host_reprovision_requested,
             reset_requested: self.reset_requested,
+            force_delete_requires_admin_ack: self.force_delete_requires_admin_ack,
             machine_maintenance_requested: self.machine_maintenance_requested,
             spx_multiplane: self.spx_multiplane,
             decommission_requested: self.decommission_requested,
@@ -2318,6 +2409,8 @@ pub struct ScoutUpgradeResult {
 #[serde(rename_all = "lowercase")]
 pub enum InitialResetPhase {
     Start,
+    /// Records observed host Off during pending force-delete so the saved reset time starts its power-down grace.
+    PowerOffObserved,
     BMCWasReset,
     WaitHostBoot,
 }
@@ -4292,6 +4385,8 @@ mod tests {
         );
     }
 
+    /// Keeps hosts eligible until host traffic and secondary service ports are withdrawn so
+    /// routing readiness cannot mistake an acknowledged Admin configuration for stopped forwarding.
     #[test]
     fn site_prefix_isolation_retains_hosts_until_admin_is_applied() {
         use crate::instance::config::InstanceConfig;
@@ -4315,6 +4410,7 @@ mod tests {
             DecommissionedWithInstance,
         }
 
+        // Supply a complete Instance whose host interfaces and extension services start empty.
         let instance = InstanceSnapshot {
             id: carbide_uuid::instance::InstanceId::nil(),
             machine_id: host_machine().id.into(),
@@ -4360,6 +4456,7 @@ mod tests {
             deleted: None,
             update_network_config_request: None,
         };
+        // Exercise the existing host-network exclusions independently of service-interface evidence.
         value_scenarios!(run = |scenario| {
             let mut host = managed_host_state_snapshot();
             host.host_snapshot.network_config.use_admin_network = Some(true);
@@ -4436,19 +4533,123 @@ mod tests {
             host.needs_site_prefix_isolation()
         };
             "receiver membership" {
+                // An idle Admin host has no tenant configuration to refresh.
                 Scenario::Idle => false,
+                // An assignment can already have a fetched response before the Tenant switch.
                 Scenario::AssignmentBeforeTenantMode => true,
+                // A missing Instance row does not prove that Tenant forwarding stopped.
                 Scenario::TenantModeWithoutInstance => true,
+                // A host without managed DPUs has no DPU routing configuration to update.
                 Scenario::TenantModeWithoutDpus => false,
+                // Incomplete topology evidence cannot prove the return to Admin.
                 Scenario::ReturningToAdminWithMissingSnapshots => true,
+                // Retaining an endpoint-free Instance does not require another Admin receipt.
                 Scenario::AdminAppliedWithInstance => false,
+                // A failed endpoint-free host can remain excluded while its DPU is offline.
                 Scenario::FailedAfterAdminApplied => false,
+                // A failure cannot waive an unacknowledged return to Admin.
                 Scenario::FailedBeforeAdminApplied => true,
+                // A failed Tenant host can still forward tenant traffic.
                 Scenario::FailedWithTenantApplied => true,
+                // Terminal deletion must retain hosts whose Admin return is unproved.
                 Scenario::ForceDeletionWithMissingSnapshots => true,
+                // Terminal deletion needs no routing update after Admin is acknowledged.
                 Scenario::ForceDeletionAfterAdminApplied => false,
+                // Incomplete decommissioning does not establish stopped forwarding.
                 Scenario::DecommissioningWithInstance => true,
+                // Completed decommissioning already replaced the managed DPU configuration.
                 Scenario::DecommissionedWithInstance => false,
+            }
+        );
+
+        // Keep one valid /31 allocation; only its DPU, attachment removal, and applied receipt vary.
+        let mut service_instance = instance;
+        let attachment_id = uuid::Uuid::new_v4();
+        let service_uuid = uuid::Uuid::new_v4();
+        service_instance
+            .config
+            .extension_services
+            .service_configs
+            .push(
+                crate::instance::config::extension_services::InstanceExtensionServiceConfig {
+                    id: Some(attachment_id), // Match the endpoint to its retained attachment.
+                    service_id: carbide_uuid::extension_service::ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    dpu_target: None,
+                    removed: Some(DateTime::<Utc>::UNIX_EPOCH), // Begin with a retiring endpoint.
+                },
+            );
+        service_instance.config.network.service_interfaces.push(
+            crate::instance::config::network::InstanceServiceInterfaceConfig {
+                attachment_id,
+                interface_ordinal: 0,
+                dpu_id: dpu_machine_id(1), // Secondary Admin can still carry this service port.
+                slot_index: 0,
+                vpc_id: carbide_uuid::vpc::VpcId::new(),
+                vpc_prefix_id: carbide_uuid::vpc::VpcPrefixId::new(),
+                network_segment_id: carbide_uuid::network::NetworkSegmentId::new(),
+                network_prefix_id: carbide_uuid::network::NetworkPrefixId::new(),
+                link_prefix: "192.0.2.0/31".parse().expect("service link"),
+                mac_address: "02:00:00:00:00:18".parse().expect("service MAC"),
+                internal_uuid: service_uuid,
+            },
+        );
+        value_scenarios!(run = |(primary_only, active, receipt_generation, retained_uuid)| {
+            // Reuse acknowledged Admin topology and retain the Instance during its final network wait.
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.network_config.use_admin_network = Some(true);
+            host.managed_state = ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForNetworkReconfig,
+            };
+            let mut instance = service_instance.clone();
+            if primary_only {
+                // Move the endpoint onto the primary DPU without changing its attachment or receipt.
+                instance.config.network.service_interfaces[0].dpu_id = host.host_snapshot
+                    .primary_attached_dpu_machine_id().expect("primary DPU");
+            }
+            if active {
+                // Restore the active attachment marker while retaining the same endpoint and receipt.
+                instance.config.extension_services.service_configs[0].removed = None;
+            }
+
+            // Keep the outer Admin acknowledgement fixed while varying the nested withdrawal proof.
+            host.dpu_snapshots[1].network_status_observation.as_mut().expect("Admin receipt")
+                .service_vpc_network_observation = receipt_generation.map(|current| {
+                    network::ServiceVpcNetworkStatusObservation {
+                        network_config_version: Some(if current {
+                            instance.network_config_version
+                        } else {
+                            instance.network_config_version.increment()
+                        }),
+                        interfaces: if retained_uuid {
+                            vec![network::ServiceVpcInterfaceStatusObservation {
+                                internal_uuid: service_uuid,
+                                network_security_group: None,
+                            }]
+                        } else {
+                            vec![]
+                        },
+                    }
+                });
+            // Retain the endpoint after reporting so receipt evidence, rather than record deletion, decides exclusion.
+            host.instance = Some(instance);
+
+            // Receiver eligibility must distinguish stopped host networking from secondary service forwarding.
+            host.needs_site_prefix_isolation()
+        };
+            "Admin service-port receiver membership" {
+                // Primary Admin never renders service ports, even when their attachments remain active.
+                (true, true, None, false) => false,
+                // An active secondary port still needs future policy updates after a complete receipt.
+                (false, true, Some(true), true) => true,
+                // Missing nested evidence cannot establish that a retained secondary port was removed.
+                (false, false, None, false) => true,
+                // An empty set from another Instance generation does not acknowledge this withdrawal.
+                (false, false, Some(false), false) => true,
+                // Matching generations cannot hide a UUID that the DPU still reports as applied.
+                (false, false, Some(true), true) => true,
+                // Current empty evidence permits exclusion before unrelated chain cleanup releases the row.
+                (false, false, Some(true), false) => false,
             }
         );
     }
@@ -4696,6 +4897,27 @@ mod tests {
         assert_eq!(snapshot.is_usable_as_instance(false), Ok(()));
     }
 
+    /// Rejects a Ready Machine with force-delete intent even when health checks are overridden,
+    /// preventing a delayed administrative poll from reaching a replacement Instance.
+    #[test]
+    fn pending_force_deletion_blocks_allocation_without_an_instance() {
+        scenarios!(
+            run = |(force_delete_requires_admin_ack, allow_unhealthy)| {
+                // Keep the Ready fixture free of an Instance so only force-delete intent blocks reuse.
+                let mut snapshot = managed_host_state_snapshot();
+                snapshot.host_snapshot.force_delete_requires_admin_ack =
+                    force_delete_requires_admin_ack;
+                snapshot.is_usable_as_instance(allow_unhealthy)
+            };
+            "force-delete allocation eligibility" {
+                // An absent request leaves the otherwise usable Machine available.
+                (None, false) => Yields(()),
+                // Disabling the Admin wait still records deletion intent and defeats the health override.
+                (Some(false), true) => FailsWith(NotAllocatableReason::PendingForceDeletion),
+            }
+        );
+    }
+
     #[test]
     fn ready_host_with_unverified_boot_interface_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
@@ -4762,13 +4984,17 @@ mod tests {
         );
     }
 
+    /// Preserves distinct allocation rejection codes so API clients can identify why a Machine
+    /// is unavailable, including a force-delete that has not reached terminal cleanup.
     #[test]
     fn not_allocatable_reason_codes_are_stable_and_unique() {
+        // Include every supported reason so a new rejection cannot reuse another reason's code.
         let alert = alert_with_classifications(vec![]);
         let codes = [
             NotAllocatableReason::InvalidState(Box::new(ManagedHostState::Ready)),
             NotAllocatableReason::PendingInstanceCreation,
             NotAllocatableReason::PendingDecommission,
+            NotAllocatableReason::PendingForceDeletion,
             NotAllocatableReason::PendingBootConfiguration,
             NotAllocatableReason::DpuReprovisioningStarted,
             NotAllocatableReason::NoDpuSnapshots,
@@ -4777,12 +5003,14 @@ mod tests {
         ]
         .map(|reason| reason.code());
 
+        // Check the published spelling and uniqueness independently of the reason implementation.
         assert_eq!(
             codes,
             [
                 "invalid_state",
                 "pending_instance_creation",
                 "pending_decommission",
+                "pending_force_deletion",
                 "pending_boot_configuration",
                 "dpu_reprovisioning_started",
                 "no_dpu_snapshots",

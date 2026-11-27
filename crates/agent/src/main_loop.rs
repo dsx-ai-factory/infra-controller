@@ -691,8 +691,9 @@ impl CurrentNetworkVersion {
     }
 
     /// Updates `CurrentNetworkVersion` after successful HBN and DHCP results only when cached
-    /// versions and the normalized response fingerprint still match `applied`. Clears it after any
-    /// other HBN attempt so later iterations cannot skip a response that may no longer match HBN.
+    /// versions and the normalized response fingerprint still match `applied`. Retains applied
+    /// inputs when only the embedded service generation changed; otherwise clears them after an
+    /// HBN attempt so later iterations cannot skip a response that may no longer match HBN.
     ///
     /// Callers must supply the update and DHCP results for `applied`, set `hbn_attempted`
     /// when NVUE reconciliation was attempted, and read `latest` from the cache after that work.
@@ -714,20 +715,48 @@ impl CurrentNetworkVersion {
             // differ from the order that selected HBN's first policy for an NSG ID.
             if hbn_attempted {
                 self.update_from(applied, supplemental_config);
+            } else if let Some(observation) = self.service_vpc_network_observation.as_mut() {
+                // Identical HBN inputs already establish the applied UUID set; successful current
+                // DHCP submission lets an empty removal report advance without another NVUE call.
+                observation.network_config_version =
+                    ethernet_virtualization::service_vpc_network_config_version(applied)
+                        .map(str::to_owned);
             }
             return true;
         }
 
-        // Clear `CurrentNetworkVersion` because an HBN attempt may change HBN before failing.
         if hbn_attempted {
-            *self = Self::default();
+            // Preserve confirmed HBN inputs when only the receipt generation changed during I/O;
+            // the obsolete receipt stays unacknowledged until a later successful DHCP iteration.
+            if hbn_result.is_ok()
+                && dhcp_result.is_ok()
+                && latest
+                    .is_some_and(|latest| Self::describes_same_rendered_network(applied, latest))
+            {
+                self.update_from(applied, supplemental_config);
+            } else {
+                // An unsuccessful or different-input attempt cannot prove the cached HBN state.
+                *self = Self::default();
+            }
         }
         false
     }
 
-    /// Compares `managed_host_config_version`, `instance_network_config_version`, and normalized
-    /// response fingerprints so obsolete completions cannot acknowledge newer desired service inputs.
+    /// Compares `managed_host_config_version`, `instance_network_config_version`, the generation
+    /// selected by `service_vpc_network_config_version`, and normalized response fingerprints so
+    /// obsolete completions cannot acknowledge newer desired service inputs.
     fn describes_same_desired_network(
+        applied: &ManagedHostNetworkConfigResponse,
+        latest: &ManagedHostNetworkConfigResponse,
+    ) -> bool {
+        Self::describes_same_rendered_network(applied, latest)
+            && ethernet_virtualization::service_vpc_network_config_version(applied)
+                == ethernet_virtualization::service_vpc_network_config_version(latest)
+    }
+
+    /// Compares HBN versions and normalized inputs independently of the service receipt generation
+    /// so metadata-only Instance changes do not repeat an already successful NVUE application.
+    fn describes_same_rendered_network(
         applied: &ManagedHostNetworkConfigResponse,
         latest: &ManagedHostNetworkConfigResponse,
     ) -> bool {

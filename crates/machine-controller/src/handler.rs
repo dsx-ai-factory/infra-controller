@@ -1053,7 +1053,8 @@ impl MachineStateHandler {
                 &mut txn,
                 &mh_snapshot.host_snapshot.id,
             )
-            .await?;
+            .await?
+            .check_applied()?;
 
             tracing::info!(
                 host_machine_id = %mh_snapshot.host_snapshot.id,
@@ -3068,10 +3069,24 @@ impl MachineStateHandler {
     ) -> Result<Option<ManagedHostState>, StateHandlerError> {
         let next_state: Option<ManagedHostState>;
 
+        // Pending force deletion may restart recovery, but must leave queued DPU requests unstarted.
+        // Persisted active substates also identify recovery when the DPU request has no start time.
         let dpus_for_reprov = state
             .dpu_snapshots
             .iter()
-            .filter(|x| x.reprovision_requested.is_some())
+            .filter(|dpu| {
+                dpu.reprovision_requested.as_ref().is_some_and(|request| {
+                    state
+                        .host_snapshot
+                        .force_delete_requires_admin_ack
+                        .is_none()
+                        || request.started_at.is_some()
+                        || !matches!(
+                            state.managed_state.as_reprovision_state(&dpu.id),
+                            None | Some(ReprovisionState::NotUnderReprovision)
+                        )
+                })
+            })
             .collect_vec();
 
         match managed_state {
@@ -3708,11 +3723,208 @@ impl StateHandler for MachineStateHandler {
         // Refresh the per-object info/association series before any early
         // return: hosts stuck erroring must keep their join series alive, or
         // hold-period eviction drops exactly the machines being triaged.
-        // (The aggregate metrics below deliberately stay behind the early
-        // returns, preserving their long-standing exclusions.)
+        // (The aggregate metrics below still exclude failures caused by missing
+        // DPU snapshots.)
         if let Some(per_object_info) = &ctx.services.per_object_info {
             per_object_info.record(mh_snapshot);
         }
+
+        // Reconcile before wait and failure branches so release and reset retain an active
+        // controller until every fixed endpoint DPU has current cleanup evidence.
+        let service_vpc_reload_required =
+            !matches!(mh_snapshot.managed_state, ManagedHostState::ForceDeletion)
+                && Box::pin(extension_services::service_vpc::reconcile(
+                    mh_snapshot,
+                    &ctx.services.db_pool,
+                    self.instance_handler.dpf_sdk.as_deref(),
+                    self.instance_handler.common_pools.as_deref(),
+                    ctx.deadline,
+                ))
+                .await?;
+
+        let force_delete_pending =
+            !matches!(mh_snapshot.managed_state, ManagedHostState::ForceDeletion)
+                && mh_snapshot
+                    .host_snapshot
+                    .force_delete_requires_admin_ack
+                    .is_some();
+
+        // Restart only reprovisioning that already started, including an assigned failure,
+        // so recovering the DPU agent cannot admit ordinary work during force deletion.
+        let force_delete_restart_requested = force_delete_pending
+            && matches!(
+                mh_snapshot.managed_state,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::DPUReprovision { .. }
+                        | InstanceState::Failed { .. },
+                }
+            )
+            && can_restart_reprovision(
+                &mh_snapshot.dpu_snapshots,
+                mh_snapshot.host_snapshot.state.version,
+            );
+
+        // Restore only saved power-off recovery so pending deletion cannot strand the DPU agent
+        // or admit another boot-order job, firmware update, reset, or ordinary release step.
+        let force_delete_power_recovery = if force_delete_pending {
+            match &mh_snapshot.managed_state {
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::BootingWithDiscoveryImage { .. }
+                        | InstanceState::WaitingForDpusToUp
+                        | InstanceState::HostPlatformConfiguration {
+                            platform_config_state:
+                                HostPlatformConfigurationState::SetBootOrder {
+                                    set_boot_order_info:
+                                        SetBootOrderInfo {
+                                            set_boot_order_state:
+                                                SetBootOrderState::HandleJobFailure {
+                                                    power_state:
+                                                        ExpectedPowerState::Off | ExpectedPowerState::On,
+                                                    ..
+                                                },
+                                            ..
+                                        },
+                                },
+                        },
+                } => mh_snapshot
+                    .host_snapshot
+                    .status
+                    .last_reboot_requested
+                    .filter(|request| request.mode == MachineLastRebootRequestedMode::PowerOff)
+                    .map(|request| {
+                        (
+                            Some(request.time),
+                            self.reachability_params.power_down_wait,
+                            true,
+                        )
+                    }),
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::HostPlatformConfiguration {
+                            platform_config_state:
+                                HostPlatformConfigurationState::PowerCycle {
+                                    power_on: true,
+                                    power_on_retry_count,
+                                },
+                        },
+                } => {
+                    let checkpoint_time = mh_snapshot.host_snapshot.state.version.timestamp();
+                    let last_request = mh_snapshot.host_snapshot.status.last_reboot_requested;
+                    (!last_request.is_some_and(|request| {
+                        request.mode == MachineLastRebootRequestedMode::PowerOn
+                            // Ordinary retries save their newer state version after accepting On.
+                            && (*power_on_retry_count > 0 || request.time >= checkpoint_time)
+                    }))
+                    .then_some((
+                        // Keep the ordinary cycle's saved request time as its grace-period start.
+                        Some(last_request.map_or(checkpoint_time, |request| request.time)),
+                        self.reachability_params.power_down_wait,
+                        false, // Preserve ordinary release's host-only power request tracking.
+                    ))
+                }
+                // Start authorizes Off but predates its effect, so observe Off before starting its grace period.
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::HostReprovision {
+                            reprovision_state:
+                                HostReprovisionState::InitialReset {
+                                    phase: InitialResetPhase::Start,
+                                    ..
+                                },
+                        },
+                } => Some((None, self.reachability_params.power_down_wait, true)),
+                // Firmware records this reset checkpoint instead of PowerOff; a later accepted On consumes it.
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::HostReprovision {
+                            reprovision_state:
+                                HostReprovisionState::InitialReset {
+                                    phase:
+                                        InitialResetPhase::PowerOffObserved
+                                        | InitialResetPhase::BMCWasReset,
+                                    last_time,
+                                },
+                        },
+                } => (!mh_snapshot
+                    .host_snapshot
+                    .status
+                    .last_reboot_requested
+                    .is_some_and(|request| {
+                        request.mode == MachineLastRebootRequestedMode::PowerOn
+                            && request.time >= *last_time
+                    }))
+                .then_some((
+                    Some(*last_time),
+                    self.reachability_params.power_down_wait,
+                    true,
+                )),
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::HostReprovision {
+                            reprovision_state:
+                                HostReprovisionState::ResetForNewFirmware {
+                                    power_drains_needed: Some(_),
+                                    delay_until,
+                                    last_power_drain_operation:
+                                        Some(PowerDrainState::Off | PowerDrainState::Powercycle),
+                                    ..
+                                },
+                        },
+                } => {
+                    // Honor the saved drain deadline without adding another power-down grace period.
+                    let checkpoint_time = mh_snapshot.host_snapshot.state.version.timestamp();
+                    (!delay_until.is_some_and(|deadline| deadline > Utc::now().timestamp())
+                        // A later accepted On consumes this checkpoint while firmware work stays parked.
+                        && !mh_snapshot
+                            .host_snapshot
+                            .status
+                            .last_reboot_requested
+                            .is_some_and(|request| {
+                                request.mode == MachineLastRebootRequestedMode::PowerOn
+                                    && request.time >= checkpoint_time
+                            }))
+                    .then_some((
+                        Some(checkpoint_time),
+                        Duration::zero(),
+                        true,
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Retain the original Instance until its force-delete poll commits ForceDeletion,
+        // preventing ordinary release or reset from making the Machine available for reuse.
+        // Continue active DPU reprovisioning, accepted restarts and ordinary release power cycles
+        // so their power-on steps can restore cleanup acknowledgements.
+        let early_outcome = if service_vpc_reload_required {
+            // Reload before later lifecycle handling can consume changed or stale configuration.
+            Some(StateHandlerOutcome::do_nothing())
+        } else if force_delete_pending
+            && !force_delete_restart_requested
+            && force_delete_power_recovery.is_none()
+            && !matches!(
+                mh_snapshot.managed_state,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::DPUReprovision { .. }
+                        | InstanceState::HostPlatformConfiguration {
+                            platform_config_state: HostPlatformConfigurationState::PowerCycle {
+                                power_on: false,
+                                ..
+                            },
+                        },
+                }
+            )
+        {
+            Some(StateHandlerOutcome::wait(
+                "Waiting for force-delete polling before releasing the Instance.".to_string(),
+            ))
+        } else {
+            None
+        };
 
         if !mh_snapshot
             .host_snapshot
@@ -3720,6 +3932,10 @@ impl StateHandler for MachineStateHandler {
             .is_empty()
             && mh_snapshot.dpu_snapshots.is_empty()
         {
+            // Retain cleanup outcomes without recording incomplete DPU snapshots.
+            if let Some(outcome) = early_outcome {
+                return Ok(outcome);
+            }
             let can_continue_without_dpu =
                 ready_boot_config_handles_missing_dpu_snapshots(&mh_snapshot.managed_state)
                     || matches!(
@@ -3745,6 +3961,10 @@ impl StateHandler for MachineStateHandler {
 
         self.record_metrics(mh_snapshot, ctx);
         self.record_health_history(mh_snapshot, ctx);
+
+        if let Some(outcome) = early_outcome {
+            return Ok(outcome);
+        }
 
         // Handles power options based on the host's state and configuration settings.
         let PowerHandlingOutcome {
@@ -3783,7 +4003,72 @@ impl StateHandler for MachineStateHandler {
             );
         }
 
-        let mut result = if continue_state_machine {
+        let mut result = if force_delete_restart_requested
+            && let Some(next_state) = self
+                .start_dpu_reprovision(
+                    &mh_snapshot.managed_state,
+                    mh_snapshot,
+                    ctx,
+                    host_machine_id,
+                )
+                .await?
+        {
+            Ok(StateHandlerOutcome::transition(next_state))
+        } else if let Some((power_off_time, power_down_wait, record_dpu_power_on)) =
+            force_delete_power_recovery
+        {
+            // Issue only the owed On after observed Off, then leave the saved workflow parked
+            // so the administrative poll retains control of Instance deletion.
+            let mut recovery_outcome = StateHandlerOutcome::wait(
+                "Waiting for force-delete polling before releasing the Instance.".to_string(),
+            );
+            if power_off_time.is_none_or(|time| !wait(&time, power_down_wait)) {
+                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                if power_state(&bmc)
+                    .await
+                    .map_err(|error| platform_error("get_power_state", error))?
+                    == Some(PowerState::Off)
+                {
+                    if power_off_time.is_none() {
+                        // Save observed Off without recording a power request that this pass did not send.
+                        recovery_outcome = StateHandlerOutcome::transition(
+                            HostFirmwareScenario::Instance.actual_new_state(
+                                HostReprovisionState::InitialReset {
+                                    phase: InitialResetPhase::PowerOffObserved,
+                                    last_time: Utc::now(),
+                                },
+                                mh_snapshot.managed_state.get_host_repro_retry_count(),
+                            ),
+                        );
+                    } else {
+                        // Queue the accepted host On before DPU writes because handler_host_power_control
+                        // can skip host tracking when its second power read observes On.
+                        host_power_control(&bmc, &mh_snapshot.host_snapshot, ResetType::On, ctx)
+                            .await
+                            .map_err(|error| platform_error("power_on", error))?;
+                        if record_dpu_power_on {
+                            for dpu in &mh_snapshot.dpu_snapshots {
+                                ctx.pending_db_writes.push(
+                                    MachineWriteOp::UpdateRebootRequestedTime {
+                                        machine_id: dpu.id.into(),
+                                        mode: MachineLastRebootRequestedMode::PowerOn,
+                                        time: Utc::now(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(recovery_outcome)
+        } else if force_delete_pending {
+            // Resume only existing reprovision or host power-cycle state, avoiding reset or new work
+            // before the administrative poll can finish deleting the retained Instance.
+            let managed_state = mh_snapshot.managed_state.clone();
+            self.instance_handler
+                .handle_object_state(host_machine_id, mh_snapshot, &managed_state, ctx)
+                .await
+        } else if continue_state_machine {
             self.attempt_state_transition(host_machine_id, mh_snapshot, ctx)
                 .await
         } else {
@@ -4768,6 +5053,16 @@ async fn handle_dpu_reprovision(
                 .txn_begin()
                 .await
                 .map_err(StateHandlerError::from_transaction)?;
+
+            // Lock history before the host and the host before DPUs so release cannot invert row locks.
+            // Reject stale state before clearing requests or applying queued reboot timestamps.
+            db::machine::lock_controller_state(
+                &mut txn,
+                &state.host_snapshot.id,
+                state.host_snapshot.state.version,
+            )
+            .await?
+            .check_applied()?;
 
             // Clear reprovisioning requests only after the terminal host reboot is accepted.
             for dpu_snapshot in &state.dpu_snapshots {
@@ -9944,6 +10239,16 @@ impl StateHandler for InstanceStateHandler {
                                 .map_err(StateHandlerError::from_transaction)?
                         };
 
+                        // Lock host state history and the host before queued DPU writes because
+                        // force-delete's Admin switch also locks the host before its DPUs.
+                        db::machine::lock_controller_state(
+                            &mut txn,
+                            host_machine_id,
+                            mh_snapshot.host_snapshot.state.version,
+                        )
+                        .await?
+                        .check_applied()?;
+
                         if host_firmware_requested {
                             let health_override = create_host_update_health_report_hostfw();
                             // The health report alert gets generated here, the machine update manager retains responsibilty for clearing it when we're done.
@@ -12464,12 +12769,24 @@ impl HostUpgradeState {
         phase: Option<InitialResetPhase>,
         last_time: &Option<DateTime<Utc>>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        // Save Start before Off so interrupted firmware resets can still restore host power.
+        let Some(phase) = phase else {
+            return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
+                HostReprovisionState::InitialReset {
+                    phase: InitialResetPhase::Start,
+                    last_time: Utc::now(),
+                },
+                state.managed_state.get_host_repro_retry_count(),
+            )));
+        };
+
         let redfish_client = services
             .create_redfish_client_from_machine(&state.host_snapshot)
             .await?;
 
-        match phase.unwrap_or(InitialResetPhase::Start) {
-            InitialResetPhase::Start => {
+        match phase {
+            // Reconfirm Off before resetting the BMC if normal firmware handling resumes after cleanup observed Off.
+            InitialResetPhase::Start | InitialResetPhase::PowerOffObserved => {
                 let bmc = services.connect_bmc(&state.host_snapshot).await?;
                 set_power(&bmc, ResetType::ForceOff)
                     .await

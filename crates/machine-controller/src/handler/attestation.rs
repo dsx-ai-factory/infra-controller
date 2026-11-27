@@ -324,8 +324,11 @@ async fn schedule(
     // The managed-host trigger commits this transaction with its own state
     // transition, which takes this advisory through the history trigger before
     // locking the machine row. The writes below lock that row, so taking it
-    // here keeps both orders the same.
-    db::machine::lock_machine_state_history(&mut txn, machine_id).await?;
+    // here keeps both orders the same. Manual triggers never persist machine
+    // state or history, so their Machine writes serialize on the row alone.
+    if triggered_by_mh_controller {
+        db::machine::lock_machine_state_history(&mut txn, machine_id).await?;
+    }
 
     // Latest decision only, written with the job it names so the two cannot
     // disagree.
