@@ -192,6 +192,12 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		SiteID: st1.ID.String(),
 	}
 	dupBodyBytes, _ := json.Marshal(dupBody)
+	reversedDupBody := model.APIVpcPeeringCreateRequest{
+		Vpc1ID: vpc2.ID.String(),
+		Vpc2ID: vpc1.ID.String(),
+		SiteID: st1.ID.String(),
+	}
+	reversedDupBodyBytes, _ := json.Marshal(reversedDupBody)
 
 	// Invalid VPC ID
 	invalidVpcIDBody := model.APIVpcPeeringCreateRequest{
@@ -329,6 +335,14 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			name:           "error when peering already exists",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(dupBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:           "error when peering already exists in reverse order",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(reversedDupBodyBytes),
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
