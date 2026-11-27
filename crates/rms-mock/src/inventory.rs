@@ -114,8 +114,7 @@ pub struct SimNode {
     pub host_mac: Option<MacAddress>,
     pub host_ip: Option<IpAddr>,
     pub rack_id: Option<String>,
-    /// Physical slot as the chassis reports it. Compute trays report their
-    /// chassis slot, switch trays the rack unit they occupy.
+    /// Slot number returned by RMS for this device in its rack.
     pub slot_number: Option<u32>,
     /// Index of the tray within its rack: among the compute trays for a
     /// compute tray, among the switch trays for a switch tray.

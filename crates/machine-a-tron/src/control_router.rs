@@ -255,14 +255,10 @@ impl ControlState {
 
 /// Report simulated hardware to the hosted RMS mock.
 ///
-/// Placement comes from the same `RackPlacement` the device's Redfish chassis
-/// is built from, so RMS and Redfish cannot disagree about where a node sits.
-/// Compute trays report their chassis slot and compute tray index; switch
-/// trays report the rack unit they occupy and their index among the rack's
-/// switch trays. Power shelves carry a placement too, but RMS does not
-/// report one for them and NICo does not ask.
+/// Tray locations come from the rack model's RMS slot and type-specific
+/// tray index. Power shelves have no RMS tray location.
 ///
-/// The snapshot handed out is rebuilt only when a device's BMC or host
+////// The snapshot handed out is rebuilt only when a device's BMC or host
 /// address has changed since the last request (see `RmsSnapshot`); nothing
 /// else in it can change, so a cached snapshot is never stale.
 impl RmsInventory for ControlState {
@@ -375,20 +371,10 @@ impl ControlState {
             DeviceKind::Dpu => return None,
         };
         let info = handle.host_info();
-        let (slot_number, tray_index) = match info.rack_placement.and_then(RackPlacement::tray) {
-            Some(TrayPlacement::Compute {
-                tray_index,
-                chassis_physical_slot_number,
-            }) => (
-                Some(chassis_physical_slot_number),
-                Some(u32::from(tray_index)),
-            ),
-            Some(TrayPlacement::Switch {
-                tray_index,
-                slot_number,
-            }) => (Some(slot_number), Some(u32::from(tray_index))),
-            None => (None, None),
-        };
+        let (slot_number, tray_index) = info
+            .rack_placement
+            .and_then(RackPlacement::rms_location)
+            .unzip();
         Some(SimNode {
             kind: Some(kind),
             bmc_mac: Some(info.bmc_mac_address),
@@ -948,6 +934,56 @@ mod tests {
         assert!(!Arc::ptr_eq(&second, &third));
         assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
         assert!(Arc::ptr_eq(&third, &state.nodes()));
+    }
+
+    #[test]
+    fn gb200_rms_inventory_matches_managed_domain_positions() {
+        use model::nvlink_domain::derive_managed_members;
+        let units = GB200_RACK.rack_elevation().unwrap().units;
+        let members = units
+            .iter()
+            .map(|unit| RackMemberRegistration {
+                placement: GB200_RACK.placement(unit.position),
+                hardware_type: unit.hardware_type,
+                machine_config_section: format!("unit-{}", unit.position),
+            })
+            .collect();
+        let registration = partial_rack_registration("rack-a", members);
+        let group = registration
+            .expected_rack_group()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let declared = derive_managed_members(&group).unwrap();
+        let mut declared = declared.iter();
+        for unit in units {
+            let pos = unit.position;
+            let info = rack_member_info(unit.hardware_type, pos, pos);
+            let (handle, index) = match pos {
+                11..=18 => (
+                    DeviceHandle::for_control_test_host(info, "compute"),
+                    pos - 11,
+                ),
+                19..=27 => (
+                    DeviceHandle::for_control_test_switch(info, "switch", None),
+                    pos - 19,
+                ),
+                28..=37 => (
+                    DeviceHandle::for_control_test_host(info, "compute"),
+                    pos - 28 + 8,
+                ),
+                _ => continue,
+            };
+            let node = ControlState::sim_node(&handle, None, None).unwrap();
+            let member = declared.next().unwrap();
+            assert_eq!(node.slot_number, Some(member.slot_index), "U{pos}");
+            assert_eq!(
+                (node.slot_number, node.tray_index),
+                (Some(u32::from(pos - 10)), Some(u32::from(index))),
+                "U{pos}"
+            );
+        }
+        assert!(declared.next().is_none());
     }
 
     /// Domains carry the GPUs, compute nodes and switch NVOS addresses that the

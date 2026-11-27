@@ -107,9 +107,7 @@ rack_manager_impl! {
 
         /// Report each node's physical placement.
         ///
-        /// Placement is read from the simulated hardware rather than derived
-        /// here, so the slot and tray reported over RMS are necessarily the
-        /// same ones the node's Redfish chassis reports.
+        /// Slot and tray numbers come from the RMS inventory snapshot.
         ///
         /// As the proto specifies, `node_device_details` holds only the nodes
         /// that were found, and the batch fails when any node was not: the
