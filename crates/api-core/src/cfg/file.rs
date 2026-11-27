@@ -2158,6 +2158,19 @@ pub struct DpfConfig {
     /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
+    /// Chains the DHCP server on every static VF (VF0 through VF13) for topology-free BF3,
+    /// BF3 GB200 and generic BF4 deployments, instead of only the legacy VF0 through VF7 subset.
+    ///
+    /// Defaults to false, which keeps existing ServiceInterfaces and SF use unchanged. When true,
+    /// each retained VF8 through VF13 gains one DHCP ServiceInterface and consumes one more SF,
+    /// so the managed endpoints must fit `pf_total_sf_reserved`. NICo counts 33 endpoints for
+    /// BF3 or 34 for generic BF4 with the default 16-VF inventory and rejects a smaller pool at
+    /// startup; DPF and DPU services can use a few SFs that NICo does not count, so use 40.
+    /// Enabling or disabling it on a site with ingested DPUs is an inventory transition that
+    /// requires controlled cleanup and DPU re-ingestion. Ignored when intercept bridging is
+    /// configured, which already chains DHCP on every selected VF, and for BF4 Astra.
+    #[serde(default)]
+    pub dhcp_on_all_static_vfs: bool,
     /// Whether carbide automatically releases DPF maintenance holds for changed
     /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
@@ -2235,6 +2248,7 @@ impl Default for DpfConfig {
             enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
+            dhcp_on_all_static_vfs: false,
             dpu_service_sync_enabled: default_to_true(),
             docker_image_pull_secret: None,
             dpu_agent_bootstrap_ca: DpfDpuAgentBootstrapCa::default(),

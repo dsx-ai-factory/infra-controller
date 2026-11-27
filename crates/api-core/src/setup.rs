@@ -1112,6 +1112,16 @@ fn build_dpf_interfaces_and_services(
         carbide_config.dpu_config.num_of_vfs,
         intercept_bridging,
     );
+    // Opt-in: give every static VF a DHCP endpoint. Intercept topologies already chain DHCP on
+    // every selected VF, and Astra keeps its own fixed inventory.
+    let interfaces = if carbide_config.dpf.dhcp_on_all_static_vfs
+        && intercept_bridging.is_none()
+        && deployment_type != DpuDeploymentType::Bf4Astra
+    {
+        carbide_dpf::with_dhcp_on_all_static_vfs(interfaces)
+    } else {
+        interfaces
+    };
     let services = carbide_config
         .dpf
         .resolved_services_for(deployment, deployment_type);
@@ -2903,6 +2913,50 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::parse_carbide_config;
+
+    #[test]
+    fn dpf_dhcp_on_all_static_vfs_extends_only_opted_in_static_inventories() {
+        use carbide_dpf::types::DHCP_SERVER_SERVICE_NAME;
+
+        let dhcp_vfs =
+            |interfaces: &[carbide_dpf::types::DpuServiceInterfaceTemplateDefinition]| {
+                interfaces
+                    .iter()
+                    .filter(|interface| {
+                        interface.name.starts_with("pf0vf")
+                            && interface
+                                .chained_svc_if
+                                .iter()
+                                .flatten()
+                                .any(|(service, _)| service == DHCP_SERVER_SERVICE_NAME)
+                    })
+                    .count()
+            };
+
+        // Omitted and false keep the legacy VF0-VF7 DHCP subset; true covers VF0-VF13.
+        for (input, expected) in [
+            ("", 8),
+            ("dhcp_on_all_static_vfs = false", 8),
+            ("dhcp_on_all_static_vfs = true", 14),
+        ] {
+            let mut config = crate::test_support::default_config::get();
+            config.dpf = toml::from_str(input).unwrap();
+            for deployment_type in [DpuDeploymentType::Bf3, DpuDeploymentType::Bf4Generic] {
+                let (interfaces, _) = build_dpf_interfaces_and_services(
+                    &config,
+                    &config.dpf.deployments.bf3,
+                    deployment_type,
+                    ServiceVpcSlots::default(),
+                    None,
+                );
+                assert_eq!(
+                    dhcp_vfs(&interfaces),
+                    expected,
+                    "{input} {deployment_type:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn dpf_multi_cluster_support_reaches_all_helm_templates() {

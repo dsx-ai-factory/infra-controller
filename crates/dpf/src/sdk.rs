@@ -1533,6 +1533,41 @@ pub fn build_effective_dpu_interfaces(
     interfaces
 }
 
+/// Extends a topology-free static inventory so every retained static VF chains the DHCP server.
+///
+/// The legacy static inventory gives VF0 through VF7 both HBN and DHCP endpoints, while VF8
+/// through VF13 are HBN-only, so tenants on those VFs get no address unless they configure a
+/// static IP. This opt-in adds the missing `d_pf0vfN_if` DHCP endpoint to every static VF that
+/// already has an HBN endpoint. Each added endpoint consumes one SF from the legacy
+/// `dpf.pf_total_sf_reserved` pool and adds one DHCP ServiceInterface, so enabling it on an
+/// existing site is an inventory transition that requires DPU re-ingestion. The function is
+/// idempotent and leaves physical ports, PFs and intercept-topology inventories unchanged.
+pub fn with_dhcp_on_all_static_vfs(
+    mut interfaces: Vec<DpuServiceInterfaceTemplateDefinition>,
+) -> Vec<DpuServiceInterfaceTemplateDefinition> {
+    for interface in &mut interfaces {
+        if !matches!(interface.iface_type, DpuServiceInterfaceTemplateType::Vf) {
+            continue;
+        }
+        let Some(chains) = interface.chained_svc_if.as_mut() else {
+            continue;
+        };
+        let has_hbn = chains
+            .iter()
+            .any(|(service, _)| service == DOCA_HBN_SERVICE_NAME);
+        let has_dhcp = chains
+            .iter()
+            .any(|(service, _)| service == DHCP_SERVER_SERVICE_NAME);
+        if has_hbn && !has_dhcp {
+            chains.push((
+                DHCP_SERVER_SERVICE_NAME.to_string(),
+                format!("d_{}_if", interface.name),
+            ));
+        }
+    }
+    interfaces
+}
+
 /// Builds the interface inventory for a deployment's platform profile.
 ///
 /// Without intercept bridging, BF3 and generic BF4 derive their inventory from
@@ -5335,6 +5370,67 @@ mod tests {
                 126 => (14, 18, 18, 9, 1),
             }
         );
+    }
+
+    /// Verifies the opt-in chains DHCP on every retained static VF without touching other entries.
+    #[test]
+    fn dhcp_on_all_static_vfs_chains_every_retained_static_vf() {
+        let legacy = build_effective_dpu_interfaces(16, None);
+        let extended = with_dhcp_on_all_static_vfs(legacy.clone());
+
+        // VF8 through VF13 gain a DHCP endpoint: 9 legacy DHCP endpoints become 15.
+        assert_eq!(interface_counts(&legacy), (14, 18, 18, 9, 1));
+        assert_eq!(interface_counts(&extended), (14, 18, 18, 15, 1));
+        for vf_id in 0..=13 {
+            let name = format!("pf0vf{vf_id}");
+            let interface = extended
+                .iter()
+                .find(|interface| interface.name == name)
+                .expect("static VF should be present");
+            let chains = interface
+                .chained_svc_if
+                .as_ref()
+                .expect("VF should chain services");
+            assert!(chains.contains(&(DOCA_HBN_SERVICE_NAME.to_string(), format!("{name}_if"))));
+            assert!(
+                chains.contains(&(DHCP_SERVER_SERVICE_NAME.to_string(), format!("d_{name}_if"))),
+                "{name} should chain the DHCP server"
+            );
+        }
+
+        // Physical ports and PFs are unchanged, and applying the opt-in twice adds nothing.
+        for (before, after) in legacy.iter().zip(&extended) {
+            if !matches!(before.iface_type, DpuServiceInterfaceTemplateType::Vf) {
+                assert_eq!(before, after);
+            }
+        }
+        assert_eq!(with_dhcp_on_all_static_vfs(extended.clone()), extended);
+    }
+
+    /// Verifies the opt-in respects the provisioned VF count and leaves intercept inventories alone.
+    #[test]
+    fn dhcp_on_all_static_vfs_follows_inventory_it_is_given() {
+        // With eight hardware VFs, only VF0 through VF7 exist and already have DHCP.
+        let eight = build_effective_dpu_interfaces(8, None);
+        assert_eq!(with_dhcp_on_all_static_vfs(eight.clone()), eight);
+
+        // A configured intercept inventory already chains DHCP on every selected VF.
+        let topology = configured_topology();
+        let configured = build_effective_dpu_interfaces(16, Some(&topology));
+        assert_eq!(with_dhcp_on_all_static_vfs(configured.clone()), configured);
+    }
+
+    /// Verifies the extra DHCP endpoints must fit the legacy pool, so a too-small pool fails at
+    /// startup instead of leaving DHCP pods without SFs on the DPU.
+    #[test]
+    fn dhcp_on_all_static_vfs_must_fit_legacy_sf_pool() {
+        let interfaces = with_dhcp_on_all_static_vfs(build_deployment_dpu_interfaces(
+            DpuDeploymentType::Bf3,
+            16,
+            None,
+        ));
+        assert!(calculate_pf_total_sf(&interfaces, None, DEFAULT_PF_TOTAL_SF_RESERVED, 0).is_err());
+        assert_eq!(calculate_pf_total_sf(&interfaces, None, 40, 0).unwrap(), 40);
     }
 
     /// Verifies configured intercept bridging is the complete PF/VF inventory and service policy.

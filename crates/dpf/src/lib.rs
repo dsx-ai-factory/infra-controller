@@ -81,7 +81,7 @@ pub use sdk::{
     build_service_configuration, build_service_interface, build_service_nad,
     build_service_template, calculate_pf_total_sf, detached_dpu_service_interface_spec,
     dpu_cr_name, dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
-    registered_dpu_service_chain_spec,
+    registered_dpu_service_chain_spec, with_dhcp_on_all_static_vfs,
 };
 pub use service_vpc_slot::{SERVICE_VPC_MTU, ServiceVpcSlots};
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
