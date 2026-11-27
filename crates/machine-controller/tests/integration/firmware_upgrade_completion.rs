@@ -16,14 +16,13 @@
  */
 
 use carbide_instrument::testing::MetricsCapture;
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
 use carbide_test_harness::CarbideConfig;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use model::firmware::FirmwareComponentType;
-use model::machine::{
-    HostReprovisionState, MAX_FIRMWARE_UPGRADE_RETRIES, ManagedHostState, ScoutUpgradeResult,
-};
+use model::machine::{HostReprovisionState, ManagedHostState, ScoutUpgradeResult};
 use model::test_support::ManagedHostConfig;
 
 use crate::env::Env;
@@ -678,7 +677,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
     // the failure state and the counter does not move again.
     mh.put_in_failed_firmware_upgrade(
         chrono::Utc::now() - chrono::TimeDelta::minutes(20),
-        MAX_FIRMWARE_UPGRADE_RETRIES,
+        FirmwareGlobal::max_firmware_upgrade_retries_default(),
     )
     .await;
     env.run_single_iteration().await;
@@ -697,7 +696,10 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
         ),
         "expected to remain in FailedFirmwareUpgrade, got {reprovision_state:?}",
     );
-    assert_eq!(*retry_count, MAX_FIRMWARE_UPGRADE_RETRIES);
+    assert_eq!(
+        *retry_count,
+        FirmwareGlobal::max_firmware_upgrade_retries_default()
+    );
     assert_eq!(metrics.counter_delta(RETRIES_TOTAL, &[]), 1.0);
 }
 
@@ -932,5 +934,46 @@ async fn missing_firmware_config_keeps_lockdown_off_when_profile_disables_it(poo
             .all(|state| *state == libredfish::EnabledDisabled::Disabled),
         "a profile with disable_lockdown must keep lockdown off, got {:?}",
         env.redfish_sim.lockdown_states()
+    );
+}
+
+/// An assigned host has no stored retry count, so
+/// `max_firmware_upgrade_retries` does not apply to it. Even with the value 0
+/// it retries after the retry interval.
+#[sqlx_test]
+async fn assigned_host_failed_firmware_upgrade_retries_with_zero_retry_limit(pool: PgPool) {
+    let retry_interval = chrono::TimeDelta::minutes(15);
+    let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
+        config.firmware_global.host_firmware_upgrade_retry_interval = retry_interval;
+        config.firmware_global.max_firmware_upgrade_retries = 0;
+    })
+    .await;
+    // The controller handles `Assigned` states only for a host with an instance.
+    crate::rack_firmware_upgrade::create_instance(&env.test_harness, &mh).await;
+
+    mh.advance_state(ManagedHostState::Assigned {
+        instance_state: model::machine::InstanceState::HostReprovision {
+            reprovision_state: HostReprovisionState::FailedFirmwareUpgrade {
+                firmware_type: FirmwareComponentType::Bmc,
+                report_time: Some(chrono::Utc::now() - chrono::TimeDelta::minutes(20)),
+                reason: Some("scout upgrade failed".to_string()),
+            },
+        },
+    })
+    .await;
+    env.run_single_iteration().await;
+
+    let machine = mh.host.machine().await;
+    assert!(
+        matches!(
+            machine.current_state(),
+            ManagedHostState::Assigned {
+                instance_state: model::machine::InstanceState::HostReprovision {
+                    reprovision_state: HostReprovisionState::CheckingFirmwareV2 { .. },
+                },
+            }
+        ),
+        "expected a retry (CheckingFirmwareV2), got {:?}",
+        machine.current_state(),
     );
 }

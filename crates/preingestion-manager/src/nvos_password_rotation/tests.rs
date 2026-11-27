@@ -30,6 +30,7 @@ async fn concurrent_alias_claims_recheck_persisted_owner_and_completion(
             max_concurrent_bfb_copies: 1,
             autoupdate: false,
             no_reset_retries: false,
+            max_firmware_upgrade_retries: 5,
             firmware_download_cache_directory: Default::default(),
             firmware: Default::default(),
         },

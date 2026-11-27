@@ -125,6 +125,7 @@ pub(super) fn machine(
     machine: &HostMachine,
     rack: Option<&Rack>,
     bmc_aliases: &[MacAddress],
+    max_firmware_upgrade_retries: u32,
 ) -> StoredFirmwareActions {
     let member = RackMember::Machine(machine, bmc_aliases);
     let rack = rack.filter(|rack| machine.rack_id.as_ref() == Some(&rack.id));
@@ -155,7 +156,10 @@ pub(super) fn machine(
             }
         }
         Some(HostReprovisionState::FailedFirmwareUpgrade { .. })
-            if machine.state.value.host_repro_retries_exhausted() => {}
+            if machine
+                .state
+                .value
+                .host_repro_retries_exhausted(max_firmware_upgrade_retries) => {}
         Some(state) => actions.current.push(host_current(state)),
         None => {}
     }

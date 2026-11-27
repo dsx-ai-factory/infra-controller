@@ -61,6 +61,11 @@ struct RedfishSimState {
     ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
     firmware_upload_delay: Option<Duration>,
+    /// Number of firmware images the simulator accepted, through any of the
+    /// upload calls.
+    firmware_upload_count: usize,
+    /// When set, every firmware update task reads as failed (`Exception`).
+    firmware_task_fails: bool,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
@@ -392,6 +397,18 @@ impl RedfishSim {
     /// `Duration::ZERO` returns the task ID without a simulated wait.
     pub fn set_firmware_upload_delay(&self, delay: Duration) {
         self.state.lock().unwrap().firmware_upload_delay = Some(delay);
+    }
+
+    /// Returns the number of firmware images the simulator accepted, through
+    /// any of the upload calls.
+    pub fn firmware_upload_count(&self) -> usize {
+        self.state.lock().unwrap().firmware_upload_count
+    }
+
+    /// Makes every firmware update task read as failed, like a BMC that
+    /// rejects the image at apply time.
+    pub fn set_firmware_task_fails(&self, fails: bool) {
+        self.state.lock().unwrap().firmware_task_fails = fails;
     }
 
     /// Fail the firmware-inventory lookup an attestation makes while fetching
@@ -1548,6 +1565,7 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            state.firmware_upload_count += 1;
             state.fw_version = Arc::new("24.10-17".to_string());
             Ok(serde_json::from_str(
                 "{
@@ -1567,6 +1585,7 @@ impl Redfish for RedfishSimClient {
         _transfer_protocol: TransferProtocolType,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
+            self.state.lock().unwrap().firmware_upload_count += 1;
             Ok(serde_json::from_str(
                 "{
             \"@odata.id\": \"/redfish/v1/TaskService/Tasks/0\",
@@ -1627,6 +1646,24 @@ impl Redfish for RedfishSimClient {
                     \"@odata.type\": \"#Task.v1_4_3.Task\",
                     \"Id\": \"0\",
                     \"PercentComplete\": 100,
+                    \"StartTime\": \"2024-01-30T09:00:52+00:00\",
+                    \"TaskMonitor\": \"/redfish/v1/TaskService/Tasks/0/Monitor\",
+                    \"TaskState\": \"Exception\",
+                    \"TaskStatus\": \"Critical\"
+                    }",
+                )
+                .unwrap());
+            }
+            if self.state.lock().unwrap().firmware_task_fails
+                && !id.starts_with(TRIGGER_EVIDENCE_TASK_ID)
+            {
+                return Ok(serde_json::from_str(
+                    "{
+                    \"@odata.id\": \"/redfish/v1/TaskService/Tasks/0\",
+                    \"@odata.type\": \"#Task.v1_4_3.Task\",
+                    \"Id\": \"0\",
+                    \"Messages\": [{\"Message\": \"ApplyFailed\", \"MessageId\": \"Update.1.0.ApplyFailed\"}],
+                    \"PercentComplete\": 19,
                     \"StartTime\": \"2024-01-30T09:00:52+00:00\",
                     \"TaskMonitor\": \"/redfish/v1/TaskService/Tasks/0/Monitor\",
                     \"TaskState\": \"Exception\",
@@ -2372,6 +2409,7 @@ impl Redfish for RedfishSimClient {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
+            self.state.lock().unwrap().firmware_upload_count += 1;
             Ok("0".to_string())
         })
     }

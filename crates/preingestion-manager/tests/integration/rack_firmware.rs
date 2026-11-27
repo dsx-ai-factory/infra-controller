@@ -223,6 +223,9 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
         &[addresses[1]],
         PreingestionState::RecheckVersionsAfterFailure {
             reason: "previous inventory check failed".to_string(),
+            failed_pushes: 0,
+            upgrade_type: None,
+            final_version: None,
         },
         txn.as_mut(),
     )

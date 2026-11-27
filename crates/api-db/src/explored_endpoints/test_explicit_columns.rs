@@ -114,6 +114,7 @@ async fn exercise_endpoint_queries(
         upgrade_type: FirmwareComponentType::default(),
         power_drains_needed: Some(2),
         firmware_number: Some(3),
+        failed_pushes: 1,
     };
     set_preingestion(address, expected.preingestion_state.clone(), txn.as_mut()).await?;
     assert_eq!(

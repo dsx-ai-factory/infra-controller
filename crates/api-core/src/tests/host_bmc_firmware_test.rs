@@ -20,7 +20,7 @@ use std::fs;
 use std::time::Duration;
 
 use carbide_firmware::test_support::script_setup;
-use carbide_machine_controller::config::TimePeriod;
+use carbide_machine_controller::config::{FirmwareGlobal, TimePeriod};
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
 use carbide_uuid::machine::StableHostMachineId;
 use common::api_fixtures::instance::TestInstance;
@@ -33,9 +33,7 @@ use model::firmware::{
     Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry, FirmwareFileArtifact,
 };
 use model::instance::status::tenant::TenantState;
-use model::machine::{
-    HostReprovisionState, InstanceState, MAX_FIRMWARE_UPGRADE_RETRIES, ManagedHostState,
-};
+use model::machine::{HostReprovisionState, InstanceState, ManagedHostState};
 use model::machine_update_module::HOST_FW_UPDATE_HEALTH_REPORT_SOURCE;
 use model::test_support::HardwareInfoTemplate;
 use regex::Regex;
@@ -1577,7 +1575,7 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
         panic!("Expected FailedFirmwareUpgrade with a retry timestamp, got {reprovision_state:?}");
     };
 
-    for retry_i in 1..=MAX_FIRMWARE_UPGRADE_RETRIES {
+    for retry_i in 1..=FirmwareGlobal::max_firmware_upgrade_retries_default() {
         env.run_machine_state_controller_iteration_no_requeue()
             .await;
         let host = mh.host().db_machine(&env.pool).await;
@@ -1663,7 +1661,10 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     else {
         panic!("Not in HostReprovision");
     };
-    assert_eq!(*retry_count, MAX_FIRMWARE_UPGRADE_RETRIES);
+    assert_eq!(
+        *retry_count,
+        FirmwareGlobal::max_firmware_upgrade_retries_default()
+    );
     let HostReprovisionState::FailedFirmwareUpgrade { .. } = reprovision_state else {
         panic!("Not in FailedFirmwareUpgrade");
     };

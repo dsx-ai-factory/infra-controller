@@ -573,6 +573,7 @@ async fn context_preserves_members_aliases_sources_and_input_slots(
                     loaded_host(context, 2),
                     Some(&context.racks[&fixture.rack_id]),
                     &context.bmc_aliases[&fixture.hosts[0]],
+                    carbide_machine_controller::config::FirmwareGlobal::max_firmware_upgrade_retries_default(),
                 );
                 assert_eq!(
                     actions

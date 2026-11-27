@@ -110,6 +110,10 @@ pub struct FirmwareGlobal {
     /// firmware operations.
     #[serde(default)]
     pub no_reset_retries: bool,
+    /// Number of retries after a failed firmware upgrade, for managed hosts
+    /// and for pre-ingestion. `0` means no retry. Default is 5.
+    #[serde(default = "FirmwareGlobal::max_firmware_upgrade_retries_default")]
+    pub max_firmware_upgrade_retries: u32,
     /// Delay after GPU reboot before the HGX BMC can be
     /// accessed again.
     /// Default is 30 seconds.
@@ -150,6 +154,7 @@ impl FirmwareGlobal {
             host_firmware_upgrade_retry_interval: Self::get_retry_interval(),
             instance_updates_manual_tagging: false,
             no_reset_retries: false,
+            max_firmware_upgrade_retries: FirmwareGlobal::max_firmware_upgrade_retries_default(),
             hgx_bmc_gpu_reboot_delay: FirmwareGlobal::hgx_bmc_gpu_reboot_delay_default(),
             requires_manual_upgrade: false,
             max_concurrent_bfb_copies: FirmwareGlobal::max_concurrent_bfb_copies_default(),
@@ -169,6 +174,9 @@ impl FirmwareGlobal {
 
     pub fn instance_updates_manual_tagging_default() -> bool {
         true
+    }
+    pub fn max_firmware_upgrade_retries_default() -> u32 {
+        5
     }
     pub fn run_interval_default() -> Duration {
         Duration::seconds(30)
@@ -222,6 +230,7 @@ impl Default for FirmwareGlobal {
                 FirmwareGlobal::host_firmware_upgrade_retry_interval_default(),
             instance_updates_manual_tagging: false,
             no_reset_retries: false,
+            max_firmware_upgrade_retries: FirmwareGlobal::max_firmware_upgrade_retries_default(),
             hgx_bmc_gpu_reboot_delay: FirmwareGlobal::hgx_bmc_gpu_reboot_delay_default(),
             requires_manual_upgrade: false,
             max_concurrent_bfb_copies: FirmwareGlobal::max_concurrent_bfb_copies_default(),

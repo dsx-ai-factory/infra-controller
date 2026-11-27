@@ -89,15 +89,15 @@ use model::machine::{
     DpuInitState, DpuMachine, FactoryResetBmcState, FailureCause, FailureDetails, FailureSource,
     HostMachine, HostPlatformConfigurationState, HostReprovisionState, InitialResetPhase,
     InstallDpuOsState, InstanceNextStateResolver, InstanceState, LoadSnapshotOptions, LockdownInfo,
-    LockdownState, MAX_FIRMWARE_UPGRADE_RETRIES, Machine, MachineLastRebootRequested,
-    MachineLastRebootRequestedMode, MachineNextStateResolver, MachineState,
-    MachineValidationContext, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
-    NetworkConfigUpdateState, NextStateBFBSupport, PerformPowerOperation, PowerDrainState,
-    PowerState as ExpectedPowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState,
-    ReadyBootLockdownRecovery, ReadyBootLockdownStage, ReprovisionState, ResetState, RetryInfo,
-    SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
-    SetSecureBootState, SpdmMeasuringState, StateMachineArea, UefiSetupInfo, UefiSetupState,
-    UnlockHostState, ValidationState, get_display_ids,
+    LockdownState, Machine, MachineLastRebootRequested, MachineLastRebootRequestedMode,
+    MachineNextStateResolver, MachineState, MachineValidationContext, ManagedHostState,
+    ManagedHostStateSnapshot, MeasuringState, NetworkConfigUpdateState, NextStateBFBSupport,
+    PerformPowerOperation, PowerDrainState, PowerState as ExpectedPowerState,
+    ReadyBootConfigPostLockAction, ReadyBootConfigState, ReadyBootLockdownRecovery,
+    ReadyBootLockdownStage, ReprovisionState, ResetState, RetryInfo, SecureEraseBossContext,
+    SecureEraseBossState, SetBootOrderInfo, SetBootOrderState, SetSecureBootState,
+    SpdmMeasuringState, StateMachineArea, UefiSetupInfo, UefiSetupState, UnlockHostState,
+    ValidationState, get_display_ids,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::machine_update_module::AutomaticFirmwareUpdateReference;
@@ -198,7 +198,8 @@ pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 5;
 pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 2; // Faster for tests
 
 /// A failed host firmware upgrade is being retried. `attempt` is the retry
-/// about to run (1-based), out of a budget of [`MAX_FIRMWARE_UPGRADE_RETRIES`].
+/// about to run (1-based), out of a budget of
+/// `firmware_global.max_firmware_upgrade_retries`.
 /// Machines whose budget ran out are visible on the
 /// `carbide_exhausted_reprovision_retry_count` gauge instead.
 #[derive(carbide_instrument::Event)]
@@ -11791,7 +11792,15 @@ impl HostUpgradeState {
                     ));
                 }
 
-                let can_retry = retry_count < MAX_FIRMWARE_UPGRADE_RETRIES;
+                // An assigned host has no stored retry count, so the limit
+                // cannot apply to it. It always retries.
+                let can_retry = matches!(scenario, HostFirmwareScenario::Instance)
+                    || retry_count
+                        < ctx
+                            .services
+                            .site_config
+                            .firmware_global
+                            .max_firmware_upgrade_retries;
                 let waited_enough = Utc::now()
                     .signed_duration_since(report_time.unwrap_or(Utc::now()))
                     >= ctx
@@ -15886,9 +15895,11 @@ mod tests {
                 HostFirmwareScenario::Ready,
                 FirmwareComponentType::Bmc,
                 Some(0),
-                MAX_FIRMWARE_UPGRADE_RETRIES,
+                FirmwareGlobal::max_firmware_upgrade_retries_default(),
             );
-            assert!(next.host_repro_retries_exhausted());
+            assert!(next.host_repro_retries_exhausted(
+                FirmwareGlobal::max_firmware_upgrade_retries_default()
+            ));
             assert!(matches!(
                 next,
                 ManagedHostState::HostReprovision {

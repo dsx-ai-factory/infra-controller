@@ -358,6 +358,9 @@ fn prepare_entry<'a>(
                         .bmc_aliases
                         .get(machine_id)
                         .map_or(&[], Vec::as_slice),
+                    api.runtime_config
+                        .firmware_global
+                        .max_firmware_upgrade_retries,
                 ),
                 Some(machine.as_ref()),
             )

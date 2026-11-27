@@ -195,9 +195,14 @@ impl MachineUpdateModule for HostFirmwareUpdate {
         pool: &sqlx::Pool<sqlx::Postgres>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
+        let max_retries = self.config.firmware_global.max_firmware_upgrade_retries;
         let exhausted_retries = snapshots
             .values()
-            .filter(|snapshot| snapshot.managed_state.host_repro_retries_exhausted())
+            .filter(|snapshot| {
+                snapshot
+                    .managed_state
+                    .host_repro_retries_exhausted(max_retries)
+            })
             .count();
         self.metrics
             .exhausted_reprovision_retries

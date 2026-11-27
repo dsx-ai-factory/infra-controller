@@ -443,7 +443,8 @@ retries moves the host to `FailedFirmwareUpgrade`.
 
 NICo waits `firmware_global.host_firmware_upgrade_retry_interval` before
 retrying that workflow. The default interval is 60 minutes. An unassigned host
-in the top-level `HostReprovision` state has a budget of five retries. After it
+in the top-level `HostReprovision` state has a budget of
+`firmware_global.max_firmware_upgrade_retries` retries (default `5`). After it
 is exhausted, the host remains failed and is counted by
 `carbide_exhausted_reprovision_retry_count`.
 

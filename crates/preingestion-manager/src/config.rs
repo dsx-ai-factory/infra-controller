@@ -28,6 +28,10 @@ pub struct PreingestionManagerConfig {
     pub max_concurrent_bfb_copies: usize,
     pub autoupdate: bool,
     pub no_reset_retries: bool,
+    /// Retries of a failed firmware push, counted per endpoint for the
+    /// current firmware update of a component. When the last retry fails,
+    /// the endpoint goes to `Failed`.
+    pub max_firmware_upgrade_retries: u32,
     pub firmware_download_cache_directory: PathBuf,
     pub firmware: FirmwareConfig,
 }

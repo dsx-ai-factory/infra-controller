@@ -739,6 +739,11 @@ pub enum PreingestionState {
         upgrade_type: FirmwareComponentType,
         power_drains_needed: Option<u32>,
         firmware_number: Option<u32>,
+        /// Failed firmware pushes to this endpoint in the current firmware update
+        /// of a component. Defaults to 0 so states serialized before this field
+        /// existed still deserialize.
+        #[serde(default)]
+        failed_pushes: u32,
     },
     ResetForNewFirmware {
         final_version: String,
@@ -754,6 +759,20 @@ pub enum PreingestionState {
     },
     RecheckVersionsAfterFailure {
         reason: String,
+        /// Failed firmware pushes in the current firmware update of a
+        /// component, including the one that led to this state. Rows stored
+        /// before this field existed read as 0.
+        #[serde(default)]
+        failed_pushes: u32,
+        /// Component of the failed push. `failed_pushes` counts only for a
+        /// retry of the same component and `final_version`. `None` in rows
+        /// stored before this field existed.
+        #[serde(default)]
+        upgrade_type: Option<FirmwareComponentType>,
+        /// Target version of the failed push. `None` in rows stored before
+        /// this field existed.
+        #[serde(default)]
+        final_version: Option<String>,
     },
     Failed {
         reason: String,
@@ -771,6 +790,46 @@ impl PreingestionState {
             | Self::BfbCopyInProgress { dpu_bmc_mac, .. }
             | Self::BfbInstallationWait { dpu_bmc_mac, .. } => *dpu_bmc_mac,
             _ => None,
+        }
+    }
+
+    /// Failed firmware pushes to this endpoint in the current firmware update
+    /// of a component.
+    pub fn failed_firmware_pushes(&self) -> u32 {
+        match self {
+            Self::UpgradeFirmwareWait { failed_pushes, .. }
+            | Self::RecheckVersionsAfterFailure { failed_pushes, .. } => *failed_pushes,
+            _ => 0,
+        }
+    }
+
+    /// Failed firmware pushes that count for an update of `upgrade_type` to
+    /// `final_version`. Returns 0 when the stored count is for another
+    /// component or another target version, so an update of the next
+    /// component starts with all its retries.
+    pub fn failed_firmware_pushes_for(
+        &self,
+        upgrade_type: FirmwareComponentType,
+        final_version: &str,
+    ) -> u32 {
+        match self {
+            Self::UpgradeFirmwareWait {
+                failed_pushes,
+                upgrade_type: counted_type,
+                final_version: counted_version,
+                ..
+            } if *counted_type == upgrade_type && counted_version == final_version => {
+                *failed_pushes
+            }
+            Self::RecheckVersionsAfterFailure {
+                failed_pushes,
+                upgrade_type: Some(counted_type),
+                final_version: Some(counted_version),
+                ..
+            } if *counted_type == upgrade_type && counted_version == final_version => {
+                *failed_pushes
+            }
+            _ => 0,
         }
     }
 
@@ -3138,6 +3197,50 @@ mod tests {
                 legacy.bfb_target_mac(),
                 restored.bfb_target_mac(),
                 restored == pinned,
+            )
+        });
+    }
+
+    /// States stored before the firmware retry loop kept a count still load,
+    /// and the count survives a round trip through the database encoding.
+    #[test]
+    fn failed_firmware_pushes_defaults_and_survives_serialization() {
+        let cases = [
+            (
+                "upgradefirmwarewait",
+                serde_json::json!({
+                    "task_id": "0",
+                    "final_version": "1.0",
+                    "upgrade_type": "bmc",
+                    "power_drains_needed": null,
+                    "firmware_number": 0,
+                }),
+            ),
+            (
+                "recheckversionsafterfailure",
+                serde_json::json!({"reason": "test"}),
+            ),
+        ]
+        .into_iter()
+        .map(|(state, extra)| Check {
+            scenario: state,
+            input: (state, extra),
+            expect: (0, 3),
+        });
+        check_values(cases, |(state, extra)| {
+            let mut stored = serde_json::json!({"state": state});
+            stored
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let legacy: PreingestionState = serde_json::from_value(stored.clone()).unwrap();
+            stored["failed_pushes"] = serde_json::json!(3);
+            let counted: PreingestionState = serde_json::from_value(stored).unwrap();
+            let restored: PreingestionState =
+                serde_json::from_str(&serde_json::to_string(&counted).unwrap()).unwrap();
+            (
+                legacy.failed_firmware_pushes(),
+                restored.failed_firmware_pushes(),
             )
         });
     }
