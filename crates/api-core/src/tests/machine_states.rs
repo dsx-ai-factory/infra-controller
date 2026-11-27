@@ -130,8 +130,13 @@ async fn discover_dpu_bmc_ip_for_machine_creator_state_test(
 // updates that row's content + version, AND fans the version bump out to every
 // other row in the "group", after which, the host + all of its DPUs network
 // config version are the same.
+/// Verifies group version changes invalidate previous DPU ACKs, including public primary Admin
+/// address edits on stable Hosts, so changed networking cannot retain an acknowledged version.
 #[crate::sqlx_test]
 async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
+    use rpc::forge::{AssignStaticAddressStatus, RemoveStaticAddressStatus};
+
+    // Ingest a discovered Host and its DPU with their persisted Admin interface and group membership.
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
 
@@ -162,6 +167,7 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
     );
     txn.commit().await.unwrap();
 
+    // Reload both rows to verify the Host write committed the same version for its DPU.
     let host_after_host_write = mh.host().db_machine(&env.pool).await;
     let dpu_after_host_write = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
@@ -208,6 +214,7 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
     );
     txn.commit().await.unwrap();
 
+    // Reload both rows to verify the DPU write committed the same version for its Host.
     let host_after_dpu_write = mh.host().db_machine(&env.pool).await;
     let dpu_after_dpu_write = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
@@ -222,6 +229,92 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
         !snapshot.managed_host_network_config_version_synced(),
         "sync should be false after a DPU-row write bumps the group"
     );
+
+    // Use the discovered Host's owned primary Admin interface to exercise both RPCs' Host predicates.
+    assert!(snapshot.host_snapshot.id.is_stable_host());
+    let primary = snapshot
+        .host_snapshot
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| {
+            interface.primary_interface
+                && interface.network_segment_type == Some(NetworkSegmentType::Admin)
+        })
+        .expect("primary Admin interface");
+    assert_eq!(primary.machine_id, Some(mh.id.into()));
+    let replacement: IpAddr = "192.0.2.200".parse().expect("replacement Admin address");
+    assert!(!primary.addresses.contains(&replacement));
+    for remove in [
+        // Replacing the DHCP address must invalidate its ACK even though the Admin segment stays the same.
+        false,
+        // Removing the applied static address must invalidate that newer ACK before any address repair.
+        true,
+    ] {
+        // Acknowledge the immediately preceding configuration so either RPC must invalidate its own ACK.
+        common::api_fixtures::network_configured(&env, &mh.dpu_ids).await;
+        let before = mh.snapshot(&mut env.db_reader()).await;
+        assert!(before.managed_host_network_config_version_synced());
+        let acknowledged_version = before.host_snapshot.network_config.version;
+
+        // Commit each address change through its public RPC without running the controller between edits and reads.
+        if remove {
+            let removed = env
+                .api
+                .remove_static_address(Request::new(rpc::forge::RemoveStaticAddressRequest {
+                    interface_id: Some(primary.id),
+                    ip_address: replacement.to_string(),
+                }))
+                .await
+                .expect("remove stable Host's static Admin address")
+                .into_inner();
+            assert_eq!(removed.status(), RemoveStaticAddressStatus::Removed);
+        } else {
+            let assigned = env
+                .api
+                .assign_static_address(Request::new(rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(primary.id),
+                    ip_address: replacement.to_string(),
+                }))
+                .await
+                .expect("replace stable Host's Admin address")
+                .into_inner();
+            assert_eq!(assigned.status(), AssignStaticAddressStatus::ReplacedDhcp);
+        }
+
+        // Find allocations and all group versions afresh before a controller can conceal a missing RPC version bump.
+        let allocations = env
+            .api
+            .find_interface_addresses(Request::new(rpc::forge::FindInterfaceAddressesRequest {
+                interface_id: Some(primary.id),
+            }))
+            .await
+            .expect("find persisted stable Host allocations")
+            .into_inner();
+        assert_eq!(allocations.addresses.len(), usize::from(!remove));
+        if let Some(allocation) = allocations.addresses.first() {
+            assert_eq!(allocation.address, replacement.to_string());
+            assert_eq!(allocation.allocation_type, "static");
+        }
+        let after = mh.snapshot(&mut env.db_reader()).await;
+        let current_version = after.host_snapshot.network_config.version;
+        assert_eq!(
+            current_version.version_nr(),
+            acknowledged_version.version_nr() + 1
+        );
+        assert_eq!(after.dpu_snapshots.len(), mh.dpu_ids.len());
+        for dpu in &after.dpu_snapshots {
+            assert_eq!(dpu.network_config.version, current_version);
+            assert_eq!(
+                dpu.network_status_observation
+                    .as_ref()
+                    .expect("retained DPU ACK")
+                    .network_config_version,
+                Some(acknowledged_version)
+            );
+        }
+        assert!(!after.managed_host_network_config_version_synced());
+    }
 }
 
 #[crate::sqlx_test]
@@ -3999,23 +4092,50 @@ async fn test_supermicro_ready_boot_config_uses_unlocked_verification(pool: sqlx
 /// A pending desired version on an unassigned Ready host is fully owned by the
 /// state controller: it persists each convergence phase, repairs Redfish,
 /// restores lockdown, and only then records the exact desired version verified.
+/// Keeps both identifiers of the independent desired Pair at every Redfish
+/// boot-interface operation so Ready cannot discard the selected interface ID.
 #[crate::sqlx_test]
 async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool) {
+    use carbide_redfish::libredfish::test_support::RedfishSimBootInterfaceRef;
+
+    // Build an unassigned zero-DPU host to isolate host boot convergence.
     let env = create_zero_dpu_test_env(pool).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
-    let pending = set_pending_boot_interface(&env, &mh).await;
-    let expected_mac = pending.value.mac_address().to_string();
 
+    // Enrich independent boot intent while retaining its MAC difference from the owned NIC.
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let mut txn = env.db_txn().await;
+    let pending = db::machine_desired_boot_interface::enrich_interface_id(
+        txn.as_mut(),
+        &mh.id.into(),
+        pending.value.mac_address(),
+        "NIC.Slot.9-1-1",
+    )
+    .await
+    .expect("enrich pending intent")
+    .expect("pending intent should exist");
+    txn.commit().await.expect("commit pending Pair");
+    let expected_mac = pending.value.mac_address().to_string();
+    let expected_target = Some(RedfishSimBootInterfaceRef::Pair {
+        mac_address: pending.value.mac_address(),
+        interface_id: "NIC.Slot.9-1-1".to_string(),
+    });
+
+    // Report only boot-order drift so remediation must apply the selected Pair.
     env.redfish_sim.set_is_bios_setup(true);
     env.redfish_sim.set_is_boot_order_setup(false);
     env.redfish_sim
         .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let bmc_ip = mh.host().bmc_ip(&env.pool).await.expect("BMC IP");
+    let prior_targets = env.redfish_sim.boot_interface_targets(&bmc_ip.to_string());
     let checkpoint = env.redfish_sim.timepoint();
     let reconciliation_started_at = Utc::now();
 
+    // Start reconciliation before checking the persisted target captured for Redfish work.
     env.run_machine_state_controller_iteration().await;
 
     {
+        // Reload Prepare to check its captured Pair and still-unverified desired generation.
         let host = mh.host().db_machine(&env.pool).await;
         assert_eq!(
             host.current_state(),
@@ -4037,6 +4157,7 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
         );
     }
 
+    // Complete boot-order remediation and lockdown restoration before observing verification.
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.id,
         20,
@@ -4044,7 +4165,9 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
     )
     .await;
 
+    // Reload Ready and its exact verified generation to prove completion persisted.
     let host = mh.host().db_machine(&env.pool).await;
+    assert_eq!(host.current_state(), &ManagedHostState::Ready);
     let persisted_desired = host
         .config
         .desired_boot_interface
@@ -4075,6 +4198,7 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
         "the verified host should no longer have pending boot intent"
     );
 
+    // Check Prepare, SetBootOrder and LockHost retain the Pair in their required order.
     let history = mh.host().parsed_history(None).await;
     let prepare_index = history
         .iter()
@@ -4129,6 +4253,18 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
         "persisted convergence phases should retain their causal order: {history:#?}"
     );
 
+    // Exclude ingestion calls and require the selected Pair for every new boot-interface operation.
+    let observed_targets = env.redfish_sim.boot_interface_targets(&bmc_ip.to_string());
+    let convergence_targets = &observed_targets[prior_targets.len()..];
+    assert!(!convergence_targets.is_empty());
+    assert!(
+        convergence_targets
+            .iter()
+            .all(|target| target == &expected_target),
+        "Ready must pass the complete selected Pair to every boot operation: {convergence_targets:?}"
+    );
+
+    // Check boot repair, its required restart and repeated verification against the selected MAC.
     let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
     assert!(
         actions.iter().any(|action| matches!(
@@ -4157,6 +4293,8 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
             >= 2,
         "the controller should observe the desired target before repair and again at final verification: {actions:?}"
     );
+
+    // Confirm every BMC ends the completed flow with lockdown enabled.
     assert!(
         env.redfish_sim
             .lockdown_states()

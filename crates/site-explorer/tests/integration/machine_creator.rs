@@ -693,22 +693,79 @@ async fn test_machine_creator_takes_admin_segment_locks_in_allocation_mode(
 
 /// A zero-DPU host allocates no admin address, so its creation takes no admin
 /// segment lock and completes while an exclusive holder has them.
+/// A preleased MAC-only declaration retains ExpectedMachine networking attribution so the final creation step cannot erase an actual explicit choice.
 #[sqlx_test]
 async fn test_zero_dpu_host_creation_does_not_wait_on_admin_segment_locks(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
     let creator = machine_creator(&env, machine_creator_config());
+    // Add capacity for HostInband after the fixture's Underlay and Admin segments consume the default pools.
+    db::resource_pool::populate(
+        &env.api().common_pools().ethernet.pool_vlan_id,
+        &mut *env.pool.acquire().await?,
+        vec![3],
+        true,
+    )
+    .await?;
+    db::resource_pool::populate(
+        &env.api().common_pools().ethernet.pool_vni,
+        &mut *env.pool.acquire().await?,
+        vec![10003],
+        true,
+    )
+    .await?;
+    // Prelease one declared NIC without a report ID so ownership, rather than report selection, establishes networking intent.
+    let domain = env.test_harness.test_domain().await;
+    let host_inband_segment = env
+        .test_harness
+        .network_controller()
+        .create_host_inband_segment(&domain)
+        .await;
+    let declared_mac = MacAddress::new([2, 0, 0, 0, 0xfa, 1]);
+    let lease = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(declared_mac, host_inband_segment.relay_address)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let interface_id = lease.machine_interface_id.expect("preleased NIC");
     let host = ManagedHostConfig {
         dpus: vec![],
+        non_dpu_macs: vec![declared_mac],
         ..ManagedHostConfig::default()
     }
     .with_expected_machine_data(ExpectedMachineData {
         dpu_policy: HostDpuPolicy::Ignore,
+        interfaces: vec![model::expected_machine::ExpectedInterface {
+            mac_address: Some(declared_mac), // Select this owned NIC explicitly for networking.
+            primary: Some(true),
+            ..Default::default()
+        }],
         ..Default::default()
     });
     let mut fixture = explored_host_fixture(&env, &host).await;
+    // Remove only the declared NIC's report ID to exercise adoption from its MAC-only declaration.
+    for interface in fixture
+        .host_report
+        .systems
+        .iter_mut()
+        .flat_map(|system| &mut system.ethernet_interfaces)
+    {
+        if interface.mac_address == Some(declared_mac) {
+            interface.id = None;
+        }
+    }
+    assert!(
+        fixture
+            .host_report
+            .find_interface_id_for_mac(declared_mac)
+            .is_none()
+    );
 
+    // Create under the existing Admin-segment gate to retain the zero-DPU lock guarantee.
     let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     // Allow for database work under CI contention. The gate stays held until
@@ -727,12 +784,40 @@ async fn test_zero_dpu_host_creation_does_not_wait_on_admin_segment_locks(
     assert!(created);
     gate.rollback().await?;
 
+    // Reload the adopted NIC and host so final creation cannot hide an attribution overwrite in its return value.
+    let mut read = env.pool.txn_begin().await?;
+    let primary = db::machine_interface::find_one(read.as_mut(), interface_id).await?;
+    assert!(primary.primary_interface);
+    assert!(primary.attached_dpu_machine_id.is_none());
+    let machine_id = primary.machine_id.expect("adopted NIC host");
+    let created_host = db::machine::find_one(
+        read.as_mut(),
+        &machine_id,
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("created predicted host");
+    let selection = created_host
+        .config
+        .primary_interface_selection
+        .expect("declared networking decision");
+    assert_eq!(
+        selection.source,
+        model::machine_boot_interface::InterfaceSelectionSource::ExpectedMachine
+    );
+    assert!(selection.updated_at.is_some());
+    read.commit().await?;
+
     Ok(())
 }
 
 /// Repeated creation leaves existing DPU interfaces unchanged. The independent
 /// reconciler restores OOB ownership without waiting on admin segment locks
 /// when the host's admin addresses already satisfy their invariant.
+/// Fresh reported IDs initialize an absent desired target directly, avoiding an unnecessary pending boot generation.
 #[sqlx_test]
 async fn test_existing_dpu_host_is_left_to_the_reconciler(
     pool: PgPool,
@@ -749,6 +834,57 @@ async fn test_existing_dpu_host_is_left_to_the_reconciler(
     unlink_machine_interface(&env.pool, oob_mac).await?;
     assert_host_links_reconciled(&env.pool, &host, NUM_DPUS).await?;
 
+    // Model a stable predecessor host without desired metadata while a fresh report changes its owned NIC's ID.
+    let primary = host_links(&env.pool, &host)
+        .await?
+        .into_iter()
+        .find(|interface| interface.primary_interface)
+        .expect("host primary");
+    let predicted_id = primary.machine_id.expect("host owner");
+    let stable_id = StableHostMachineId::try_from(model::machine::machine_id::from_hardware_info(
+        &model::hardware_info::HardwareInfo::from(&host),
+    )?)?;
+    let host_id: HostMachineId = stable_id.into();
+    let fresh_id = "NIC.Refreshed.Primary";
+    assert_ne!(
+        primary
+            .boot_interface_id
+            .as_deref()
+            .expect("previous owned ID"),
+        fresh_id
+    );
+    fixture
+        .host_report
+        .systems
+        .iter_mut()
+        .flat_map(|system| &mut system.ethernet_interfaces)
+        .find(|interface| interface.mac_address == Some(primary.mac_address))
+        .expect("reported primary NIC")
+        .id = Some(fresh_id.to_string());
+    explorer.insert_endpoints(vec![(
+        fixture.host.host_bmc_ip,
+        fixture.host_report.clone(),
+    )]);
+    let mut setup = env.pool.txn_begin().await?;
+    db::machine::try_sync_stable_id_with_current_machine_id_for_host(
+        setup.as_mut(),
+        Some(predicted_id.try_into()?),
+        &stable_id,
+    )
+    .await?;
+    db::machine::update_state(
+        setup.as_mut(),
+        &host_id,
+        &model::machine::ManagedHostState::Ready,
+    )
+    .await?;
+    sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
+        .bind(host_id)
+        .execute(setup.as_mut())
+        .await?;
+    setup.commit().await?;
+
+    // Hold Admin segment locks while repeated creation leaves existing OOB ownership and desired intent untouched.
     let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     let creator = machine_creator(&env, machine_creator_config());
@@ -770,6 +906,7 @@ async fn test_existing_dpu_host_is_left_to_the_reconciler(
         "the creator must leave existing DPU interfaces to the reconciler"
     );
 
+    // Probe and reconcile with those locks still held, publishing fresh IDs before initializing desired intent.
     let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(
         &[fixture.host.host_bmc_ip],
@@ -785,6 +922,26 @@ async fn test_existing_dpu_host_is_left_to_the_reconciler(
         Some(fixture.dpu_machine_ids[&0].into())
     );
     gate.rollback().await?;
+
+    // Reload the host after the full dispatch to distinguish direct initialization from an obsolete-ID replacement.
+    let refreshed = db::machine::find_one(&env.pool, &host_id, MachineSearchConfig::default())
+        .await?
+        .expect("reconciled host");
+    let desired = refreshed
+        .config
+        .desired_boot_interface
+        .as_ref()
+        .expect("initialized desired intent");
+    assert_eq!(desired.value.mac_address(), primary.mac_address);
+    assert_eq!(desired.value.interface_id(), Some(fresh_id));
+    let verified = refreshed
+        .status
+        .boot_interface_status_observation
+        .as_ref()
+        .expect("assumed baseline");
+    assert!(verified.assumed);
+    assert_eq!(verified.config_version, desired.version);
+    assert!(refreshed.pending_boot_interface_config_version().is_none());
 
     Ok(())
 }
@@ -1145,15 +1302,23 @@ async fn test_explored_host_admin_addresses_are_reconciled_without_create_machin
 
 /// Creation policy cannot gate OOB ownership or admin address reconciliation
 /// for an existing host. A DPU-only probe also notifies the owning host.
+/// Cached or unsuccessfully reprobed BMC identity must not adopt a replacement IP owner or prevent unrelated OOB and Admin repairs from committing.
 #[sqlx_test]
 async fn test_host_reconciliation_is_independent_of_creation_policy(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
-    for (scenario, creation_enabled, remove_expected, probe_dpu) in [
-        ("creation disabled", false, false, false),
+    for (scenario_index, (scenario, creation_enabled, remove_expected, probe_dpu)) in [
+        // A cached DPU report must not associate its former BMC IP's replacement owner while creation is disabled.
+        ("cached BMC identity", false, false, false),
+        // An attempted but failed DPU probe must not strengthen the same cached report into BMC association authority.
+        ("failed BMC reprobe", false, false, true),
+        // A successful DPU-only probe still reaches the existing host when its declaration no longer exists.
         ("expected machine removed", true, true, true),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let host = ingestible_host(ExpectedMachineData::default()).with_dpu_count(2);
         for dpu in &host.dpus {
             dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, dpu.oob_mac_address).await;
@@ -1173,6 +1338,55 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
         explorer.insert_endpoints(endpoints);
         explorer.run_single_iteration().await?;
         let pending = leave_admin_address_on_dormant_link(&env.pool, &host).await?;
+        let unrecorded_bmc = if !creation_enabled {
+            // Recreate API-first absence of recorded BMC identity while retaining the original cached report.
+            let bmc = db::machine_interface::find_by_ip(&env.pool, fixture.host.dpus[0].bmc_ip)
+                .await?
+                .expect("DPU BMC lease");
+            let mut setup = env.pool.txn_begin().await?;
+            sqlx::query("UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}', '{}'::jsonb) WHERE machine_id = $1")
+                .bind(bmc.machine_id.expect("DPU BMC owner")).execute(setup.as_mut()).await?;
+            sqlx::query("UPDATE machine_interfaces SET machine_id = NULL, association_type = 'None' WHERE id = $1")
+                .bind(bmc.id).execute(setup.as_mut()).await?;
+            setup.commit().await?;
+
+            // Move the report's IP to another unowned interface before Explorer builds its next interface index.
+            let scenario_index = u8::try_from(scenario_index).expect("small scenario table");
+            let replacement = env
+                .api()
+                .discover_dhcp(
+                    rpc::forge::DhcpDiscovery::builder(
+                        MacAddress::new([2, 0, 0xfe, 0x91, 0, scenario_index]),
+                        env.underlay_segment.relay_address,
+                    )
+                    .tonic_request(),
+                )
+                .await?
+                .into_inner();
+            let replacement_id = replacement
+                .machine_interface_id
+                .expect("replacement BMC interface");
+            let IpAddr::V4(original_ip) = fixture.host.dpus[0].bmc_ip else {
+                panic!("IPv4 BMC fixture")
+            };
+            let [a, b, c, _] = original_ip.octets();
+            let spare_ip = std::net::Ipv4Addr::new(a, b, c, 200 + scenario_index);
+            env.api()
+                .assign_static_address(Request::new(rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(bmc.id),
+                    ip_address: spare_ip.to_string(),
+                }))
+                .await?;
+            env.api()
+                .assign_static_address(Request::new(rpc::forge::AssignStaticAddressRequest {
+                    interface_id: Some(replacement_id),
+                    ip_address: original_ip.to_string(),
+                }))
+                .await?;
+            Some(replacement_id)
+        } else {
+            None
+        };
         for dpu in &host.dpus {
             unlink_machine_interface(&env.pool, dpu.oob_mac_address).await?;
         }
@@ -1181,6 +1395,17 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
         } else {
             fixture.host.host_bmc_ip
         };
+        if unrecorded_bmc.is_some() && probe_dpu {
+            // A failed probe retains cached facts but must not count as a successfully refreshed report.
+            explorer.insert_endpoint_result(
+                probe_ip,
+                Err(
+                    model::site_explorer::EndpointExplorationError::ConnectionRefused {
+                        details: "replacement BMC is unavailable".to_string(),
+                    },
+                ),
+            );
+        }
         creation.store(creation_enabled, Ordering::Relaxed);
         let mut txn = env.pool.txn_begin().await?;
         if remove_expected {
@@ -1208,6 +1433,12 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
             );
         }
         assert_host_links_reconciled(&env.pool, &host, 2).await?;
+        if let Some(interface_id) = unrecorded_bmc {
+            // Unrelated repairs commit while the replacement IP owner remains unassociated with the cached report's DPU.
+            let unadopted = db::machine_interface::find_one(&env.pool, interface_id).await?;
+            assert!(unadopted.machine_id.is_none());
+            assert_eq!(unadopted.addresses, vec![fixture.host.dpus[0].bmc_ip]);
+        }
         assert_eq!(
             network_config_version(&env.pool, &pending.host_machine_id).await?,
             pending.version_before + 1,

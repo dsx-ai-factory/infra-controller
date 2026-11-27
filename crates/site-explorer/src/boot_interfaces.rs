@@ -19,13 +19,16 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::PredictedHostMachineId;
+use carbide_uuid::machine::{HostMachineId, MachineInterfaceId, PredictedHostMachineId};
 use db::{DatabaseError, Transaction};
 use mac_address::MacAddress;
 use model::machine_boot_interface::{
     BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
+    canonical_redfish_boot_interface_id,
 };
-use model::site_explorer::{ExploredEndpoint, HostPrimaryInterfaceSelection};
+use model::site_explorer::{
+    EndpointExplorationReport, ExploredEndpoint, HostPrimaryInterfaceSelection,
+};
 use sqlx::PgConnection;
 
 use crate::errors::SiteExplorerResult;
@@ -91,67 +94,66 @@ impl HostBootInterface {
     }
 }
 
-/// Complete MAC/Redfish id pairs from all explored host NICs.
+/// Complete canonical MAC/Redfish ID pairs from one explored host report.
 pub(super) struct NicBootInterfaces {
-    interfaces: Vec<MachineBootInterface>,
+    address: IpAddr,
+    pub(super) interfaces: Vec<MachineBootInterface>,
 }
 
 impl NicBootInterfaces {
-    pub(super) fn new(explored_hosts: &HashMap<IpAddr, ExploredEndpoint>) -> Self {
-        let mut interfaces = Vec::new();
+    /// Collects complete canonical NIC identities so incomplete observations cannot clear last-known IDs during publication.
+    pub(super) fn new(address: IpAddr, report: &EndpointExplorationReport) -> Option<Self> {
+        let mut interfaces = HashMap::new();
 
-        // Refresh every explored host, including hosts that cannot yet pair
-        // with their DPUs. Only complete pairs replace last-known-good ids.
-        for ep in explored_hosts.values() {
-            for iface in ep
-                .report
-                .systems
-                .iter()
-                .flat_map(|s| s.ethernet_interfaces.iter())
-            {
-                if let Some(interface) =
-                    MachineBootInterface::from_parts(iface.mac_address, iface.id.clone())
-                {
-                    interfaces.push(interface);
-                } else if iface.mac_address.is_some()
-                    || iface.id.as_deref().none_if_empty().is_some()
-                {
-                    // Keep fully empty NIC records quiet.
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        interface_mac_address = ?iface.mac_address,
-                        interface_id = ?iface.id,
-                        "site-explorer: cannot build host NIC boot interface from MAC and interface id; skipping",
-                    );
-                }
+        // Keep one first usable ID per MAC so every store receives the same observation.
+        for iface in report
+            .systems
+            .iter()
+            .flat_map(|system| &system.ethernet_interfaces)
+        {
+            if let Some(interface) = MachineBootInterface::from_parts(
+                iface.mac_address,
+                iface
+                    .id
+                    .as_deref()
+                    .and_then(canonical_redfish_boot_interface_id)
+                    .map(str::to_string),
+            ) {
+                interfaces.entry(interface.mac_address).or_insert(interface);
+            } else if iface.mac_address.is_some() || iface.id.as_deref().none_if_empty().is_some() {
+                // Keep fully empty NIC records quiet.
+                tracing::info!(
+                    bmc_ip_address = %address,
+                    interface_mac_address = ?iface.mac_address,
+                    interface_id = ?iface.id,
+                    "site-explorer: cannot build host NIC boot interface from MAC and interface id; skipping",
+                );
             }
         }
 
-        Self { interfaces }
+        (!interfaces.is_empty()).then(|| Self {
+            address,
+            interfaces: interfaces.into_values().collect(),
+        })
     }
 
-    pub(super) async fn persist(self, txn: &mut Transaction<'_>) -> Result<(), DatabaseError> {
-        // Record each host NIC's Redfish id on its machine_interfaces row so the
-        // primary-flagged row is the host's complete boot interface (MAC + id).
-        // Pending predicted interfaces get the same refresh, so a prediction
-        // minted before the report resolved the id stays as current as the
-        // live report until DHCP promotes it.
-        for boot_interface in self.interfaces {
-            db::machine_interface::set_boot_interface_id(
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-                txn,
-            )
-            .await?;
-            db::predicted_machine_interface::set_boot_interface_id(
-                txn,
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-            )
-            .await?;
-        }
-
-        Ok(())
+    /// Refreshes only the BMC's current host and anonymous NIC rows from its still-assigned report address so callers can commit desired intent with those IDs.
+    ///
+    /// Owned interfaces and pending predictions retain the same MAC/ID pair until
+    /// DHCP promotes a prediction. Callers must retain the transaction through any
+    /// matching desired-ID update.
+    pub(super) async fn persist(
+        &self,
+        txn: &mut Transaction<'_>,
+        bmc_interface_id: MachineInterfaceId,
+    ) -> Result<Option<HostMachineId>, DatabaseError> {
+        db::machine_interface::refresh_boot_interface_ids(
+            txn.as_pgconn(),
+            bmc_interface_id,
+            self.address,
+            &self.interfaces,
+        )
+        .await
     }
 }
 

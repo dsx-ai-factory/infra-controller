@@ -22,6 +22,8 @@ use model::allocation_type::AllocationType;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole,
 };
+use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+use model::machine_boot_interface::{InterfaceSelection, MachineBootInterfaceTarget};
 use model::machine_interface::InterfaceType;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -2489,5 +2491,636 @@ async fn ipv6_admin_prefix_locks_every_admin_segment_exclusively(
         vec!["ExclusiveLock".to_string(); admin_segment_count]
     );
     holder.rollback().await?;
+    Ok(())
+}
+
+/// Attributes newly created or adopted host primaries to LegacyUnknown while preserving an owned Operator decision, preventing discovery from claiming or replacing explicit networking intent.
+#[crate::sqlx_test]
+async fn machine_get_or_create_attributes_only_newly_owned_host_primaries(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Keep addressing out of this fixture so only machine existence and interface ownership vary.
+    let mut setup = pool.begin().await?;
+    let segment = db::network_segment::persist(
+        managed_segment(
+            "discovery-primary-selection",
+            "192.0.2.0/24",
+            NetworkSegmentType::HostInband,
+            AllocationStrategy::Dynamic,
+        ),
+        &mut setup,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    setup.commit().await?;
+    let operator_time: DateTime<Utc> = "2020-01-02T03:04:05Z".parse()?;
+
+    for (scenario, host_exists, already_owned, identity) in [
+        // Creating the machine must also attribute its first primary after associating the interface.
+        ("new host primary", false, false, 0x81),
+        // An existing host adopts an unowned primary through a separate get_or_create branch.
+        ("adopted host primary", true, false, 0x82),
+        // Re-registering the same owned primary must not replace an explicit decision or refresh its time.
+        ("owned Operator primary", true, true, 0x83),
+    ] {
+        let host_id = MachineId::new(MachineIdSource::Tpm, [identity; 32], MachineType::Host);
+        let mut setup = pool.begin().await?;
+        if host_exists {
+            db::machine::create(
+                &mut setup,
+                None,
+                &host_id,
+                ManagedHostState::Created,
+                None,
+                CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let interface = create_without_addresses(
+            &mut setup,
+            &segment,
+            &MacAddress::new([2, 0, 0, 0, 0, identity]),
+            true, // Only a selected primary receives networking attribution.
+            InterfaceType::Data,
+            None,
+        )
+        .await?;
+        if already_owned {
+            associate_interface_with_machine(
+                &interface.id,
+                MachineInterfaceAssociation::Machine(host_id),
+                &mut setup,
+            )
+            .await?;
+            set_primary_interface_selection(
+                &mut setup,
+                &host_id,
+                InterfaceSelectionSource::Operator,
+                true,
+            )
+            .await?;
+            // Fix the original decision time so an unintended rewrite cannot pass through clock precision.
+            sqlx::query(
+                "UPDATE machine_interfaces SET primary_selection_updated_at = $2 WHERE id = $1",
+            )
+            .bind(interface.id)
+            .bind(operator_time)
+            .execute(&mut *setup)
+            .await?;
+        }
+        let reporting_interface = find_one(&mut *setup, interface.id).await?;
+        setup.commit().await?;
+
+        // Exercise machine::get_or_create with the persisted ownership snapshot.
+        let mut discovery = pool.begin().await?;
+        let discovered =
+            db::machine::get_or_create(&mut discovery, None, &host_id, &reporting_interface)
+                .await?;
+        assert_eq!(discovered.id, host_id, "{scenario}");
+        discovery.commit().await?;
+
+        // Reload both records so returned create values cannot stand in for persisted attribution.
+        let primary = find_one(&pool, interface.id).await?;
+        assert_eq!(primary.machine_id, Some(host_id), "{scenario}");
+        assert!(primary.primary_interface, "{scenario}");
+        let host = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("persisted host");
+        let selection = host
+            .config
+            .primary_interface_selection
+            .expect("attributed primary");
+        let expected_source = if already_owned {
+            InterfaceSelectionSource::Operator
+        } else {
+            InterfaceSelectionSource::LegacyUnknown
+        };
+        assert_eq!(selection.source, expected_source, "{scenario}");
+        let decision_time = selection
+            .updated_at
+            .expect("recorded networking decision time");
+        if already_owned {
+            assert_eq!(decision_time, operator_time, "{scenario}");
+        }
+    }
+    Ok(())
+}
+
+/// Preserves legacy Operator choices independently of boot MAC, transfers matching automatic choices, and permits old writers after migration.
+#[crate::sqlx_test]
+async fn migration_baselines_existing_choices_without_coupling_future_boot_writes(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Construct existing primary and boot choices before removing the new schema.
+    let mut txn = pool.begin().await?;
+    let segment = crate::network_segment::persist(
+        crate::test_support::network_segment::admin_segment(
+            "primary-provenance",
+            "192.0.2.0/24",
+            "192.0.2.1",
+            3,
+        ),
+        &mut txn,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    let decision_time = DateTime::from_timestamp(1_722_000_000, 0).expect("decision timestamp");
+    let mut expectations = Vec::new();
+    for (index, source, same_mac, expected_source) in [
+        // Ambiguous historical Operator provenance is deliberately preserved as an explicit networking choice.
+        (
+            0,
+            Some(InterfaceSelectionSource::Operator),
+            false,
+            Some(InterfaceSelectionSource::Operator),
+        ),
+        // A matching automatic boot target identifies the primary decision without guessing at a pending declaration.
+        (
+            1,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+            true,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+        ),
+        // A separate automatic boot target cannot attribute the current networking primary.
+        (
+            2,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+            false,
+            None,
+        ),
+        // Machines without boot provenance remain unattributed rather than receiving invented history.
+        (3, None, true, None),
+        // Unknown legacy decisions retain an absent time instead of receiving fabricated history.
+        (
+            4,
+            Some(InterfaceSelectionSource::LegacyUnknown),
+            true,
+            Some(InterfaceSelectionSource::LegacyUnknown),
+        ),
+    ] {
+        let host_id = MachineId::new(MachineIdSource::Tpm, [0x60 + index; 32], MachineType::Host);
+        crate::machine::create(
+            &mut txn,
+            None,
+            &host_id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        let primary_mac = MacAddress::new([2, 0, 0, 0, index, 1]);
+        let interface = crate::machine_interface::create(
+            &mut txn,
+            std::slice::from_ref(&segment),
+            &primary_mac,
+            true,
+            model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &interface.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            &mut txn,
+        )
+        .await?;
+        if let Some(source) = source {
+            let boot_mac = if same_mac {
+                primary_mac
+            } else {
+                MacAddress::new([2, 0, 0, 0, index, 2])
+            };
+            crate::machine_desired_boot_interface::set(
+                &mut txn,
+                &host_id.try_into()?,
+                &MachineBootInterfaceTarget::MacOnly(boot_mac),
+                source,
+            )
+            .await?;
+            sqlx::query("UPDATE machine_boot_interfaces SET selection_updated_at = $2 WHERE machine_id = $1")
+                .bind(host_id).bind((source != InterfaceSelectionSource::LegacyUnknown).then_some(decision_time)).execute(&mut *txn).await?;
+        }
+        // A secondary interface must not inherit the current primary's decision during backfill.
+        let secondary = crate::machine_interface::create(
+            &mut txn,
+            std::slice::from_ref(&segment),
+            &MacAddress::new([2, 0, 0, 0, index, 3]),
+            false,
+            model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &secondary.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            &mut txn,
+        )
+        .await?;
+        let expected_time =
+            (source != Some(InterfaceSelectionSource::LegacyUnknown)).then_some(decision_time);
+        expectations.push((
+            host_id,
+            interface.id,
+            secondary.id,
+            expected_source,
+            expected_time,
+            source.is_some(),
+        ));
+    }
+
+    // Apply the shipped SQL to the populated predecessor schema, then exercise a boot-only writer.
+    sqlx::raw_sql(
+        "ALTER TABLE machine_interfaces
+         DROP CONSTRAINT machine_interfaces_primary_selection_time_consistent,
+         DROP COLUMN primary_selection_source,
+         DROP COLUMN primary_selection_updated_at",
+    )
+    .execute(&mut *txn)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261109170923_primary_interface_selection.sql"
+    ))
+    .execute(&mut *txn)
+    .await?;
+    sqlx::query(
+        "UPDATE machine_boot_interfaces SET desired_mac_address = '02:00:00:ff:00:01',
+        selection_source = 'operator', selection_updated_at = clock_timestamp()",
+    )
+    .execute(&mut *txn)
+    .await?;
+
+    // Create a new owned primary after backfill using predecessor INSERT/association statements that omit the added columns.
+    let late_host = MachineId::new(MachineIdSource::Tpm, [0xfe; 32], MachineType::Host);
+    crate::machine::create(
+        &mut txn,
+        None,
+        &late_host,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    let late_mac: MacAddress = "02:00:00:fe:00:01".parse()?;
+    let late_primary: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces (segment_id, mac_address, hostname, domain_id, primary_interface, interface_type)
+         VALUES ($1, $2, 'late-old-writer', NULL, true, 'Data') RETURNING id"
+    ).bind(segment.id).bind(late_mac).fetch_one(&mut *txn).await?;
+    sqlx::query(
+        "UPDATE machine_interfaces SET machine_id = $2, association_type = 'Machine' WHERE id = $1",
+    )
+    .bind(late_primary)
+    .bind(late_host)
+    .execute(&mut *txn)
+    .await?;
+    crate::machine_desired_boot_interface::set(
+        &mut txn,
+        &late_host.try_into()?,
+        &MachineBootInterfaceTarget::MacOnly(late_mac),
+        InterfaceSelectionSource::RedfishChassisId,
+    )
+    .await?;
+
+    // Reload to prove old creation leaves absent primary attribution beside genuine automatic boot provenance after migration.
+    let late = crate::machine::find_one(&mut *txn, &late_host, Default::default())
+        .await?
+        .expect("postmigration old-writer host");
+    assert!(late.config.primary_interface_selection.is_none());
+    assert_eq!(
+        late.config
+            .boot_interface_selection
+            .expect("automatic old-writer boot")
+            .source,
+        InterfaceSelectionSource::RedfishChassisId
+    );
+    assert_eq!(
+        late.config
+            .desired_boot_interface
+            .expect("old-writer target")
+            .value
+            .mac_address(),
+        late_mac
+    );
+
+    // Reload normal machine snapshots so schema defaults, backfill meaning, and boot-only independence are verified together.
+    for (host_id, primary_id, secondary_id, expected_source, expected_time, had_boot_selection) in
+        expectations
+    {
+        let host = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("migrated host");
+        assert_eq!(
+            host.config.desired_boot_interface.is_some(),
+            had_boot_selection
+        );
+        if let Some(desired) = &host.config.desired_boot_interface {
+            assert_eq!(
+                desired.value.mac_address(),
+                "02:00:00:ff:00:01".parse::<MacAddress>()?
+            );
+            assert_eq!(
+                host.config
+                    .boot_interface_selection
+                    .expect("old-writer boot selection")
+                    .source,
+                InterfaceSelectionSource::Operator
+            );
+        }
+        assert_eq!(
+            host.config.primary_interface_selection,
+            expected_source.map(|source| InterfaceSelection {
+                source,
+                updated_at: expected_time,
+            })
+        );
+        let secondary_unattributed: bool = sqlx::query_scalar(
+            "SELECT primary_selection_source IS NULL AND primary_selection_updated_at IS NULL
+             FROM machine_interfaces WHERE id = $1",
+        )
+        .bind(secondary_id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert!(secondary_unattributed);
+
+        // Old binaries change flags and associations without maintaining the new metadata.
+        sqlx::query("UPDATE machine_interfaces SET primary_interface = false WHERE id = $1")
+            .bind(primary_id)
+            .execute(&mut *txn)
+            .await?;
+        let demoted = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("demoted host");
+        assert!(demoted.config.primary_interface_selection.is_none());
+        sqlx::query("UPDATE machine_interfaces SET machine_id = NULL, association_type = 'None' WHERE id = $1")
+            .bind(primary_id).execute(&mut *txn).await?;
+        sqlx::query("UPDATE machine_interfaces SET machine_id = $2, association_type = 'Machine', primary_interface = true WHERE id = $1")
+            .bind(primary_id).bind(host_id).execute(&mut *txn).await?;
+        let restored = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("old-writer host");
+        assert_eq!(
+            restored.config.primary_interface_selection,
+            host.config.primary_interface_selection
+        );
+    }
+    txn.rollback().await?;
+    Ok(())
+}
+
+/// Preserves an Operator-selected primary when delayed DHCP replays a consumed prediction, preventing either cached flag from undoing explicit networking intent or its independent boot choice.
+/// A still-live prediction supplies its current primary flag even when the first request cached the opposite value.
+#[crate::sqlx_test]
+async fn consumed_prediction_preserves_new_operator_primary(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::predicted_machine_interface::NewPredictedMachineInterface;
+
+    for (prediction_primary, host_seed, subnet) in [
+        // A cached secondary must not demote the same NIC after Operator selects it for networking independently of boot.
+        (false, 0x95, 2),
+        // A cached primary must not reclaim networking after Operator moves the selection to another owned NIC.
+        (true, 0x96, 3),
+    ] {
+        // Vary the cached prediction flag; the host, second NIC and dynamic segment supply ordinary promotion and selection state.
+        let host_id: HostMachineId =
+            MachineId::new(MachineIdSource::Tpm, [host_seed; 32], MachineType::Host).try_into()?;
+        let predicted_mac = MacAddress::new([2, 0, 0, 0, host_seed, 1]);
+        let other_mac = MacAddress::new([2, 0, 0, 0, host_seed, 2]);
+        let relay_ip: IpAddr = format!("192.0.{subnet}.1").parse()?;
+        let mut setup = pool.begin().await?;
+        db::machine::create(
+            &mut setup,
+            None,
+            &host_id,
+            ManagedHostState::Ready,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        let segment = db::network_segment::persist(
+            managed_segment(
+                &format!("delayed-prediction-{subnet}"),
+                &format!("192.0.{subnet}.0/24"),
+                NetworkSegmentType::HostInband,
+                AllocationStrategy::Dynamic,
+            ),
+            &mut setup,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let other_interface = create_without_addresses(
+            &mut setup,
+            &segment,
+            &other_mac,
+            false,
+            InterfaceType::Data,
+            None,
+        )
+        .await?;
+        associate_interface_with_machine(
+            &other_interface.id,
+            MachineInterfaceAssociation::Machine(*host_id.as_machine_id()),
+            &mut setup,
+        )
+        .await?;
+        db::predicted_machine_interface::create(
+            NewPredictedMachineInterface {
+                machine_id: &host_id,
+                mac_address: predicted_mac,
+                expected_network_segment_type: NetworkSegmentType::HostInband,
+                boot_interface_id: Some("NIC.Embedded.1-1-1"),
+                primary_interface: prediction_primary, // The delayed request retains this flag from before Operator selection.
+            },
+            &mut setup,
+        )
+        .await?;
+        setup.commit().await?;
+
+        // Cache the prediction as a second DHCP request does, then let the first request adopt the NIC and consume it.
+        let mut adoption = pool.begin().await?;
+        let cached_prediction =
+            db::predicted_machine_interface::find_by_mac_address(&mut *adoption, predicted_mac)
+                .await?
+                .expect("pending prediction");
+        let locked_segments = [segment.id];
+        lock_network_segments_exclusive(&mut adoption, &locked_segments).await?;
+        // Supply the opposite cached flag for the first request to prove promotion reads the still-live prediction.
+        let mut first_request_prediction = cached_prediction.clone();
+        first_request_prediction.primary_interface = !prediction_primary;
+        move_predicted_machine_interface_to_machine(
+            &mut adoption,
+            &first_request_prediction,
+            relay_ip,
+            None,
+            &locked_segments,
+        )
+        .await?;
+        adoption.commit().await?;
+
+        // Reload adoption and prediction cleanup before establishing the later Operator choice.
+        let adopted = find_by_mac_address(&pool, predicted_mac)
+            .await?
+            .into_iter()
+            .next()
+            .expect("adopted NIC");
+        assert_eq!(adopted.machine_id, Some(*host_id.as_machine_id()));
+        assert_eq!(adopted.primary_interface, prediction_primary);
+        assert!(
+            db::predicted_machine_interface::find_by_mac_address(&pool, predicted_mac)
+                .await?
+                .is_none()
+        );
+
+        // Commit the explicit networking selection and an independent boot choice before the delayed request resumes.
+        let operator_primary_id = if prediction_primary {
+            other_interface.id
+        } else {
+            adopted.id
+        };
+        let mut selection = pool.begin().await?;
+        lock_network_segments_exclusive(&mut selection, &locked_segments).await?;
+        find_by_machine_id_for_update(&mut selection, host_id.as_machine_id()).await?;
+        db::machine_desired_boot_interface::lock(&mut selection, &host_id).await?;
+        // Clear the adopted NIC first so selecting the other NIC satisfies the unique-primary constraint.
+        set_primary_interface(&adopted.id, false, &mut selection).await?;
+        set_primary_interface(&operator_primary_id, true, &mut selection).await?;
+        set_primary_interface_selection(
+            &mut selection,
+            &host_id,
+            InterfaceSelectionSource::Operator,
+            true,
+        )
+        .await?;
+        bump_network_config_version(&mut selection, &host_id).await?;
+        let selected_boot = db::machine_desired_boot_interface::set(
+            &mut selection,
+            &host_id,
+            &MachineBootInterfaceTarget::MacOnly(other_mac),
+            InterfaceSelectionSource::Operator,
+        )
+        .await?;
+        // Verify this desired generation before replay so clearing a stored observation cannot pass as unchanged absence.
+        assert_eq!(
+            db::machine_desired_boot_interface::mark_verified(
+                &mut selection,
+                &host_id,
+                selected_boot.desired.version,
+                chrono::Utc::now(),
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+        selection.commit().await?;
+
+        // Reload Operator provenance so replay compares against the persisted source and decision time.
+        let before = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("Operator-selected host");
+        let operator_selection = before
+            .config
+            .primary_interface_selection
+            .expect("Operator decision");
+        assert_eq!(
+            operator_selection.source,
+            InterfaceSelectionSource::Operator
+        );
+        assert!(operator_selection.updated_at.is_some());
+        // Check the persisted verification names this desired generation before testing that replay preserves it.
+        let verified_boot = before
+            .status
+            .boot_interface_status_observation
+            .as_ref()
+            .expect("verified Operator boot target");
+        assert_eq!(verified_boot.config_version, selected_boot.desired.version);
+        assert!(!verified_boot.assumed);
+
+        // Reuse the consumed prediction under the normal promotion locks, matching the delayed DHCP call's cached argument.
+        let mut delayed = pool.begin().await?;
+        lock_network_segments_exclusive(&mut delayed, &locked_segments).await?;
+        move_predicted_machine_interface_to_machine(
+            &mut delayed,
+            &cached_prediction,
+            relay_ip,
+            None,
+            &locked_segments,
+        )
+        .await?;
+        delayed.commit().await?;
+
+        // Reload both NICs and their decisions so lost attribution cannot hide behind unchanged boot intent.
+        let after = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("host after delayed DHCP");
+        assert_eq!(after.status.interfaces.len(), 2);
+        assert!(after.status.interfaces.iter().all(|row| {
+            row.machine_id == Some(*host_id.as_machine_id())
+                && [adopted.id, other_interface.id].contains(&row.id)
+        }));
+        let primary_ids: Vec<_> = after
+            .status
+            .interfaces
+            .iter()
+            .filter(|row| row.primary_interface)
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(primary_ids, [operator_primary_id]);
+        assert_eq!(
+            after.config.primary_interface_selection,
+            Some(operator_selection)
+        );
+        type PrimarySelectionDecision = (
+            MachineInterfaceId,
+            bool,
+            Option<InterfaceSelectionSource>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        );
+        let decisions: Vec<PrimarySelectionDecision> = sqlx::query_as(
+            "SELECT id, primary_interface, primary_selection_source, primary_selection_updated_at
+             FROM machine_interfaces WHERE machine_id = $1",
+        )
+        .bind(host_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(decisions.len(), 2);
+        for (interface_id, primary, source, updated_at) in decisions {
+            let expected = if interface_id == operator_primary_id {
+                (
+                    true,
+                    Some(InterfaceSelectionSource::Operator),
+                    operator_selection.updated_at,
+                )
+            } else {
+                (false, None, None)
+            };
+            assert_eq!((primary, source, updated_at), expected);
+        }
+
+        // Preserve both boot authority and network publication while finishing consumed-prediction bookkeeping.
+        assert_eq!(
+            after.config.boot_interface_selection,
+            before.config.boot_interface_selection
+        );
+        assert_eq!(
+            after
+                .config
+                .desired_boot_interface
+                .as_ref()
+                .map(|desired| (&desired.value, desired.version)),
+            before
+                .config
+                .desired_boot_interface
+                .as_ref()
+                .map(|desired| (&desired.value, desired.version))
+        );
+        assert_eq!(
+            after.status.boot_interface_status_observation,
+            before.status.boot_interface_status_observation
+        );
+        assert_eq!(after.network_config.version, before.network_config.version);
+        assert!(
+            db::predicted_machine_interface::find_by_mac_address(&pool, predicted_mac)
+                .await?
+                .is_none()
+        );
+    }
     Ok(())
 }

@@ -27,6 +27,12 @@
   {{- if not (empty $bootstrapCaObject) -}}
   {{- fail "bootstrapCa.object is only valid when bootstrapCa.source is mounted" -}}
   {{- end -}}
+  {{- /* Keep certificate mounts distinct from live host sysfs so Kubernetes can admit the agent pod.
+         Check cleaned paths so trailing separators or dot components cannot bypass the reserved sysfs subtree. */ -}}
+  {{- $normalizedCertsDir := clean $certsDir -}}
+  {{- if or (eq $normalizedCertsDir "/host-sys") (hasPrefix "/host-sys/" $normalizedCertsDir) -}}
+  {{- fail (printf "certsDir=%s conflicts with the agent's host sysfs mount" $certsDir) -}}
+  {{- end -}}
 {{- else -}}
   {{- if not (empty $bootstrapCaUrl) -}}
   {{- fail "bootstrapCa.url is only valid when bootstrapCa.source is legacy_download" -}}
@@ -130,7 +136,7 @@ spec:
             - name: proc-mem-info
               mountPath: /host-mem-info
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
+              mountPath: {{ $certsDir | quote }}
             - name: host-resolv-conf
               mountPath: /host-resolv.conf
               readOnly: true
@@ -226,9 +232,12 @@ spec:
               readOnly: true
             {{- end }}
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
+              mountPath: {{ $certsDir | quote }}
             - name: hw-cache
               mountPath: /data
+              readOnly: true
+            - name: sys
+              mountPath: /host-sys
               readOnly: true
             - name: host-grpc-socket-dir
               mountPath: /var/run/dpf/weave/grpc
@@ -297,7 +306,7 @@ spec:
         {{- end }}
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/forge" }}
+            path: {{ $certsDir | quote }}
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}

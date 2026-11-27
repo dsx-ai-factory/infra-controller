@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use carbide_hw_identification::host_bluefield::HostBlueFieldRules;
 use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
@@ -74,6 +75,8 @@ pub struct Config {
     pub admin_fnn_enabled: bool,
     /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
     pub dpu_policy: Option<HostDpuPolicy>,
+    /// Effective host part-number rules used by pairing and provisional hardware construction.
+    pub host_bluefield_rules: HostBlueFieldRules,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }

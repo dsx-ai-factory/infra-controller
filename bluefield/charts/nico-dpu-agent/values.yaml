@@ -20,6 +20,7 @@ exposedPorts:
   ports: {}
 
 ### Cert directory on the host (also used as the container mountPath).
+### With bootstrapCa.source=legacy_download, /host-sys and its subdirectories are rejected after lexical path cleanup for all DPU generations because the agent mounts host sysfs there.
 certsDir: /opt/forge
 
 ### Internal container access for Spectrum-X maintenance, derived from [ewethers_config] partial-multiplane NICO site configuration.

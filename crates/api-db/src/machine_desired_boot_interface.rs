@@ -2569,6 +2569,15 @@ mod tests {
         sqlx::query("DROP TABLE machine_boot_interfaces")
             .execute(&pool)
             .await?;
+        // Remove networking-primary metadata before recreating boot_interface_selection_source.
+        sqlx::raw_sql(
+            "ALTER TABLE machine_interfaces
+             DROP CONSTRAINT machine_interfaces_primary_selection_time_consistent,
+             DROP COLUMN primary_selection_source,
+             DROP COLUMN primary_selection_updated_at",
+        )
+        .execute(&pool)
+        .await?;
         sqlx::query("DROP TYPE boot_interface_selection_source")
             .execute(&pool)
             .await?;

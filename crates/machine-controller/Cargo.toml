@@ -41,6 +41,7 @@ carbide-credential-rotation = { path = "../credential-rotation", default-feature
 carbide-dpf = { path = "../dpf", default-features = false }
 carbide-health-report = { path = "../health-report", default-features = false }
 carbide-health-metrics = { path = "../health-metrics" }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-firmware = { path = "../firmware", default-features = false }
 carbide-instrument = { path = "../instrument" }

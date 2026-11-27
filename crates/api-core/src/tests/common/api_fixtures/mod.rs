@@ -63,6 +63,7 @@ use carbide_secrets::credentials::{
     CompositeCredentialManager, CredentialKey, CredentialManager, CredentialReader, CredentialType,
     CredentialWriter as _, Credentials,
 };
+use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{ChainedCredentialReader, CredentialSnapshot, UsernamePassword};
 use carbide_site_explorer::SiteExplorer;
@@ -212,6 +213,8 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) prevent_allocations_on_stale_dpu_agent_version: Option<bool>,
     pub(in crate::tests) network_segments_drain_period: Option<chrono::Duration>,
     pub(in crate::tests) power_manager_enabled: Option<bool>,
+    /// Overrides the certificate provider so tests can observe requests before discovery retries.
+    pub(in crate::tests) certificate_provider: Option<Arc<TestCertificateProvider>>,
     /// Enables filtering machine aggregate metrics by database object IDs only
     /// for tests that need to verify the production controller wiring.
     pub(in crate::tests) machine_filter_metrics_by_existing_object_ids_enabled: Option<bool>,
@@ -1568,7 +1571,12 @@ async fn create_test_env_with_overrides_inner(
         api_builder = api_builder.with_dpf_sdk(dpf_sdk);
     }
 
-    let api = Arc::new(api_builder.build());
+    // Install the supplied provider before controllers share the API so tests can inspect its requests.
+    let mut api = api_builder.build();
+    if let Some(certificate_provider) = overrides.certificate_provider {
+        api.certificate_provider = certificate_provider;
+    }
+    let api = Arc::new(api);
 
     let ib_fabric_monitor = IbFabricMonitor::new(
         db_pool.clone(),

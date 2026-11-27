@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use carbide_network::ip::IdentifyAddressFamily;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
+use model::network_segment::NetworkSegmentType;
 use rpc::forge as rpc;
 use tonic::{Request, Response, Status};
 
@@ -35,6 +36,8 @@ use crate::handlers::static_address_metrics::{
 /// address moves the interface to another network segment, those retained
 /// addresses must also belong to that segment. Otherwise, reject the request
 /// without changing any addresses or interface settings.
+/// Active primary Admin changes return `Unavailable` without committing when
+/// group admission finds contention, allowing the caller to retry the whole request.
 pub(crate) async fn assign_static_address(
     api: &Api,
     request: Request<rpc::AssignStaticAddressRequest>,
@@ -111,13 +114,6 @@ async fn assign_static_address_inner(
             target_segment.config.subdomain_id,
         )
         .await?;
-        tracing::info!(
-            machine_interface_id = %interface_id,
-            %ip_address,
-            previous_network_segment_id = %current_iface.segment_id,
-            next_network_segment_id = %target_segment.id,
-            "Moved interface to correct segment for static address"
-        );
     }
 
     // Keep the interface's IP-derived hostname/domain consistent with the new
@@ -131,7 +127,37 @@ async fn assign_static_address_inner(
     )
     .await?;
 
+    // Changing the active Admin address invalidates the DPU's previous ACK even when the segment stays the same.
+    if current_iface.primary_interface
+        && (current_iface.network_segment_type == Some(NetworkSegmentType::Admin)
+            || target_segment.config.segment_type == NetworkSegmentType::Admin)
+        && (!current_iface.addresses.contains(&ip_address)
+            || current_iface.segment_id != target_segment.id)
+        && let Some(host_id) = current_iface
+            .machine_id
+            .filter(|id| id.machine_type().is_host() || id.machine_type().is_predicted_host())
+    {
+        // Try the group before its version update so status holding this interface's DPU cannot form a wait cycle.
+        if !db::machine::try_lock_group_for_update(txn.as_pgconn(), &host_id).await? {
+            txn.rollback_or_log("static address assignment machine group contention")
+                .await;
+            return Err(CarbideError::UnavailableError(format!(
+                "machine group for {host_id} is busy or missing; retry static address assignment"
+            )));
+        }
+        db::machine_interface::bump_network_config_version(txn.as_pgconn(), &host_id).await?;
+    }
     txn.commit().await?;
+
+    if current_iface.segment_id != target_segment.id {
+        tracing::info!(
+            machine_interface_id = %interface_id,
+            %ip_address,
+            previous_network_segment_id = %current_iface.segment_id,
+            next_network_segment_id = %target_segment.id,
+            "Moved interface to correct segment for static address"
+        );
+    }
 
     let status: rpc::AssignStaticAddressStatus = result.into();
     tracing::info!(machine_interface_id = %interface_id, %ip_address, assignment_status = ?status, "Static address assignment");
@@ -143,6 +169,7 @@ async fn assign_static_address_inner(
     }))
 }
 
+/// Removes a static address with its active primary Admin version update, rejecting busy machine groups without committing so callers can retry the whole request.
 pub(crate) async fn remove_static_address(
     api: &Api,
     request: Request<rpc::RemoveStaticAddressRequest>,
@@ -199,6 +226,24 @@ async fn remove_static_address_inner(
     // hostname pinned to the removed IP.
     if deleted {
         db::machine_interface::sync_hostname_after_address_change(&mut txn, interface_id).await?;
+        // The delete retains the interface lock; invalidate the old ACK before committing an active Admin-address removal.
+        let interface = db::machine_interface::find_one(txn.as_pgconn(), interface_id).await?;
+        if interface.primary_interface
+            && interface.network_segment_type == Some(NetworkSegmentType::Admin)
+            && let Some(host_id) = interface
+                .machine_id
+                .filter(|id| id.machine_type().is_host() || id.machine_type().is_predicted_host())
+        {
+            // Status can hold a DPU row while waiting for this interface, so release the deletion before returning retryable contention.
+            if !db::machine::try_lock_group_for_update(txn.as_pgconn(), &host_id).await? {
+                txn.rollback_or_log("static address removal machine group contention")
+                    .await;
+                return Err(CarbideError::UnavailableError(format!(
+                    "machine group for {host_id} is busy or missing; retry static address removal"
+                )));
+            }
+            db::machine_interface::bump_network_config_version(txn.as_pgconn(), &host_id).await?;
+        }
     }
 
     txn.commit().await?;

@@ -452,8 +452,8 @@ impl ManagedHostStateSnapshot {
             .unwrap_or(true)
     }
 
-    /// Returns the MAC address the host should boot from, if one can be
-    /// determined from this snapshot.
+    /// Returns the MAC address of the owned boot-interface candidate, if one
+    /// can be determined from this snapshot.
     ///
     /// For hosts with DPUs, this is the DPU-facing "primary" `machine_interface`,
     /// flagged as `primary_interface: true` during site-explorer ingestion.
@@ -466,6 +466,9 @@ impl ManagedHostStateSnapshot {
     /// only the BMC has been discovered, or the host's primary NIC hasn't
     /// DHCP'd yet.
     ///
+    /// Default lifecycle resolution uses this candidate only when no desired
+    /// boot target is stored.
+    ///
     /// This helper exists to centralize the boot MAC selection logic that used
     /// to be duplicated at every state controller callsite needing to pass a MAC
     /// into things like machine_setup, is_bios_setup, etc.
@@ -473,9 +476,9 @@ impl ManagedHostStateSnapshot {
         pick_boot_interface_mac(&self.host_snapshot.status.interfaces)
     }
 
-    /// Returns the host's boot interface as a fully-populated
+    /// Returns the owned boot-interface candidate as a fully-populated
     /// [`MachineBootInterface`] (MAC + Redfish interface id), derived from the
-    /// same primary `machine_interface` row that [`Self::boot_interface_mac`]
+    /// same `machine_interface` row that [`Self::boot_interface_mac`]
     /// selects.
     ///
     /// Returns `None` when that row hasn't captured a Redfish interface id yet
@@ -3462,8 +3465,8 @@ pub struct MachineInterfaceSnapshot {
     pub mac_address: MacAddress,
     /// Vendor-native Redfish `EthernetInterface.Id` for this interface, captured
     /// by site-explorer alongside the MAC. Combined with `mac_address` it forms a
-    /// [`MachineBootInterface`]; for the `primary_interface` row that pair is the
-    /// host's boot device.
+    /// [`MachineBootInterface`]; desired boot selection can use this pair
+    /// independently of `primary_interface`.
     pub boot_interface_id: Option<String>,
     pub attached_dpu_machine_id: Option<DpuMachineId>,
     pub domain_id: Option<DomainId>,

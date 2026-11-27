@@ -17,6 +17,7 @@
 
 mod admin_power;
 mod astra;
+mod bf4_host_pfs;
 mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;
