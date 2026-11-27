@@ -4120,6 +4120,8 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
   '/v2/org/{org}/nico/vpc-peering/{id}':
     parameters:
       - schema:
