@@ -32,7 +32,13 @@ async fn verify_preserves_device_records_and_returns_a_signed_negative_ear() {
     claims["ear_status"] = json!("contraindicated");
     claims["submods"]["gpu_1"] = claims["submods"]["gpu_0"].clone();
     claims["submods"]["gpu_1"]["ear_status"] = json!("contraindicated");
-    claims["submods"]["gpu_1"]["eat_nonce"] = json!(URL_SAFE_NO_PAD.encode([0xfd; 96]));
+    // An early appraisal failure may omit claims extracted from the evidence.
+    for field in ["ear_attester_claims", "evidence_profile", "eat_nonce"] {
+        claims["submods"]["gpu_1"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
     claims["submods"]["gpu_1"]["ear_nvidia_error_details"] = json!({"reason": "test appraisal"});
     let token = fixture.sign(&claims, Some(KEY_ID));
 
@@ -90,6 +96,7 @@ async fn verify_preserves_device_records_and_returns_a_signed_negative_ear() {
     // A negative appraisal is still a successfully validated EAR. Preserve the
     // structured claims instead of flattening nested values into strings.
     assert_eq!(parsed.ear_status, EarStatus::Contraindicated);
+    assert_eq!(parsed.jti, "test-ear");
     assert_eq!(parsed.submods.len(), 2);
     assert_eq!(parsed.submods["gpu_0"].ear_status, EarStatus::Affirming);
     assert_eq!(
@@ -97,6 +104,21 @@ async fn verify_preserves_device_records_and_returns_a_signed_negative_ear() {
         EarStatus::Contraindicated
     );
     assert!(parsed.eat_nonce.is_none());
+    assert_eq!(
+        parsed.submods["gpu_0"].evidence_profile,
+        Some(json!("test-spdm-profile"))
+    );
+    assert_eq!(
+        parsed.submods["gpu_0"].eat_nonce,
+        Some(json!(URL_SAFE_NO_PAD.encode([0xfb; 32])))
+    );
+    assert_eq!(
+        parsed.submods["gpu_0"].ear_attester_claims,
+        Some(json!({"model": "test-gpu"}))
+    );
+    assert!(parsed.submods["gpu_1"].evidence_profile.is_none());
+    assert!(parsed.submods["gpu_1"].eat_nonce.is_none());
+    assert!(parsed.submods["gpu_1"].ear_attester_claims.is_none());
     assert_eq!(parsed.additional_claims["ear-extension"], "preserved");
     assert_eq!(
         parsed.ear_nvidia_inputs.additional_claims["input-extension"],

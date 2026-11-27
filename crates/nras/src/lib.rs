@@ -215,16 +215,19 @@ pub struct NvidiaInputs {
 pub struct EarSubmodule {
     /// Profile identifying this submodule's claim set.
     pub eat_profile: Value,
-    /// Profile describing the submitted evidence.
-    pub evidence_profile: Value,
+    /// Optional profile describing the submitted evidence; absent claims decode as `None`.
+    #[serde(default)]
+    pub evidence_profile: Option<Value>,
     /// Verdict for this evidence item.
     pub ear_status: EarStatus,
-    /// Nonce bound into this item's signed evidence.
-    pub eat_nonce: Value,
+    /// Optional nonce bound into this item's signed evidence; absent claims decode as `None`.
+    #[serde(default)]
+    pub eat_nonce: Option<Value>,
     /// Claims produced by the verifier.
     pub ear_verifier_claims: Value,
-    /// Claims describing the attester.
-    pub ear_attester_claims: Value,
+    /// Optional claims describing the attester; absent claims decode as `None`.
+    #[serde(default)]
+    pub ear_attester_claims: Option<Value>,
     /// Optional profile-defined appraisal purpose.
     #[serde(default)]
     pub ear_nvidia_purpose: Option<Value>,

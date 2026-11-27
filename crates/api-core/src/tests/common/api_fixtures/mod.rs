@@ -1256,6 +1256,7 @@ impl Verifier for VerifierSimImpl {
             EarStatus::Contraindicated => "contraindicated",
         };
         let error_details = self.appraisal_error_details.lock().unwrap().clone();
+        // Omit optional attester data so controller tests also exercise sparse appraisals.
         let submods: serde_json::Map<String, serde_json::Value> = labels
             .into_iter()
             .map(|label| {
@@ -1263,11 +1264,8 @@ impl Verifier for VerifierSimImpl {
                     label,
                     serde_json::json!({
                         "eat_profile": "simulated-ear",
-                        "evidence_profile": "simulated-spdm",
                         "ear_status": status,
-                        "eat_nonce": "simulated-nonce",
                         "ear_verifier_claims": {},
-                        "ear_attester_claims": {},
                         "ear_nvidia_error_details": error_details,
                     }),
                 )
