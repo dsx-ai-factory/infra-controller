@@ -20,8 +20,7 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use bmc_backend::BmcConnector;
@@ -113,8 +112,7 @@ use model::tenant::TenantOrganizationId;
 use model::test_support::dpu::{DPU_BF3_INFO_JSON, DPU_BF4_INFO_JSON};
 use model::test_support::{DpuConfig, HardwareInfoTemplate, ManagedHostConfig, rms_rack_profiles};
 use nras::{
-    DeviceAttestationInfo, NrasError, ProcessedAttestationOutcome, RawAttestationOutcome,
-    VerifierClient,
+    DeviceAttestationInfo, EarClaims, EarStatus, NrasError, VerifierClient, VerifierResponseJwt,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
@@ -239,7 +237,9 @@ pub(in crate::tests) struct TestEnvOverrides {
     /// Optional firmware-object fetcher shared by the API and rack state handler.
     pub(in crate::tests) firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
 
-    pub(in crate::tests) nras_should_fail_parsing: Option<Arc<AtomicBool>>,
+    pub(in crate::tests) nras_appraisal_status: Option<Arc<StdMutex<EarStatus>>>,
+    pub(in crate::tests) nras_appraisal_error_details:
+        Option<Arc<StdMutex<Option<serde_json::Value>>>>,
     pub(in crate::tests) vpc_prefixes_drain_period: Option<chrono::Duration>,
     pub(in crate::tests) dhcp_lease_expiry_handling: Option<bool>,
 }
@@ -1230,32 +1230,60 @@ pub(in crate::tests) async fn create_test_env_with_host_inband(db_pool: sqlx::Pg
     env
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(in crate::tests) struct VerifierSimImpl {
-    should_fail_parsing: Arc<AtomicBool>,
+    appraisal_status: Arc<StdMutex<EarStatus>>,
+    appraisal_error_details: Arc<StdMutex<Option<serde_json::Value>>>,
 }
 
 #[async_trait::async_trait]
 impl Verifier for VerifierSimImpl {
     fn client(&self, _nras_config: nras::Config) -> Box<dyn nras::VerifierClient> {
-        Box::new(VerifierClientSim::default())
+        Box::new(VerifierClientSim {})
     }
+
     async fn parse_attestation_outcome(
         &self,
         _nras_config: &nras::Config,
-        _state: &RawAttestationOutcome,
-    ) -> Result<ProcessedAttestationOutcome, NrasError> {
-        if self.should_fail_parsing.load(Ordering::Relaxed) {
-            Ok(ProcessedAttestationOutcome {
-                attestation_passed: false,
-                devices: HashMap::new(),
+        state: &VerifierResponseJwt,
+    ) -> Result<EarClaims, NrasError> {
+        // The simulator passes submitted labels through its opaque response so each
+        // controller iteration receives the appraisal for the device it requested.
+        let labels: Vec<String> = serde_json::from_str(state.as_ref()).unwrap();
+        let status = match *self.appraisal_status.lock().unwrap() {
+            EarStatus::Affirming => "affirming",
+            EarStatus::Warning => "warning",
+            EarStatus::Contraindicated => "contraindicated",
+        };
+        let error_details = self.appraisal_error_details.lock().unwrap().clone();
+        // Omit optional attester data so controller tests also exercise sparse appraisals.
+        let submods: serde_json::Map<String, serde_json::Value> = labels
+            .into_iter()
+            .map(|label| {
+                (
+                    label,
+                    serde_json::json!({
+                        "eat_profile": "simulated-ear",
+                        "ear_status": status,
+                        "ear_verifier_claims": {},
+                        "ear_nvidia_error_details": error_details,
+                    }),
+                )
             })
-        } else {
-            Ok(ProcessedAttestationOutcome {
-                attestation_passed: true,
-                devices: HashMap::new(),
-            })
-        }
+            .collect();
+        Ok(serde_json::from_value(serde_json::json!({
+            "eat_profile": "simulated-ear",
+            "iss": "simulated-nras",
+            "jti": "simulated-token",
+            "iat": 0,
+            "nbf": 0,
+            "exp": 0,
+            "ear_verifier_id": {},
+            "ear_status": status,
+            "ear_nvidia_inputs": {"digests": []},
+            "submods": submods,
+        }))
+        .unwrap())
     }
 }
 
@@ -1264,28 +1292,13 @@ pub(in crate::tests) struct VerifierClientSim {}
 
 #[async_trait]
 impl VerifierClient for VerifierClientSim {
-    async fn attest_gpu(
+    async fn attest(
         &self,
-        _device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        let verifier_response = RawAttestationOutcome {
-            overall_outcome: ("JWT".to_string(), "All_good".to_string()),
-            devices_outcome: HashMap::new(),
-        };
-        Ok(verifier_response)
-    }
-
-    async fn attest_dpu(
-        &self,
-        _device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        Err(NrasError::NotImplemented)
-    }
-    async fn attest_cx7(
-        &self,
-        _device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        Err(NrasError::NotImplemented)
+        device_info: Vec<DeviceAttestationInfo>,
+    ) -> Result<VerifierResponseJwt, NrasError> {
+        // This test double bypasses cryptography; NRAS crate tests cover signatures.
+        let labels: Vec<_> = device_info.into_iter().map(|info| info.device_id).collect();
+        Ok(serde_json::to_string(&labels).unwrap().into())
     }
 }
 
@@ -1669,9 +1682,12 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let verifier = VerifierSimImpl {
-        should_fail_parsing: overrides
-            .nras_should_fail_parsing
-            .unwrap_or(Arc::new(AtomicBool::new(false))),
+        appraisal_status: overrides
+            .nras_appraisal_status
+            .unwrap_or_else(|| Arc::new(StdMutex::new(EarStatus::Affirming))),
+        appraisal_error_details: overrides
+            .nras_appraisal_error_details
+            .unwrap_or_else(|| Arc::new(StdMutex::new(None))),
     };
 
     let spdm_swap = SwapHandler {

@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use ::rpc::forge::forge_server::Forge;
@@ -357,9 +357,9 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     // set the NRAS Verifier Mock Verifier to satisfy requests, but we'll later
     // flip it to fail them
     let mut overrides = TestEnvOverrides::with_config(config);
-    let nras_should_fail_parsing_flag = Arc::new(AtomicBool::new(false));
+    let nras_appraisal_status = Arc::new(Mutex::new(nras::EarStatus::Affirming));
 
-    overrides.nras_should_fail_parsing = Some(nras_should_fail_parsing_flag.clone());
+    overrides.nras_appraisal_status = Some(nras_appraisal_status.clone());
 
     let env = create_test_env_with_overrides(pool, overrides).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
@@ -436,11 +436,11 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
 
     // Do SPDM attestation: first to failed, then to success
     let mut txn = env.db_txn().await;
-    nras_should_fail_parsing_flag.store(true, Ordering::Relaxed);
+    *nras_appraisal_status.lock().unwrap() = nras::EarStatus::Contraindicated;
 
     spdm_attestation_run_to_failed_then_to_success(
         &env,
-        nras_should_fail_parsing_flag.clone(),
+        nras_appraisal_status.clone(),
         &mh,
         &mut txn,
         |job_id| ManagedHostState::PreAssignedMeasuring {
@@ -697,11 +697,11 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     // perform SPDM attestation, set up the NRAS Verifier Mock
     // to fail
     let mut txn = env.db_txn().await;
-    nras_should_fail_parsing_flag.store(true, Ordering::Relaxed);
+    *nras_appraisal_status.lock().unwrap() = nras::EarStatus::Contraindicated;
 
     spdm_attestation_run_to_failed_then_to_success(
         &env,
-        nras_should_fail_parsing_flag,
+        nras_appraisal_status,
         &mh,
         &mut txn,
         |job_id| ManagedHostState::PostAssignedMeasuring {

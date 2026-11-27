@@ -15,27 +15,31 @@
  * limitations under the License.
  */
 
-// these are not visible outside of this crate
+//! NVIDIA Remote Attestation Service client for SPDM evidence and signed EAR results.
+
 mod client;
 mod keystore;
-mod parser;
 
-// re-exports
-use std::collections as stdcol;
+use std::collections::BTreeMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 pub use client::{NrasVerifierClient, VerifierClient};
+use jsonwebtoken as jst;
 pub use keystore::{KeyStore, NrasKeyStore};
-pub use parser::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+/// Service locations and token validation settings for NRAS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Service base URL; the client appends `/v1/verify`.
     pub nras_url: String,
-    pub nras_gpu_url_suffix: String,
+    /// Full URL of the service's `/.well-known/jwks.json` signing-key endpoint.
     pub nras_jwks_url: String,
+    /// Check JWT expiry when true; [`Config::default`] enables this check.
+    /// Required when deserialising configuration. Signature and not-before checks always apply.
     pub validate_jwt_expiry: bool,
 }
 
@@ -43,29 +47,27 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             nras_url: Default::default(),
-            nras_gpu_url_suffix: Default::default(),
             nras_jwks_url: Default::default(),
             validate_jwt_expiry: true,
         }
     }
 }
 
+/// A request, transport, signing-key or token-validation failure.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NrasError {
     #[error("error talking to NRAS: {0}")]
     Communication(String),
     #[error("error serialising/deserialising: {0}")]
     Serde(String),
-    #[error("error parsing verifier response: {0}")]
-    ParsingVerifierResponse(String),
-    #[error("error - NotImplemented")]
-    NotImplemented,
     #[error("error parsing JWT token: {0}")]
     Jwt(String),
     #[error("error looking up a decoding key: {0}")]
     DecodingKeyNotFound(String),
     #[error("error forming JWK decoding key: {0}")]
     Jwk(String),
+    #[error("error with BMC data: {0}")]
+    Bmc(String),
 }
 
 impl From<reqwest::Error> for NrasError {
@@ -80,173 +82,178 @@ impl From<reqwest_middleware::Error> for NrasError {
     }
 }
 
-type Evidence = String;
-type DeviceCertificate = String;
-
-#[derive(Serialize, Default)]
-pub enum MachineArchitecture {
-    #[serde(rename(serialize = "BLACKWELL"))]
-    #[default]
-    Blackwell,
-}
-
-/// Converts a PEM certificate string (with optional literal `\n`) to a single-line Base64 string.
+/// Base64-encodes a PEM certificate chain, expanding optional literal `\n` separators.
+/// The caller supplies the complete chain, ordered from the leaf certificate onwards.
 pub fn certificate_to_base64(pem: &str) -> String {
     let pem_with_newlines = pem.replace("\\n", "\n");
     STANDARD.encode(pem_with_newlines.as_bytes())
 }
 
-/// Evidence and certificate for one attestation device.
-/// The `certificate` field must be the device CA certificate as a single-line Base64 string
-/// (i.e. Base64-encoding of the PEM text). Use [certificate_to_base64] to produce this from PEM
-// Double base64 encoding is unusual, but it's the format required by NRAS.
-#[derive(Serialize)]
-pub struct EvidenceCertificate {
-    pub evidence: Evidence,
-    pub certificate: DeviceCertificate,
-    pub firmware_version: String,
-}
-
-#[derive(Serialize, Default)]
+/// One labelled SPDM evidence item to include in a CMW verification collection.
 pub struct DeviceAttestationInfo {
-    #[serde(rename(serialize = "evidence_list"))]
-    pub ec: Vec<EvidenceCertificate>,
-    #[serde(rename(serialize = "arch"))]
-    pub architecture: MachineArchitecture,
+    /// Unique label preserved as a submodule key in the returned EAR.
+    /// The collection names `__cmwc_t`, `nonce` and `appraisal-settings` are reserved.
+    pub device_id: String,
+    /// Standard Base64-encoded SPDM measurement transcript.
+    pub evidence: String,
+    /// Standard Base64-encoded PEM certificate chain, leaf first through L1.
+    pub certificate: String,
+    /// Hexadecimal encoding of the 32–96 nonce bytes bound into this evidence.
     pub nonce: String,
 }
 
-impl From<DeviceAttestationInfo> for String {
-    fn from(value: DeviceAttestationInfo) -> String {
-        serde_json::to_string(&value).unwrap()
+/// An unvalidated compact EAR JWT returned by a verifier implementation.
+#[derive(Debug)]
+pub struct VerifierResponseJwt(String);
+
+impl From<String> for VerifierResponseJwt {
+    /// Wraps a token without validating its signature or claims.
+    fn from(token: String) -> Self {
+        Self(token)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RawAttestationOutcome {
-    // this typically corresponds to ["JWT", "<jwt_token>"] entry in the response
-    pub overall_outcome: (String, String),
-    // this typically corresponds to {"GPU-0": "<jwt_token>"} entries
-    pub devices_outcome: stdcol::HashMap<String, String>,
+impl AsRef<str> for VerifierResponseJwt {
+    /// Returns the original token, for example for storage before later validation.
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug)]
-pub struct ProcessedAttestationOutcome {
-    pub attestation_passed: bool,
-    // the key is submod name, e.g. "GPU-0", the value are the claims
-    // extracted from that submod
-    pub devices: stdcol::HashMap<String, stdcol::HashMap<String, String>>,
+impl VerifierResponseJwt {
+    /// Validates the ES384 signature, key identifier and not-before time, then parses the EAR.
+    /// Expiry validation is optional; time checks allow the JWT library's 60-second clock skew.
+    /// A validated token can still carry a negative appraisal in [`EarClaims::ear_status`].
+    pub fn validate_and_parse(
+        &self,
+        keystore: &dyn KeyStore,
+        validate_jwt_expiry: bool,
+    ) -> Result<EarClaims, NrasError> {
+        // decode header and obtain validation algorithm
+        let jwt_header = jst::decode_header(&self.0)
+            .map_err(|e| NrasError::Jwt(format!("Error decoding header: {}", e)))?;
+
+        let kid = jwt_header
+            .kid
+            .ok_or_else(|| NrasError::Jwt("No kid found in JWT header".to_string()))?;
+
+        let decoding_key = keystore.find_key(&kid).ok_or_else(|| {
+            NrasError::DecodingKeyNotFound(format!("DecodingKey not found for kid - {}", kid))
+        })?;
+
+        // The service profile permits ES384; do not expand the accepted algorithms
+        // merely because an incoming token names a different one.
+        let mut validation = jst::Validation::new(jst::Algorithm::ES384);
+        validation.validate_exp = validate_jwt_expiry;
+        validation.validate_nbf = true;
+
+        // now decode the payload and perform the validation using the jwt_pub_key
+        let jwt_token_data: jst::TokenData<EarClaims> =
+            jst::decode::<EarClaims>(&self.0, &decoding_key, &validation)
+                .map_err(|e| NrasError::Jwt(format!("Error decoding JWT token: {}", e)))?;
+
+        Ok(jwt_token_data.claims)
+    }
+}
+
+/// Validated Entity Attestation Result claims, including each submitted evidence label.
+/// Claims without a concrete type in the NRAS OpenAPI schema are preserved as JSON.
+#[derive(Debug, Deserialize)]
+pub struct EarClaims {
+    /// Profile identifying the EAR claim set.
+    pub eat_profile: Value,
+    /// Token issuer.
+    pub iss: String,
+    /// Unique token identifier.
+    pub jti: String,
+    /// Issue time in Unix seconds.
+    pub iat: i64,
+    /// Earliest valid time in Unix seconds.
+    pub nbf: i64,
+    /// Expiry time in Unix seconds.
+    pub exp: i64,
+    /// Echo of the optional request-level nonce; evidence freshness uses per-item nonces.
+    #[serde(default)]
+    pub eat_nonce: Option<Value>,
+    /// Identity of the verifier producing the appraisal.
+    pub ear_verifier_id: Value,
+    /// Worst appraisal status across the evidence submodules.
+    pub ear_status: EarStatus,
+    /// Digests identifying the verifier inputs.
+    pub ear_nvidia_inputs: NvidiaInputs,
+    /// Evidence appraisals keyed by the caller's original device labels.
+    pub submods: BTreeMap<String, EarSubmodule>,
+    /// Additional claims defined by the EAR profile or extensions.
+    #[serde(flatten)]
+    pub additional_claims: BTreeMap<String, Value>,
+}
+
+/// An appraisal verdict, independent of HTTP success or JWT signature validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EarStatus {
+    /// Evidence supports the attester's trustworthiness.
+    Affirming,
+    /// Evidence carries a warning requiring an acceptance-policy decision.
+    Warning,
+    /// Evidence does not support the attester's trustworthiness.
+    Contraindicated,
+}
+
+/// NVIDIA input-identification claims carried by an EAR.
+#[derive(Debug, Deserialize)]
+pub struct NvidiaInputs {
+    /// Profile-defined input digests; their detailed shape is not fixed by the verify schema.
+    pub digests: Value,
+    /// Additional input-identification claims.
+    #[serde(flatten)]
+    pub additional_claims: BTreeMap<String, Value>,
+}
+
+/// Appraisal and attester claims for one labelled evidence item.
+#[derive(Debug, Deserialize)]
+pub struct EarSubmodule {
+    /// Profile identifying this submodule's claim set.
+    pub eat_profile: Value,
+    /// Optional profile describing the submitted evidence; absent claims decode as `None`.
+    #[serde(default)]
+    pub evidence_profile: Option<Value>,
+    /// Verdict for this evidence item.
+    pub ear_status: EarStatus,
+    /// Optional nonce bound into this item's signed evidence; absent claims decode as `None`.
+    #[serde(default)]
+    pub eat_nonce: Option<Value>,
+    /// Claims produced by the verifier.
+    pub ear_verifier_claims: Value,
+    /// Optional claims describing the attester; absent claims decode as `None`.
+    #[serde(default)]
+    pub ear_attester_claims: Option<Value>,
+    /// Optional profile-defined appraisal purpose.
+    #[serde(default)]
+    pub ear_nvidia_purpose: Option<Value>,
+    /// Optional details explaining an appraisal failure.
+    #[serde(default)]
+    pub ear_nvidia_error_details: Option<Value>,
+    /// Additional submodule claims defined by profiles or extensions.
+    #[serde(flatten)]
+    pub additional_claims: BTreeMap<String, Value>,
 }
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::*;
 
-    /// Sample PEM certificate (literal \n), same as nras_gpu example default.
-    const SAMPLE_PEM_CERT: &str = r#"-----BEGIN CERTIFICATE-----\nMIIDdTCCAvqgAwIBAgIUYtQXVPLg2GAE54Bs6sNdIMpd/TQwCgYIKoZIzj0EAwMw\nZDEbMBkGA1UEBRMSNDBBNjgwNkQxQzE1Qzc5ODg5MQswCQYDVQQGEwJVUzEbMBkG\nA1UECgwSTlZJRElBIENvcnBvcmF0aW9uMRswGQYDVQQDDBJHQjEwMCBBMDEgRlNQ\nIEJST00wIBcNMjMwNjIwMDAwMDAwWhgPOTk5OTEyMzEyMzU5NTlaMHwxMTAvBgNV\nBAUTKDYyRDQxNzU0RjJFMEQ4NjAwNEU3ODA2Q0VBQzM1RDIwQ0E1REZEMzQxCzAJ\nBgNVBAYTAlVTMRswGQYDVQQKDBJOVklESUEgQ29ycG9yYXRpb24xHTAbBgNVBAMM\nFEdCMTAwIEEwMSBGU1AgRk1DIExGMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEtSJI\n29zBLJkYD8lZb/WdDT1HzXHOLvCMrhR3/6RxCo4XklE4OIndyEF8XcF0SsN8cPyM\n4E2dM9+v78wVGHAa1KDU9BOOCF4A2PwDvWPS4s73ss3ETFXfj62riouzjinoo4IB\nUTCCAU0wDgYDVR0PAQH/BAQDAgeAMB0GA1UdDgQWBBTi1BdU8uDYYATngGzqw10g\nyl39NDAfBgNVHSMEGDAWgBRUbGZrt6GJGV9NGhrPrTexfqHHVDA4BgNVHREEMTAv\noC0GCisGAQQBgxyCEgGgHwwdTlZJRElBOkdCMTAwOjQ4QjAyREY1RkM4QjM1QkQw\ngcAGB2eBBQUEAQEEgbQwgbGABk5WSURJQYENR0IxMDAgQTAxIEZTUIICMDODAQOE\nAQCFAQCmfjA9BglghkgBZQMEAgIEMIvqK/G+hBPSJwoJrV0ePA7QRfmfkMUIyR+f\n8FdOcM1kCjItNUjyKQbnpiCqdSKEfDA9BglghkgBZQMEAgIEMAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIcFAJAAAAGIAcCJ\nAQAwCgYIKoZIzj0EAwMDaQAwZgIxALnF5aBVFkx93OynSs2tRDa1rzPqSlcq/DTi\nry+buM4hGG2a/lWnp07jBeaxQ94H6QIxAL87/oc7z1u5W1dYeZBm3Xb21kvRwiQy\nWbDoC/dJGGfyPPMNDt/lkLko9q0qg7KqCw==\n-----END CERTIFICATE-----\n"#;
-
     #[test]
-    fn test_evidence_certificate_serialization_with_firmware_version() {
-        let ec = EvidenceCertificate {
-            evidence: "test_evidence".to_string(),
-            certificate: "test_certificate".to_string(),
-            firmware_version: "96.00.81.00.0F".to_string(),
+    fn certificate_encoding_preserves_the_complete_chain() {
+        value_scenarios!(run = |pem: &str| {
+            String::from_utf8(STANDARD.decode(certificate_to_base64(pem)).unwrap()).unwrap()
         };
-
-        let json = serde_json::to_string(&ec).unwrap();
-        assert!(json.contains("\"firmware_version\":\"96.00.81.00.0F\""));
-        assert!(json.contains("\"evidence\":\"test_evidence\""));
-        assert!(json.contains("\"certificate\":\"test_certificate\""));
-    }
-
-    #[test]
-    fn test_evidence_certificate_with_empty_firmware_version() {
-        let ec = EvidenceCertificate {
-            evidence: "test_evidence".to_string(),
-            certificate: "test_certificate".to_string(),
-            firmware_version: "".to_string(),
-        };
-
-        let json = serde_json::to_string(&ec).unwrap();
-        assert!(json.contains("\"firmware_version\":\"\""));
-    }
-
-    #[test]
-    fn test_device_attestation_info_serialization() {
-        let info = DeviceAttestationInfo {
-            ec: vec![EvidenceCertificate {
-                evidence: "EeABGpR4QbD50HlMYaZVZl4sXy1iV0lG/omaPmg33F7DO4D3ABFgAAABDwAAGgELAIIIAKaAbRwVx5iJy8lS5J1Mcz2fbxX6vEMqjX/0F8oIVGbBYeC28oXwNbMAAERkQYLFGv/im6lEaYePMFKj4vFAz3AMiOwp9urtaLOTHrjNy/HtkHKCMV3SanUBdSPPVPWBjfoxpSpQ8ivO+2Fu0B3Showk+mLfCAqEzVX3SMY9cbF3jZXNcWuLuBBdwA==".to_string(),
-                certificate: certificate_to_base64(SAMPLE_PEM_CERT),
-                firmware_version: "BF-23.10-4".to_string(),
-            }],
-            architecture: MachineArchitecture::Blackwell,
-            nonce: "test-nonce-123".to_string(),
-        };
-
-        let json = serde_json::to_string(&info).unwrap();
-
-        // Check renamed fields
-        assert!(json.contains("\"EeABGpR4QbD50HlMYaZVZl4sXy1iV0lG/omaPmg33F7DO4D3ABFgAAABDwAAGgELAIIIAKaAbRwVx5iJy8lS5J1Mcz2fbxX6vEMqjX/0F8oIVGbBYeC28oXwNbMAAERkQYLFGv/im6lEaYePMFKj4vFAz3AMiOwp9urtaLOTHrjNy/HtkHKCMV3SanUBdSPPVPWBjfoxpSpQ8ivO+2Fu0B3Showk+mLfCAqEzVX3SMY9cbF3jZXNcWuLuBBdwA==\""));
-        assert!(json.contains("\"arch\":\"BLACKWELL\""));
-        assert!(json.contains("\"nonce\":\"test-nonce-123\""));
-        assert!(json.contains("\"firmware_version\":\"BF-23.10-4\""));
-        // Certificate is Base64(PEM); decoded starts with PEM header
-        assert!(json.contains("\"certificate\":\""));
-    }
-
-    #[test]
-    fn test_device_attestation_info_into_string() {
-        let info = DeviceAttestationInfo {
-            ec: vec![EvidenceCertificate {
-                evidence: "ev".to_string(),
-                certificate: "cert".to_string(),
-                firmware_version: "v1".to_string(),
-            }],
-            architecture: MachineArchitecture::Blackwell,
-            nonce: "nonce".to_string(),
-        };
-
-        let json_string: String = info.into();
-        assert!(json_string.contains("evidence_list"));
-        assert!(json_string.contains("firmware_version"));
-    }
-
-    #[test]
-    fn test_device_attestation_info_multiple_evidence_certificates() {
-        let info = DeviceAttestationInfo {
-            ec: vec![
-                EvidenceCertificate {
-                    evidence: "ev1".to_string(),
-                    certificate: "cert1".to_string(),
-                    firmware_version: "1.0.0".to_string(),
-                },
-                EvidenceCertificate {
-                    evidence: "ev2".to_string(),
-                    certificate: "cert2".to_string(),
-                    firmware_version: "2.0.0".to_string(),
-                },
-            ],
-            architecture: MachineArchitecture::Blackwell,
-            nonce: "multi-nonce".to_string(),
-        };
-
-        let json = serde_json::to_string(&info).unwrap();
-        assert!(json.contains("1.0.0"));
-        assert!(json.contains("2.0.0"));
-
-        // Verify it's a valid JSON array
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let evidence_list = parsed.get("evidence_list").unwrap().as_array().unwrap();
-        assert_eq!(evidence_list.len(), 2);
-    }
-
-    #[test]
-    fn test_device_attestation_info_default() {
-        let info = DeviceAttestationInfo::default();
-        assert!(info.ec.is_empty());
-        assert_eq!(info.nonce, "");
-
-        let json = serde_json::to_string(&info).unwrap();
-        assert!(json.contains("\"evidence_list\":[]"));
+            "PEM separators" {
+                "leaf\\nissuer\\n" => "leaf\nissuer\n".to_string(),
+                "leaf\nissuer\n" => "leaf\nissuer\n".to_string(),
+            }
+        );
     }
 }

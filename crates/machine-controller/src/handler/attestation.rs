@@ -455,6 +455,8 @@ fn from_component_integrity(
 /// Continue past SPDM when selected attesters have passed or been cancelled, or
 /// attestation is disabled or selects no work. The destination follows
 /// [`FailureDetails::source`] without scheduling another attestation.
+/// While waiting, fill an empty machine failure record from the lifecycle failure.
+/// Accepted recovery clears the stored SPDM failure and preserves other failures.
 pub(crate) async fn handle_spdm_attestation_failed_recovery(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     host_machine_id: &MachineId,
@@ -487,6 +489,19 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
         &selected_device_ids,
     )
     .await?;
+
+    // Recovery and backfilling must use the current lifecycle and failure record.
+    // Lock history first to match lifecycle persistence; Scout may have reported
+    // a different failure while attester selection contacted the BMC.
+    db::machine::lock_machine_state_history(&mut txn, host_machine_id).await?;
+    db::machine::lock_by_id_for_update(&mut txn, host_machine_id).await?;
+    let machine = db::machine::find_one(&mut txn, host_machine_id, Default::default())
+        .await?
+        .filter(|machine| machine.state.version == mh_snapshot.host_snapshot.state.version)
+        .ok_or(StateHandlerError::IterationInvalidated {
+            source_ref: std::panic::Location::caller(),
+        })?;
+
     // Cancellation waives attestation; a pass satisfies it. Neither needs a new job.
     // Disabled attestation and an empty selection follow scheduling's skip path.
     let should_advance = selected_device_ids.is_empty()
@@ -500,7 +515,11 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             SpdmAttestationStatus::Passed | SpdmAttestationStatus::Waived
         );
     if !should_advance {
-        return Ok(StateHandlerOutcome::do_nothing());
+        // Keep already-failed hosts visible through the same machine API field.
+        if machine.status.failure_details.cause == FailureCause::NoError {
+            db::machine::update_failure_details(&machine, &mut txn, details.clone()).await?;
+        }
+        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
     }
 
     // Use the same destinations as successful polling in the original lifecycle stage.
@@ -516,6 +535,14 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
         }
         _ => return Ok(StateHandlerOutcome::do_nothing()),
     };
+    // Otherwise the generic failure check would park the recovered host again.
+    // Preserve any different failure reported since this SPDM failure was recorded.
+    if matches!(
+        machine.status.failure_details.cause,
+        FailureCause::SpdmAttestationFailed { .. }
+    ) {
+        db::machine::clear_failure_details(host_machine_id, &mut txn).await?;
+    }
     Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
@@ -640,22 +667,33 @@ pub(crate) async fn handle_spdm_poll_state(
                 &job_device_ids,
             )
             .await?;
-            // here, move to failed state with full details
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
-                details: FailureDetails {
-                    cause: FailureCause::SpdmAttestationFailed {
-                        err: attestation_states
-                            .iter()
-                            .filter_map(SpdmDeviceAttestationDetails::get_failure_cause)
-                            .fold(String::new(), |mut accum, cause| {
-                                accum.push_str(&cause);
-                                accum.push_str(". ");
-                                accum
-                            }),
-                    },
-                    failed_at: Utc::now(),
-                    source: failure_source,
+            let details = FailureDetails {
+                cause: FailureCause::SpdmAttestationFailed {
+                    err: attestation_states
+                        .iter()
+                        .filter_map(SpdmDeviceAttestationDetails::get_failure_cause)
+                        .fold(String::new(), |mut accum, cause| {
+                            accum.push_str(&cause);
+                            accum.push_str(". ");
+                            accum
+                        }),
                 },
+                failed_at: Utc::now(),
+                source: failure_source,
+            };
+            // A Scout report during BMC selection does not change the lifecycle version.
+            // Preserve that failure for the next snapshot, keeping the history-first lock order.
+            db::machine::lock_machine_state_history(&mut txn, host_machine_id).await?;
+            db::machine::lock_by_id_for_update(&mut txn, host_machine_id).await?;
+            let machine = db::machine::find_one(&mut txn, host_machine_id, Default::default())
+                .await?
+                .filter(|machine| machine.status.failure_details.cause == FailureCause::NoError)
+                .ok_or(StateHandlerError::IterationInvalidated {
+                    source_ref: std::panic::Location::caller(),
+                })?;
+            db::machine::update_failure_details(&machine, &mut txn, details.clone()).await?;
+            Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
+                details,
                 retry_count: 0,
                 machine_id: *host_machine_id,
             })

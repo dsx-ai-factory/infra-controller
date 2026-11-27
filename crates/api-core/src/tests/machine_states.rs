@@ -16,8 +16,7 @@
  */
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use ::rpc::measured_boot::FromGrpc;
 use base64::prelude::*;
@@ -2595,9 +2594,9 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
     let mut overrides = TestEnvOverrides::with_config(config);
 
     // set NRAS verifier to fail
-    let nras_should_fail_parsing_flag = Arc::new(AtomicBool::new(true));
+    let nras_appraisal_status = Arc::new(Mutex::new(nras::EarStatus::Contraindicated));
 
-    overrides.nras_should_fail_parsing = Some(nras_should_fail_parsing_flag.clone());
+    overrides.nras_appraisal_status = Some(nras_appraisal_status.clone());
 
     let env = create_test_env_with_overrides(pool, overrides).await;
 
@@ -2736,7 +2735,7 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
 
     spdm_attestation_run_to_failed_then_to_success(
         env,
-        nras_should_fail_parsing_flag,
+        nras_appraisal_status,
         &mh,
         &mut txn,
         |job_id| ManagedHostState::HostInit {

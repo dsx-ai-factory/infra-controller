@@ -1036,8 +1036,8 @@ decisions:
   title: SPDM and NRAS
   section: Firmware and hardware policy
   stated: false
-  source: 'NICo TOML file: `[spdm]` `enabled`, `[spdm.nras_config]` `nras_url`, `nras_gpu_url_suffix`,
-    `nras_jwks_url`, `validate_jwt_expiry` (`crates/api-core/src/cfg/README.md`; `docs/design/attestation/attestation-profiles.md`);
+  source: 'NICo TOML file: `[spdm]` `enabled`, `[spdm.nras_config]` `nras_url`, `nras_jwks_url`,
+    `validate_jwt_expiry` (`crates/api-core/src/cfg/README.md`; `docs/design/attestation/attestation-profiles.md`);
     `nico-admin-cli attestation spdm {list,get,trigger,cancel,coverage,profile}`'
   options:
   - name: 'Off'
@@ -1046,7 +1046,7 @@ decisions:
     text: 'On: `[spdm] enabled = true` with `[spdm.nras_config]`, GPU, ERoT and CPU evidence verified
       by NVIDIA''s Remote Attestation Service'
   default: 'Off'
-  check: 'On: `nico-pre-config`: the four `nras_config` fields set, staging host not air-gapped (conflict
+  check: 'On: `nico-pre-config`: the three `nras_config` fields set, staging host not air-gapped (conflict
     otherwise); `nico-pre-stage`: `nras_url` and `nras_jwks_url` answer over HTTPS from the staging host
     and, in `nico-pre-platform`, from the cluster through the site''s egress; `nico-pre-ingest`: at least
     one SPDM profile exists and the first BMC of each model exposes `ComponentIntegrity`. Off: no check'

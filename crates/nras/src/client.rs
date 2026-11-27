@@ -15,41 +15,38 @@
  * limitations under the License.
  */
 
-use std::collections as stdcol;
-
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use carbide_instrument::red;
 use serde_json as sj;
 
-use crate::{DeviceAttestationInfo, NrasError, RawAttestationOutcome};
+use crate::{DeviceAttestationInfo, NrasError, VerifierResponseJwt};
 
-// trait to invoke REST methods on the NRAS service
+/// Submits device evidence to a remote verifier.
 #[async_trait]
 pub trait VerifierClient: std::fmt::Debug + Send + Sync + 'static {
-    async fn attest_gpu(
+    /// Verifies one or more labelled SPDM evidence items and returns an unvalidated EAR JWT.
+    /// Labels must be unique and must not use reserved collection names. Malformed encodings,
+    /// an empty collection and nonces outside 32–96 decoded bytes are rejected before HTTP.
+    /// HTTP failures are errors; a negative appraisal is carried by the successful EAR result.
+    async fn attest(
         &self,
-        device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError>;
-    async fn attest_dpu(
-        &self,
-        device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError>;
-    async fn attest_cx7(
-        &self,
-        device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError>;
+        device_info: Vec<DeviceAttestationInfo>,
+    ) -> Result<VerifierResponseJwt, NrasError>;
 }
 
+/// NRAS client using CMW JSON requests and compact EAR JWT responses.
+/// Rejects responses without three non-empty, unpadded Base64url segments.
+/// Signature and claim validation remain the caller's responsibility.
 #[derive(Debug)]
 pub struct NrasVerifierClient {
     instrumentation: carbide_instrument::Instrumentation,
     config: crate::Config,
-    // A `reqwest-tracing` middleware client: it injects the current span's W3C trace context into
-    // every outgoing request (issue #2438), so there is no per-call header injection here.
+    // Middleware propagates the current span's W3C trace context to NRAS.
     http_client: reqwest_middleware::ClientWithMiddleware,
 }
 
-// TODO: add config which would allow configuring the URL paths for gpu, dpu, cx7
 impl NrasVerifierClient {
     /// Creates a verifier whose RED metrics use the supplied destination.
     pub fn new_with_config(
@@ -66,199 +63,119 @@ impl NrasVerifierClient {
     }
 }
 
-// implementation of the trait for the NRAS service
 #[async_trait]
 impl VerifierClient for NrasVerifierClient {
-    async fn attest_gpu(
+    async fn attest(
         &self,
-        device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        // prepare the request
+        attestation_values: Vec<DeviceAttestationInfo>,
+    ) -> Result<VerifierResponseJwt, NrasError> {
+        if attestation_values.is_empty() {
+            return Err(NrasError::Serde(
+                "At least one evidence item is required".to_string(),
+            ));
+        }
+
+        let mut cmw_msg = sj::json!({
+            "__cmwc_t": "tag:nvidia.com,2026:verifier-input/profiles/base/pre-1.0.0",
+        });
+
+        // every attester in the message has a unique entry that must be populated in turn
+        for attestation_value in attestation_values {
+            let label = &attestation_value.device_id;
+            // Evidence labels must leave collection metadata available to the verifier.
+            if matches!(label.as_str(), "__cmwc_t" | "nonce" | "appraisal-settings") {
+                return Err(NrasError::Bmc(format!(
+                    "device id {label} is reserved for collection metadata"
+                )));
+            }
+            if cmw_msg.get(label).is_some() {
+                return Err(NrasError::Bmc(format!(
+                    "device id {label} cannot be repeated"
+                )));
+            }
+
+            // re-encode (decode and later encode again) values to match the NRAS format
+            let evidence_bytes = STANDARD
+                .decode(&attestation_value.evidence)
+                .map_err(|error| NrasError::Bmc(format!("Invalid Base64 evidence: {error}")))?;
+            let certificate_bytes = STANDARD
+                .decode(&attestation_value.certificate)
+                .map_err(|error| NrasError::Bmc(format!("Invalid Base64 certificate: {error}")))?;
+
+            // Validate the nonce before converting it to the format NRAS expects.
+            let nonce = &attestation_value.nonce;
+            if !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) || nonce.len() % 2 != 0 {
+                return Err(NrasError::Serde(
+                    "Invalid hex nonce: expected pairs of ASCII hex characters".to_string(),
+                ));
+            }
+            // The schema permits at least 32 bytes and at most 128 Base64url characters (96 bytes).
+            if nonce.len() < 64 || nonce.len() > 192 {
+                return Err(NrasError::Serde(
+                    "nonce must contain 64–192 hex characters (32–96 bytes)".to_string(),
+                ));
+            }
+            // NRAS checks evidence freshness using the original nonce bytes. Decode the
+            // hex string before encoding those bytes as Base64url for the request.
+            let nonce_bytes = (0..nonce.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&nonce[index..index + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| NrasError::Serde(format!("Invalid hex nonce: {error}")))?;
+
+            // Each CMW record carries the original bytes as Base64url without padding.
+            cmw_msg[label] = sj::json!({
+                "__cmwc_t": "tag:nvidia.com,2026:evidence-item/v1",
+                "evidence": [
+                    "application/vnd.nvidia.spdm-measurement-transcript",
+                    URL_SAFE_NO_PAD.encode(&evidence_bytes)
+                ],
+                "certificate": [
+                    "application/vnd.nvidia.pem-cert-chain",
+                    URL_SAFE_NO_PAD.encode(&certificate_bytes)
+                ],
+                "nonce": ["application/octet-stream", URL_SAFE_NO_PAD.encode(&nonce_bytes)]
+            });
+        }
+
         let request = self
             .http_client
             .post(format!(
-                "{}{}",
-                self.config.nras_url, self.config.nras_gpu_url_suffix
+                "{}/v1/verify",
+                self.config.nras_url.trim_end_matches('/')
             ))
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(device_attestation_info).map_err(|e| {
-                NrasError::Serde(format!("Error Serializing Attestation Request: {}", e))
-            })?);
+            .header("Content-Type", "application/cmw+json")
+            .header("Accept", "application/eat+jwt")
+            .body(cmw_msg.to_string());
 
-        // Submit to NRAS (the http client propagates W3C trace context via middleware).
-        // The send AND the HTTP status check run inside the RED wrapper, so a non-success
-        // status is recorded as outcome="error" (and logged WARN), not a silent "ok":
-        // carbide_external_call_duration_milliseconds{backend="nras", operation="attest_gpu",
-        // outcome}. Only the static backend/operation tags are recorded -- never the request
-        // or response body (evidence, certificate, nonce).
-        let response_text = red::instrumented(&self.instrumentation, "nras", "attest_gpu", async {
+        // Record request failures inside the RED wrapper. Evidence, nonces, certificates
+        // and response bodies must never be included in these errors or their logs.
+        let response_text = red::instrumented(&self.instrumentation, "nras", "attest", async {
             let att_response = request.send().await?;
             let status_code = att_response.status();
             if status_code != reqwest::StatusCode::OK {
-                // Status only: the response body and the config can carry sensitive
-                // attestation material, so neither is placed in the error or its log.
                 return Err(NrasError::Communication(format!(
                     "NRAS returned status code {}",
                     status_code
                 )));
             }
-            // Read the body only after confirming success (the happy path needs it).
-            Ok(att_response.text().await?)
+            let response_text = att_response.text().await?;
+
+            // Check the compact encoding before reporting success, without exposing the body.
+            let mut segments = response_text.split('.');
+            if segments.clone().count() != 3
+                || segments
+                    .any(|segment| segment.is_empty() || URL_SAFE_NO_PAD.decode(segment).is_err())
+            {
+                return Err(NrasError::Jwt(
+                    "expected a compact JWT with three non-empty Base64url segments".to_string(),
+                ));
+            }
+            Ok(response_text)
         })
         .await?;
 
-        // read the response and map to the RawAttestationOutcome
-        let verifier_response: RawAttestationOutcome =
-            serde_json::from_str::<serde_json::Value>(&response_text)
-                .map_err(|e| {
-                    NrasError::Serde(format!(
-                        "Error mapping Verifier Response to serde Value: {}",
-                        e
-                    ))
-                })?
-                .try_into()?;
-
-        Ok(verifier_response)
-    }
-
-    async fn attest_dpu(
-        &self,
-        _device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        Err(NrasError::NotImplemented)
-    }
-    async fn attest_cx7(
-        &self,
-        _device_attestation_info: &DeviceAttestationInfo,
-    ) -> Result<RawAttestationOutcome, NrasError> {
-        Err(NrasError::NotImplemented)
-    }
-}
-
-/*
-* The incoming value has the following format:
-[
-  ["JWT", "jwt_token"],       // Element 0: Platform-level statements which is JWT in this case
-  {"GPU-0" : "jwt_token"},    // Element 1: Per-GPU statements // GPU-0
-  {"GPU-1" : "jwt_token"}     // Element 2: Per-GPU statements // GPU-1
-  etc
-]
-* Any validation mismatch is treated as an error, and the deserialization is aborted altogether.
-*/
-impl TryFrom<serde_json::Value> for RawAttestationOutcome {
-    type Error = NrasError;
-
-    fn try_from(value: serde_json::Value) -> Result<RawAttestationOutcome, NrasError> {
-        // parse the value
-        let mut overall_outcome = (String::new(), String::new());
-        let mut devices_outcome = stdcol::HashMap::<String, String>::new();
-        match value {
-            serde_json::Value::Array(elems) => {
-                // iterate over elements and populate the hash map
-                for elem in elems {
-                    match elem {
-                        serde_json::Value::Object(map) => {
-                            let (key, value) = extract_map_obj(&map)?;
-                            devices_outcome.insert(key, value);
-                        }
-                        serde_json::Value::Array(arr_values) => {
-                            let (key, value) = extract_array_obj(&arr_values)?;
-                            overall_outcome = (key, value);
-                        }
-                        _ => {
-                            return Err(NrasError::ParsingVerifierResponse(
-                                "Verifier Response contains not an object not an array".to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
-            _ => {
-                return Err(NrasError::ParsingVerifierResponse(
-                    "The incoming JSON object is not an array".to_string(),
-                ));
-            }
-        }
-
-        Ok(RawAttestationOutcome {
-            overall_outcome,
-            devices_outcome,
-        })
-    }
-}
-
-fn is_valid_jwt(jwt: &str) -> bool {
-    jsonwebtoken::dangerous::insecure_decode::<sj::Value>(jwt).is_ok()
-}
-
-fn extract_map_obj(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(String, String), NrasError> {
-    // do some validation beforehand
-    if map.is_empty() {
-        return Err(NrasError::ParsingVerifierResponse(
-            "JSON Object for element is empty".to_string(),
-        ));
-    }
-    if map.len() > 1 {
-        return Err(NrasError::ParsingVerifierResponse(
-            "JSON Object for element has more than one entry".to_string(),
-        ));
-    }
-    // this should never happen because of the above checks, but still ...
-    let Some(entry) = map.iter().next() else {
-        return Err(NrasError::ParsingVerifierResponse(
-            "Internal Error: Empty JSON Object".to_string(),
-        ));
-    };
-
-    let key = entry.0;
-    let value = match entry.1 {
-        serde_json::Value::String(s) => s,
-        _ => {
-            return Err(NrasError::ParsingVerifierResponse(
-                "JSON Object for element is empty".to_string(),
-            ));
-        }
-    };
-
-    Ok((key.clone(), value.clone()))
-}
-
-fn extract_array_obj(arr_values: &Vec<serde_json::Value>) -> Result<(String, String), NrasError> {
-    // find an element named "JWT", and a JWT element
-    let mut jwt_found = false;
-    let mut jwt_value = String::new();
-
-    for arr_value in arr_values {
-        match arr_value {
-            serde_json::Value::String(s) => {
-                if s == "JWT" {
-                    jwt_found = true;
-                } else {
-                    // try and partially parse the jwt token
-                    if is_valid_jwt(s) {
-                        jwt_value = s.clone();
-                    } else {
-                        return Err(NrasError::ParsingVerifierResponse(
-                            "Not a JWT token in an array".to_string(),
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Err(NrasError::ParsingVerifierResponse(
-                    "JSON Array contains non string value".to_string(),
-                ));
-            }
-        }
-    }
-
-    if jwt_found && !jwt_value.is_empty() {
-        Ok(("JWT".to_string(), jwt_value))
-    } else {
-        Err(NrasError::ParsingVerifierResponse(
-            "JSON Array does not contain JWT element".to_string(),
-        ))
+        // The caller still needs to validate the signature, claims and appraisal verdict.
+        Ok(response_text.into())
     }
 }

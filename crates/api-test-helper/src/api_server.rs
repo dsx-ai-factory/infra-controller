@@ -350,7 +350,6 @@ async fn start_with_config_inner(
         # nonfunctional: these loopback endpoints cannot complete verification.
         [spdm.nras_config]
         nras_url = "http://127.0.0.1:9"
-        nras_gpu_url_suffix = "/gpu"
         nras_jwks_url = "http://127.0.0.1:9/jwks"
         validate_jwt_expiry = true
 

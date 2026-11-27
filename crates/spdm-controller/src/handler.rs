@@ -29,7 +29,7 @@ use model::attestation::spdm::{
     SpdmHandlerError, SpdmMachineDeviceMetadata, SpdmObjectId, Verifier,
 };
 use model::bmc_info::BmcInfo;
-use nras::{DeviceAttestationInfo, EvidenceCertificate, RawAttestationOutcome, VerifierClient};
+use nras::{DeviceAttestationInfo, EarStatus, VerifierClient, VerifierResponseJwt};
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -674,15 +674,31 @@ impl StateHandler for SpdmAttestationStateHandler {
                     .await
                     .map_err(SpdmHandlerError::from)?;
 
-                if processed_response.attestation_passed {
+                // The service preserves each submitted label. Require this device's
+                // appraisal as well as an affirming overall verdict before proceeding.
+                let device_result = processed_response.submods.get(device_id).ok_or_else(|| {
+                    SpdmHandlerError::NrasError(nras::NrasError::Jwt(
+                        "NRAS response is missing the requested device".to_string(),
+                    ))
+                })?;
+                if processed_response.ear_status == EarStatus::Affirming
+                    && device_result.ear_status == EarStatus::Affirming
+                {
                     Ok(StateHandlerOutcome::transition(
                         SpdmAttestationState::ApplyAppraisalPolicy,
                     ))
                 } else {
+                    // Keep the appraisal explanation and result ID available for investigation.
+                    let details = match &device_result.ear_nvidia_error_details {
+                        Some(details) => details.to_string(),
+                        None => "no appraisal details were provided".to_string(),
+                    };
                     Ok(StateHandlerOutcome::transition(
                         SpdmAttestationState::Failed(format!(
-                            "Failed NRAS: {:#?}",
-                            processed_response.devices
+                            "NRAS verification failed for {device_id}: overall={:?}, device={:?}; details={details}; result={}",
+                            processed_response.ear_status,
+                            device_result.ear_status,
+                            processed_response.jti,
                         )),
                     ))
                 }
@@ -893,7 +909,7 @@ async fn perform_attestation(
     client: &dyn VerifierClient,
     device: &SpdmDeviceAttestation,
     instrumentation: &carbide_instrument::Instrumentation,
-) -> Result<RawAttestationOutcome, SpdmHandlerError> {
+) -> Result<VerifierResponseJwt, SpdmHandlerError> {
     let Some(ca_certificate) = &device.ca_certificate else {
         return Err(SpdmHandlerError::MissingData {
             field: "ca certificate".to_string(),
@@ -910,23 +926,10 @@ async fn perform_attestation(
         });
     };
 
-    let firmware_version = device
-        .metadata
-        .as_ref()
-        .and_then(|m| m.firmware_version.clone())
-        .ok_or_else(|| SpdmHandlerError::MissingData {
-            field: "firmware_version".to_string(),
-            machine_id: device.machine_id,
-            device_id: device.device_id.clone(),
-        })?;
-
     let device_attestation_info = DeviceAttestationInfo {
-        ec: vec![EvidenceCertificate {
-            evidence: evidence.signed_measurements.clone(),
-            certificate: nras::certificate_to_base64(&ca_certificate.certificate_string),
-            firmware_version,
-        }],
-        architecture: nras::MachineArchitecture::Blackwell,
+        device_id: device.device_id.clone(),
+        evidence: evidence.signed_measurements.clone(),
+        certificate: nras::certificate_to_base64(&ca_certificate.certificate_string),
         nonce: device.nonce_hex(),
     };
 
@@ -934,17 +937,20 @@ async fn perform_attestation(
     let (attested_device_type, response) = match device_type {
         DeviceType::Gpu => (
             AttestedDeviceType::Gpu,
-            client.attest_gpu(&device_attestation_info).await,
+            client
+                .attest(vec![device_attestation_info])
+                .await
+                .map_err(SpdmHandlerError::NrasError),
         ),
-        // `attest_cx7` is not implemented yet, so every Cx7 call records
-        // `outcome = error` -- deliberately, so the audit trail surfaces that we
-        // were asked to attest a Cx7 device and couldn't. TODO: once Cx7
-        // attestation lands, this becomes a real outcome; if the not-implemented
-        // errors prove noisy before then, skip the emit for Cx7 as we do for
-        // `Unknown`.
+        // A shared HTTP method does not add Cx7 support. Preserve the explicit
+        // unsupported result and its audit event without submitting evidence.
         DeviceType::Cx7 => (
             AttestedDeviceType::Cx7,
-            client.attest_cx7(&device_attestation_info).await,
+            Err(SpdmHandlerError::VerifierNotImplemented {
+                module: "verifier".to_string(),
+                machine_id: device.machine_id,
+                device_id: device.device_id.clone(),
+            }),
         ),
         DeviceType::Unknown => {
             return Err(SpdmHandlerError::VerifierNotImplemented {
@@ -976,15 +982,7 @@ async fn perform_attestation(
         },
     });
 
-    match response {
-        Ok(res) => Ok(res),
-        Err(nras::NrasError::NotImplemented) => Err(SpdmHandlerError::VerifierNotImplemented {
-            module: "verifier".to_string(),
-            machine_id: device.machine_id,
-            device_id: device.device_id.clone(),
-        }),
-        Err(err) => Err(SpdmHandlerError::NrasError(err)),
-    }
+    response
 }
 
 #[cfg(test)]

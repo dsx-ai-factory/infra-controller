@@ -10,8 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use carbide_uuid::machine::MachineId;
 use model::attestation::spdm::SpdmAttestationStatus;
@@ -29,7 +28,7 @@ use crate::tests::common::api_fixtures::{TestEnv, TestManagedHost};
 #[cfg(test)]
 pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
     env: &TestEnv,
-    nras_should_fail_parsing_flag: Arc<AtomicBool>,
+    nras_appraisal_status: Arc<Mutex<nras::EarStatus>>,
     mh: &TestManagedHost,
     txn: &mut db::Transaction<'_>,
     poll_state: impl Fn(uuid::Uuid) -> ManagedHostState,
@@ -81,8 +80,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         attestation_status
     );
 
-    // since we set the NRAS verifier mock flag to fail,
-    // we expect it to fail now
+    // A contraindicated appraisal must also fail the managed-host workflow.
     for _ in 0..5 {
         env.run_machine_state_controller_iteration().await;
     }
@@ -103,8 +101,8 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         host.current_state()
     );
 
-    // "fix" the NRAS verifier mock to succeed
-    nras_should_fail_parsing_flag.store(false, Ordering::Relaxed);
+    // A new operator job can recover the host after an affirming appraisal.
+    *nras_appraisal_status.lock().unwrap() = nras::EarStatus::Affirming;
 
     // manually trigger attestation via admin-cli
     let res = env

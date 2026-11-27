@@ -40,9 +40,11 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 clap = { features = ["derive", "env"], workspace = true }
 fmt = { workspace = true }
 mockito = { workspace = true }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true
