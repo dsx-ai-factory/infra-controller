@@ -37,6 +37,8 @@ pub trait VerifierClient: std::fmt::Debug + Send + Sync + 'static {
 }
 
 /// NRAS client using CMW JSON requests and compact EAR JWT responses.
+/// Rejects responses without three non-empty, unpadded Base64url segments.
+/// Signature and claim validation remain the caller's responsibility.
 #[derive(Debug)]
 pub struct NrasVerifierClient {
     instrumentation: carbide_instrument::Instrumentation,
@@ -146,7 +148,7 @@ impl VerifierClient for NrasVerifierClient {
             .header("Accept", "application/eat+jwt")
             .body(cmw_msg.to_string());
 
-        // Record transport failures inside the RED wrapper. Evidence, nonces, certificates
+        // Record request failures inside the RED wrapper. Evidence, nonces, certificates
         // and response bodies must never be included in these errors or their logs.
         let response_text = red::instrumented(&self.instrumentation, "nras", "attest", async {
             let att_response = request.send().await?;
@@ -157,11 +159,23 @@ impl VerifierClient for NrasVerifierClient {
                     status_code
                 )));
             }
-            Ok(att_response.text().await?)
+            let response_text = att_response.text().await?;
+
+            // Check the compact encoding before reporting success, without exposing the body.
+            let mut segments = response_text.split('.');
+            if segments.clone().count() != 3
+                || segments
+                    .any(|segment| segment.is_empty() || URL_SAFE_NO_PAD.decode(segment).is_err())
+            {
+                return Err(NrasError::Jwt(
+                    "expected a compact JWT with three non-empty Base64url segments".to_string(),
+                ));
+            }
+            Ok(response_text)
         })
         .await?;
 
-        // HTTP 200 confirms a signed result was produced; its verdict is checked by the caller.
+        // The caller still needs to validate the signature, claims and appraisal verdict.
         Ok(response_text.into())
     }
 }

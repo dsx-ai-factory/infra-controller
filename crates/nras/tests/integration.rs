@@ -150,29 +150,83 @@ async fn nras_comm_failure_returns_comm_err() {
 }
 
 #[tokio::test]
-async fn nras_non_200_responses_return_status_without_the_body() {
-    let mut server = mockito::Server::new_async().await;
-    for status in [400, 503] {
-        // Error messages from NRAS are untrusted and may contain attestation material.
-        let response = server.mock("POST", "/v1/verify")
-            .with_status(status)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"errorCode":4,"message":"sensitive-evidence","timestamp":"2026-07-29T04:43:14Z"}"#)
-            .create_async().await;
-        let client = nras::NrasVerifierClient::new_with_config(
-            &nras::Config {
-                nras_url: server.url(),
-                ..Default::default()
-            },
-            carbide_instrument::Instrumentation::noop(),
-        );
-        let error = client.attest(vec![device("gpu_0")]).await.unwrap_err();
-        assert!(matches!(error, NrasError::Communication(_)));
-        assert!(error.to_string().contains(&status.to_string()));
-        assert!(!error.to_string().contains("sensitive-evidence"));
-        response.assert_async().await;
-        response.remove_async().await;
-    }
+async fn nras_responses_check_status_and_compact_jwt_structure_without_exposing_the_body() {
+    use carbide_test_support::Outcome::*;
+
+    // Error bodies can contain attestation material. Exact errors prove that none is exposed.
+    let sensitive_body = r#"{"errorCode":4,"message":"sensitive-evidence"}"#;
+    let malformed = || {
+        FailsWith(NrasError::Jwt(
+            "expected a compact JWT with three non-empty Base64url segments".to_string(),
+        ))
+    };
+    let cases = [
+        (
+            "client error",
+            400,
+            sensitive_body,
+            FailsWith(NrasError::Communication(
+                "NRAS returned status code 400 Bad Request".to_string(),
+            )),
+        ),
+        (
+            "service error",
+            503,
+            sensitive_body,
+            FailsWith(NrasError::Communication(
+                "NRAS returned status code 503 Service Unavailable".to_string(),
+            )),
+        ),
+        ("empty body", 200, "", malformed()),
+        ("JSON body", 200, sensitive_body, malformed()),
+        ("missing segment", 200, "e30.e30", malformed()),
+        ("extra segment", 200, "e30.e30.AA.AA", malformed()),
+        ("empty header", 200, ".e30.AA", malformed()),
+        ("empty payload", 200, "e30..AA", malformed()),
+        ("empty signature", 200, "e30.e30.", malformed()),
+        ("wrong alphabet", 200, "e30.e30.+w", malformed()),
+        ("padding", 200, "e30=.e30.AA", malformed()),
+        ("invalid encoded length", 200, "e30.A.AA", malformed()),
+        // The caller owns signature and claim validation, even for a correctly shaped token.
+        (
+            "structure only",
+            200,
+            "e30.e30.-_8",
+            Yields("e30.e30.-_8".to_string()),
+        ),
+    ];
+    check_cases_async(
+        cases
+            .into_iter()
+            .map(|(scenario, status, body, expect)| Case {
+                scenario,
+                input: (status, body),
+                expect,
+            }),
+        |(status, body)| async move {
+            let mut server = mockito::Server::new_async().await;
+            let response = server
+                .mock("POST", "/v1/verify")
+                .with_status(status)
+                .with_body(body)
+                .create_async()
+                .await;
+            let client = nras::NrasVerifierClient::new_with_config(
+                &nras::Config {
+                    nras_url: server.url(),
+                    ..Default::default()
+                },
+                carbide_instrument::Instrumentation::noop(),
+            );
+            let result = client
+                .attest(vec![device("gpu_0")])
+                .await
+                .map(|response| response.as_ref().to_string());
+            response.assert_async().await;
+            result
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
