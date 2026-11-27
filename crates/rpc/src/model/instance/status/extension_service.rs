@@ -235,6 +235,7 @@ impl TryFrom<&rpc::DpuNetworkStatus> for InstanceExtensionServiceStatusObservati
         };
 
         Ok(Self {
+            service_vpc_endpoints: Vec::new(),
             config_version,
             instance_config_version,
             extension_service_statuses: observation

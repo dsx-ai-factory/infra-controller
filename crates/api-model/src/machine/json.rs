@@ -94,6 +94,9 @@ pub struct MachineSnapshotPgJson {
     pub reprovisioning_requested: Option<ReprovisionRequest>,
     pub host_reprovisioning_requested: Option<HostReprovisionRequest>,
     pub reset_requested: Option<ResetRequest>,
+    /// Preserves force-delete intent and its Admin acknowledgement choice when loading snapshots.
+    #[serde(default)]
+    pub force_delete_requires_admin_ack: Option<bool>,
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
     #[serde(default)]
     pub spx_multiplane: Option<MachineSpxMultiplane>,
@@ -408,6 +411,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             reprovision_requested: value.reprovisioning_requested,
             host_reprovision_requested: value.host_reprovisioning_requested,
             reset_requested: value.reset_requested,
+            force_delete_requires_admin_ack: value.force_delete_requires_admin_ack,
             dpu_agent_upgrade_requested: value.dpu_agent_upgrade_requested,
             controller_state_outcome: value.controller_state_outcome,
             bios_password_set_time: value.bios_password_set_time,

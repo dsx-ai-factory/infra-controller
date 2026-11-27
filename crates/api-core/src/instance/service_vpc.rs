@@ -24,7 +24,6 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use chrono::{DateTime, Utc};
 use db::ObjectColumnFilter;
 use model::ConfigValidationError;
 use model::extension_service::{
@@ -79,8 +78,8 @@ struct ServiceCandidateAllocation {
 
 /// Returns whether this binary supports the complete service-VPC lifecycle for an address family so
 /// operator configuration cannot expose a family missing a required reconciliation path.
-pub(crate) const fn family_implemented(_family: ServiceVpcAddressFamily) -> bool {
-    false
+pub(crate) const fn family_implemented(family: ServiceVpcAddressFamily) -> bool {
+    matches!(family, ServiceVpcAddressFamily::Ipv4)
 }
 
 /// Rejects a newly attached networked service unless its required family has complete lifecycle
@@ -104,32 +103,8 @@ pub(crate) fn validate_implementation_support(service: &ExtensionService) -> Car
     Ok(())
 }
 
-/// Marks every active attachment referenced by a service interface as removed in one timestamped
-/// update so whole-instance release preserves service-interface records until cleanup is observed.
-pub(crate) fn terminate_networked_attachments(
-    current: &InstanceExtensionServicesConfig,
-    network: &InstanceNetworkConfig,
-    removed_at: DateTime<Utc>,
-) -> Option<InstanceExtensionServicesConfig> {
-    let networked_ids = network
-        .service_interfaces
-        .iter()
-        .map(|interface| interface.attachment_id)
-        .collect::<HashSet<_>>();
-    let mut updated = current.clone();
-    let mut changed = false;
-    for attachment in &mut updated.service_configs {
-        if attachment.removed.is_none()
-            && attachment
-                .id
-                .is_some_and(|attachment_id| networked_ids.contains(&attachment_id))
-        {
-            attachment.removed = Some(removed_at);
-            changed = true;
-        }
-    }
-    changed.then_some(updated)
-}
+#[cfg(test)]
+use model::instance::config::extension_services::terminate_networked_attachments;
 
 /// Validates and allocates every new service interface inside the caller's Instance transaction so
 /// attachment, service-interface, prefix, and address records become visible in one commit.
@@ -392,13 +367,13 @@ pub(crate) async fn allocate_for_instance(
                 expected.network_config_version.to_string(),
             ));
         }
+        // Read the Machine in a separate statement after locking it so a completed lock wait
+        // cannot leave admission using the enriched query's earlier Machine snapshot.
+        db::machine::lock_by_id_for_update(txn.as_mut(), &locked.machine_id.into()).await?;
         let machine = db::machine::find_one(
             &mut *txn,
             &locked.machine_id,
-            MachineSearchConfig {
-                for_update: true,
-                ..Default::default()
-            },
+            MachineSearchConfig::default(),
         )
         .await?
         .ok_or_else(|| CarbideError::NotFoundError {
@@ -407,12 +382,15 @@ pub(crate) async fn allocate_for_instance(
         })?;
         // Recheck the Machine's `ManagedHostState` while holding its row lock because reset,
         // reprovisioning, and maintenance can invalidate the earlier Ready value.
-        if !matches!(
-            machine.current_state(),
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::Ready,
-            }
-        ) {
+        // Pending force deletion also excludes new work while the Machine remains Ready.
+        if machine.force_delete_requires_admin_ack.is_some()
+            || !matches!(
+                machine.current_state(),
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::Ready,
+                }
+            )
+        {
             return Err(CarbideError::FailedPrecondition(format!(
                 "machine {} is no longer eligible for service VPC activation",
                 locked.machine_id

@@ -107,8 +107,8 @@ async fn handle_deleting_instance(
         ));
     }
 
-    // Admin acknowledgement proves every DPU accepted networking without the Instance,
-    // while endpoint tombstones retain ownership until DPF cleanup completes.
+    // Admin acknowledgement proves every DPU accepted the host network configuration,
+    // while endpoint tombstones retain ownership until service-network and DPF cleanup completes.
     if !db::instance::find_service_vpc_memberships(&ctx.services.db_pool, instance.id)
         .await?
         .is_empty()

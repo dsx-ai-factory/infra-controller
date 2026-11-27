@@ -25,40 +25,47 @@ use rpc::forge::AdminForceDeleteMachineRequest;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Force delete a machine (by UUID, IPv4, MAC, or hostname):
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567
+Force delete a machine (by machine ID, IP address, MAC address, or hostname):
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 
 Force delete a machine and its interfaces (redeploy kea afterward):
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --delete-interfaces
 
 Force delete with a full rediscovery wipe (interfaces, BMC interfaces, \
 suppressions, and retained boot targets):
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions \
     --delete-retained-boot-interfaces
 
 Force delete a machine assigned to an Instance Type:
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --allow-delete-with-instance-type
 
 Force delete a machine with an attached Instance. This removes the attached \
 Instance control-plane record without first requesting a graceful workload \
 shutdown; force-delete cleanup may forcibly restart the host:
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --allow-delete-with-instance
 
+Force delete an allocated machine after every attached DPU acknowledges Admin networking:
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
+    --allow-delete-with-instance --wait-for-instance-dpu
+
+Force delete despite unconfirmed Service VPC cleanup, accepting orphaned DPF resources:
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
+    --allow-delete-with-instance --allow-delete-with-orphaned-dpf-crds
 
 Force delete and permanently release preserved address reservations \
 instead of parking them:
-    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli machine force-delete --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --delete-interfaces --release-preserved-addresses
 
 ")]
 pub(crate) struct Args {
     #[clap(
         long,
-        help = "UUID, IPv4, MAC or hostname of the host or DPU machine to delete"
+        help = "Machine ID, IP address, MAC address, or hostname of the host or DPU machine to delete"
     )]
     pub(super) machine: String,
 
@@ -116,16 +123,19 @@ pub(crate) struct Args {
         long,
         action,
         help = "Wait for all attached DPUs to acknowledge Admin networking for an allocated instance",
-        long_help = "Wait for all attached DPUs to acknowledge the Admin network configuration before deleting a host that has an instance when force deletion starts. Disabled by default; a fresh deletion without this flag does not wait for DPU acknowledgements. A fresh deletion without an instance does not wait.\n\n\
+        long_help = "Wait for all attached DPUs to acknowledge the Admin network configuration before deleting a host that has an instance when force deletion starts. Disabled by default. Service VPC endpoint cleanup still requires current DPU network and DPF evidence without this flag unless --allow-delete-with-orphaned-dpf-crds bypasses that cleanup. Without Service VPC endpoints or a recorded wait, a fresh deletion without this flag does not wait for DPU acknowledgements. A fresh deletion without an instance does not wait.\n\n\
             Once recorded, the wait survives retries; omitting this flag cannot cancel it. Only servers supporting this option enforce a recorded wait. An older server can complete deletion without acknowledgement, even if a newer server already recorded the wait.\n\n\
-            An unavailable DPU can prevent completion indefinitely. The CLI waits 5 seconds between polling calls, with a nominal 20-minute retry limit. It checks the limit after RPC calls, so slow calls can extend the total time. A timeout does not cancel deletion. This flag does not replace --allow-delete-with-instance."
+            An unavailable DPU can prevent completion indefinitely. The CLI waits 5 seconds between polling calls, with a nominal 20-minute retry limit. It checks the limit after RPC calls, so slow calls can extend the total time. A timeout does not cancel deletion. This flag still applies with --allow-delete-with-orphaned-dpf-crds and does not replace --allow-delete-with-instance."
     )]
     wait_for_instance_dpu: bool,
 
     #[clap(
         long,
         action,
-        help = "Delete machine even if DPF CRDs exist and DPF is disabled at the site level. This flag acknowledges that orphaned DPF resources may remain"
+        help = "Permit deletion without confirmed Service VPC cleanup or successful DPF resource removal",
+        long_help = "Allow force deletion to discard Core-owned Service VPC resources without confirmed endpoint cleanup and continue when DPF resources cannot be removed, including when a DPF-ingested host has no configured DPF SDK. Orphaned DPF resources can remain and require manual cleanup.\n\n\
+            Consent applies only to the request that supplies this flag. Repeat it on every polling retry until deletion completes. The CLI retains the flag while polling automatically. Omitting it after the machine enters ForceDeletion with retained Service VPC endpoints returns FailedPrecondition instead of resuming endpoint cleanup.\n\n\
+            This flag does not cancel a recorded --wait-for-instance-dpu requirement or replace --allow-delete-with-instance."
     )]
     allow_delete_with_orphaned_dpf_crds: bool,
 }

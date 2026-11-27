@@ -21,6 +21,7 @@ use carbide_uuid::DbTable;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
+use model::instance::snapshot::InstanceSnapshot;
 use model::resource_pool::OwnerType;
 use model::vpc::VpcDpuLoopback;
 use sqlx::PgConnection;
@@ -213,16 +214,54 @@ pub async fn find(
 /// Allocate loopback ip for a vpc and dpu if not allocated yet.
 /// If already allocated, return the value.
 /// Allocation failure events use the caller's `instrumentation`.
+/// Callers rendering a service interface must pass its captured `service_instance` so a missing
+/// loopback is allocated only while that Instance's live network and attachment configurations
+/// remain current. Busy or changed Instances return a failed precondition; callers must roll back
+/// the transaction before retrying. Existing loopbacks do not acquire an Instance lock.
 pub async fn get_or_allocate_loopback_ip_for_vpc(
     common_pools: &model::resource_pool::common::CommonPools,
     txn: &mut PgConnection,
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
+    service_instance: Option<&InstanceSnapshot>,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<IpAddr, DatabaseError> {
     let loopback_ip = match find(&mut *txn, dpu_id, vpc_id).await? {
         Some(x) => x.loopback_ip,
         None => {
+            if let Some(instance) = service_instance {
+                // Avoid waiting for cleanup that holds the Instance while earlier rendering may
+                // hold DPU or pool locks; successful readers retain the shared lock through commit.
+                let query = "SELECT id FROM instances
+                    WHERE id = $1 AND machine_id = $2 AND deleted IS NULL
+                      AND network_config_version = $3 AND extension_services_config_version = $4
+                    FOR SHARE SKIP LOCKED";
+                let current_id: Option<InstanceId> = sqlx::query_scalar(query)
+                    .bind(instance.id)
+                    .bind(instance.machine_id)
+                    .bind(instance.network_config_version)
+                    .bind(instance.extension_services_config_version)
+                    .fetch_optional(&mut *txn)
+                    .await
+                    .map_err(|error| DatabaseError::query(query, error))?;
+                // Read decoded configurations after locking the base row so defaulted fields
+                // retain their accepted meaning and a completed writer cannot leave stale JSON.
+                let current = if current_id.is_some() {
+                    crate::instance::find_by_id(&mut *txn, instance.id).await?
+                } else {
+                    None
+                };
+                // Reject stale snapshots before allocation so reclaimed endpoints cannot recreate a loopback.
+                if !current.is_some_and(|current| {
+                    current.config.network == instance.config.network
+                        && current.config.extension_services == instance.config.extension_services
+                }) {
+                    return Err(DatabaseError::FailedPrecondition(format!(
+                        "service VPC configuration for instance {} is busy or changed; retry",
+                        instance.id,
+                    )));
+                }
+            }
             let loopback_ip = crate::machine::allocate_vpc_dpu_loopback(
                 common_pools,
                 txn,

@@ -618,6 +618,7 @@ pub(crate) async fn admin_network(
                                     txn,
                                     dpu_machine_id,
                                     &vpc.id,
+                                    None,
                                     instrumentation,
                                 )
                                 .await?,

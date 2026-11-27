@@ -110,6 +110,7 @@ pub fn instance_status_from_config_and_observation(
         .value
         .get_used_dpus(&dpu_id_to_device_map, primary_dpu_machine_id);
 
+    let service_network = network_config.clone();
     let network =
         model::instance::status::network::InstanceNetworkStatus::from_config_and_observations(
             dpu_id_to_device_map,
@@ -131,6 +132,7 @@ pub fn instance_status_from_config_and_observation(
             extension_services_config,
             &observations.extension_services,
             delete_requested,
+            Some(service_network),
         );
     let extension_services_ready =
         model::instance::status::extension_service::is_extension_services_ready(

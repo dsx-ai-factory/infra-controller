@@ -51,8 +51,8 @@ pub enum ServiceVpcChainExclusion {
     Allow,
 }
 
-/// Rejects an exclusion update when the row's presence or version no longer matches.
-/// Missing rows and version mismatches share this rejection.
+/// Rejects an exclusion update when selector presence or version no longer matches, or creation
+/// cannot acquire the service's foreign-key lock without waiting. These cases share this rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChainSelectorNotCurrent;
 
@@ -73,6 +73,45 @@ pub async fn find_chain_selectors(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// Selects shared selector validation or exclusive exclusion updates before acquiring row locks.
+#[derive(Debug, Clone, Copy)]
+pub enum ChainSelectorLock {
+    /// Allows concurrent selector readers while blocking changes through the transaction's end.
+    Shared,
+    /// Takes `FOR UPDATE` when the transaction may change selector exclusions.
+    Exclusive,
+}
+
+/// Locks retained selector rows in service, interface, and slot order so independent hosts
+/// cannot retain opposite subsets while validating final attachment cleanup.
+/// Callers must acquire their Instance, host, and DPU row locks before this read.
+/// Transactions that may change selectors must request `Exclusive` from their first selector
+/// read; `Shared` callers must not update selectors later in the transaction.
+pub async fn find_chain_selectors_with_lock(
+    txn: &mut PgConnection,
+    service_ids: &[ExtensionServiceId],
+    lock: ChainSelectorLock,
+) -> DatabaseResult<Vec<ExtensionServiceChainSelector>> {
+    let lock_clause = match lock {
+        ChainSelectorLock::Shared => "FOR SHARE",
+        ChainSelectorLock::Exclusive => "FOR UPDATE",
+    };
+    // Use one ordered statement before eligibility checks can skip an attachment midway.
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT service_id, interface_ordinal, slot, excluded_dpu_ids, version
+         FROM extension_service_chain_selectors
+         WHERE service_id = ANY(",
+    );
+    query.push_bind(service_ids);
+    query.push(") ORDER BY service_id, interface_ordinal, slot ");
+    query.push(lock_clause);
+    query
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query.sql(), error))
+}
+
 /// Changes one DPU exclusion at the expected version while preserving other DPUs.
 ///
 /// Callers must serialize attachment/configuration validation and this exclusion
@@ -80,8 +119,9 @@ pub async fn find_chain_selectors(
 /// Commit before changing Kubernetes resources.
 ///
 /// `expected_version = None` creates only an absent row. `Some` updates only a matching
-/// existing row. Repeated membership requests retain the version; membership changes
-/// advance it. Empty rows remain for version fencing. An unmet presence or version
+/// existing row. Creation returns `NotApplied` for an absent or busy service rather than waiting
+/// for its foreign-key lock after Instance locks. Repeated membership requests retain the version;
+/// membership changes advance it. Empty rows remain for version fencing. An unmet presence or version
 /// precondition returns `NotApplied`; database failures remain errors. Interface ordinals
 /// and slots above `i32::MAX` return an invalid-argument error.
 pub async fn try_update_chain_exclusion(
@@ -108,6 +148,18 @@ pub async fn try_update_chain_exclusion(
 
     // Creation cannot replace a selector committed by another activation or retirement.
     let Some(expected_version) = expected_version else {
+        // Instance config updates lock services first, so creation must not wait for a service
+        // foreign-key lock while a controller or release transaction retains its Instance lock.
+        let service_query = "SELECT id FROM extension_services WHERE id = $1
+                             FOR KEY SHARE SKIP LOCKED";
+        let service: Option<ExtensionServiceId> = sqlx::query_scalar(service_query)
+            .bind(service_id)
+            .fetch_optional(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(service_query, error))?;
+        if service.is_none() {
+            return Ok(ConditionalWrite::NotApplied(ChainSelectorNotCurrent));
+        }
         let excluded_dpu_ids = if exclude { vec![dpu_id] } else { Vec::new() };
         let query = "INSERT INTO extension_service_chain_selectors
                          (service_id, interface_ordinal, slot, excluded_dpu_ids, version)
@@ -1858,6 +1910,248 @@ mod test_batched_lookups {
         // Finish the write before another connection checks persisted membership.
         txn.commit().await.expect("commit exclusion update");
         outcome
+    }
+
+    /// Verifies exclusive selector reads block shared reads before any mutation, while two shared
+    /// readers coexist and block exclusion updates until both transactions commit, so concurrent
+    /// cleanup validation can protect the selector it checks.
+    #[crate::sqlx_test]
+    async fn chain_selector_locks_share_readers_and_exclude_writers(pool: sqlx::PgPool) {
+        use std::time::Duration;
+
+        use crate::db_read::PgPoolReader;
+        use crate::test_support::postgres::wait_for_blocked_query;
+
+        // Seed one existing empty selector so the test exercises row locks rather than creation.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let service_ids = [service_id];
+        let dpu_id = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+            .parse()
+            .expect("valid DPU ID");
+        let ConditionalWrite::Applied(initial) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            None,
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("create the initial empty selector");
+        };
+        // Hold an exclusive read without updating membership to isolate its initial lock mode.
+        let mut exclusive = pool
+            .txn_begin()
+            .await
+            .expect("begin exclusive selector read");
+        assert_eq!(
+            find_chain_selectors_with_lock(
+                exclusive.as_mut(),
+                &service_ids,
+                ChainSelectorLock::Exclusive
+            )
+            .await
+            .expect("lock selector exclusively"),
+            vec![initial.clone()]
+        );
+        let exclusive_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(exclusive.as_mut())
+            .await
+            .expect("exclusive backend PID");
+        let mut first_reader = pool.txn_begin().await.expect("begin first shared reader");
+
+        // Require the exclusive SELECT itself to block a shared reader before any membership write.
+        let (first_read, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                find_chain_selectors_with_lock(
+                    first_reader.as_mut(),
+                    &service_ids,
+                    ChainSelectorLock::Shared
+                ),
+                async {
+                    wait_for_blocked_query(
+                        &mut PgPoolReader::from(pool.clone()),
+                        exclusive_pid,
+                        "FROM extension_service_chain_selectors",
+                    )
+                    .await;
+                    exclusive
+                        .commit()
+                        .await
+                        .expect("release exclusive selector read");
+                }
+            )
+        })
+        .await
+        .expect("shared reader must wait for the exclusive transaction");
+        assert_eq!(
+            first_read.expect("first shared selector read"),
+            vec![initial.clone()]
+        );
+
+        // Keep the first shared transaction open while the second acquires the same selector.
+        let mut second_reader = pool.txn_begin().await.expect("begin second shared reader");
+        let second_read = tokio::time::timeout(
+            Duration::from_secs(5),
+            find_chain_selectors_with_lock(
+                second_reader.as_mut(),
+                &service_ids,
+                ChainSelectorLock::Shared,
+            ),
+        )
+        .await
+        .expect("shared readers must coexist")
+        .expect("second shared selector read");
+        assert_eq!(second_read, vec![initial.clone()]);
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(first_reader.as_mut())
+            .await
+            .expect("first reader backend PID");
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(second_reader.as_mut())
+            .await
+            .expect("second reader backend PID");
+
+        // Observe a real exclusion UPDATE waiting for each reader before releasing its transaction.
+        let update = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            Some(initial.version),
+            ServiceVpcChainExclusion::Exclude,
+        );
+        let release_readers = async {
+            let mut first_observer = PgPoolReader::from(pool.clone());
+            let mut second_observer = PgPoolReader::from(pool.clone());
+            // PostgreSQL may report either shared transaction as the first UPDATE blocker.
+            let (blocking_reader, remaining_reader, remaining_pid) = tokio::select! {
+                _ = wait_for_blocked_query(
+                    &mut first_observer, first_pid, "UPDATE extension_service_chain_selectors",
+                ) => (first_reader, second_reader, second_pid),
+                _ = wait_for_blocked_query(
+                    &mut second_observer, second_pid, "UPDATE extension_service_chain_selectors",
+                ) => (second_reader, first_reader, first_pid),
+            };
+            blocking_reader
+                .commit()
+                .await
+                .expect("release first reported reader");
+            wait_for_blocked_query(
+                &mut first_observer,
+                remaining_pid,
+                "UPDATE extension_service_chain_selectors",
+            )
+            .await;
+            remaining_reader
+                .commit()
+                .await
+                .expect("release remaining shared reader");
+        };
+        let (updated, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(update, release_readers)
+        })
+        .await
+        .expect("exclusion update must wait for both readers and then finish");
+
+        // Reload the committed selector so an applied response alone cannot hide a lost update.
+        let ConditionalWrite::Applied(updated) = updated else {
+            panic!("current exclusion update must apply after both readers commit");
+        };
+        assert_eq!(updated.excluded_dpu_ids, vec![dpu_id]);
+        assert_eq!(
+            updated.version.version_nr(),
+            initial.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("find committed exclusion"),
+            vec![updated]
+        );
+    }
+
+    /// Rejects selector creation while a service row is busy and permits a later retry, preventing
+    /// controller Instance locks from completing a cycle with service-first configuration updates.
+    #[crate::sqlx_test]
+    async fn chain_selector_creation_retries_busy_service_without_waiting(pool: sqlx::PgPool) {
+        // Only the service row lock drives contention; the DPU identifies an empty active selector.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_id = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+            .parse()
+            .expect("valid DPU ID");
+        let mut registration = pool.txn_begin().await.expect("begin service config update");
+        sqlx::query("SELECT id FROM extension_services WHERE id = $1 FOR UPDATE")
+            .bind(service_id)
+            .execute(registration.as_mut())
+            .await
+            .expect("hold service config lock");
+
+        // Attempt the initial active publication while the independent config writer retains its lock.
+        let mut publication = pool
+            .txn_begin()
+            .await
+            .expect("begin active selector publication");
+        let rejected = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            try_update_chain_exclusion(
+                publication.as_mut(),
+                service_id,
+                0,
+                0,
+                dpu_id,
+                None,
+                ServiceVpcChainExclusion::Allow,
+            ),
+        )
+        .await
+        .expect("selector creation must reject a busy service without waiting")
+        .expect("service lock contention is a conditional rejection");
+        assert_eq!(
+            rejected,
+            ConditionalWrite::NotApplied(ChainSelectorNotCurrent)
+        );
+        publication
+            .commit()
+            .await
+            .expect("commit rejected publication");
+
+        // No selector may persist before releasing the service-first writer's lock.
+        assert!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("find rejected selector creation")
+                .is_empty()
+        );
+        registration
+            .commit()
+            .await
+            .expect("finish service config update");
+
+        // A fresh retry must create the versioned empty selector after the transient lock clears.
+        let ConditionalWrite::Applied(created) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            None,
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("selector creation must apply after service contention clears");
+        };
+        assert!(created.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("find retried selector creation"),
+            vec![created]
+        );
     }
 
     /// Rejects one of two competing exclusion updates and preserves both DPUs after retry,

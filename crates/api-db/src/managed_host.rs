@@ -296,14 +296,7 @@ pub async fn load_compact_by_host_ids(
     host_health_config: HostHealthConfig,
 ) -> Result<HashMap<HostMachineId, ManagedHostStateSnapshot>, DatabaseError> {
     lazy_static! {
-        static ref QUERY: String = format!(
-            r#"
-        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
-        FROM ({}) m
-        LEFT JOIN instances i ON i.machine_id = m.id
-        "#,
-            queries::MANAGED_HOSTS_COMPACT.as_str(),
-        );
+        static ref QUERY: String = with_instances(queries::MANAGED_HOSTS_COMPACT.as_str());
     }
 
     // The singleton form is much faster, as in load_by_machine_ids.
@@ -365,7 +358,18 @@ pub async fn load_by_instance_ids(
 fn with_instances(managed_hosts: &str) -> String {
     format!(
         r#"
-        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance,
+            COALESCE((
+                SELECT jsonb_agg(to_jsonb(selector))
+                FROM extension_service_chain_selectors selector
+                WHERE i.network_config->'service_interfaces' <> '[]'::jsonb
+                  AND selector.service_id IN (
+                      SELECT (attachment->>'service_id')::uuid
+                      FROM jsonb_array_elements(
+                          COALESCE(i.extension_services_config->'service_configs', '[]'::jsonb)
+                      ) attachment
+                  )
+            ), '[]'::jsonb) AS service_vpc_chain_selectors
         FROM ({managed_hosts}) m
         LEFT JOIN instances i ON i.machine_id = m.id
         "#
