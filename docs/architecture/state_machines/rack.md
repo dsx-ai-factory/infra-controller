@@ -212,7 +212,7 @@ issue a new `OnDemandRackMaintenance` call to retry.
 
 A compute tray whose host firmware upgrade fails lands in
 `M_HostReprovision::FailedFirmwareUpgrade`. From there it normally retries
-automatically (bounded by `MAX_FIRMWARE_UPGRADE_RETRIES` and
+automatically (bounded by `firmware_global.max_firmware_upgrade_retries` and
 `host_firmware_upgrade_retry_interval`).
 
 When an on-demand maintenance call (or, equivalently, the rack maintenance

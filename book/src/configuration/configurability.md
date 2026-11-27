@@ -1078,6 +1078,7 @@ overrides.
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
 | `instance_updates_manual_tagging` | `true` if field omitted; `false` if merged table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other admission and [execution gates](../../../docs/operations/firmware-updates/host-firmware.md#scheduling-gates) still apply. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
+| `max_firmware_upgrade_retries` | `5` | Retries after a failed firmware upgrade. `0` means no retry. |
 | `hgx_bmc_gpu_reboot_delay` | `30s` | Delay after GPU reboot before HGX BMC is contacted again. |
 | `requires_manual_upgrade` | `false` | Force every firmware upgrade to require explicit administrator approval. |
 | `max_concurrent_bfb_copies` | `10` | Concurrent DPU BFB copies. |

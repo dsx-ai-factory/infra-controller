@@ -868,12 +868,23 @@ pub async fn set_preingestion_firmware_check_refresh_wait(
 pub async fn set_preingestion_recheck_versions_reason(
     address: IpAddr,
     reason: String,
+    failed_pushes: u32,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let state = PreingestionState::RecheckVersionsAfterFailure { reason };
+    let state = PreingestionState::RecheckVersionsAfterFailure {
+        reason,
+        failed_pushes,
+    };
     set_preingestion(address, state, txn).await
 }
 
+// TODO: move the data of `PreingestionState::UpgradeFirmwareWait` into its own
+// struct (`UpgradeFirmwareWait(UpgradeFirmwareWait)`) and take that struct
+// here. The compiler then checks the variant, and this allow can go.
+// The stored JSON must not change: before the refactor, make sure a test
+// loads a state row written by the current code (with and without
+// `failed_pushes`) and that the new code writes the same JSON.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_preingestion_waittask(
     address: IpAddr,
     task_id: String,
@@ -881,6 +892,7 @@ pub async fn set_preingestion_waittask(
     upgrade_type: &FirmwareComponentType,
     power_drains_needed: Option<u32>,
     firmware_number: u32,
+    failed_pushes: u32,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::UpgradeFirmwareWait {
@@ -889,6 +901,7 @@ pub async fn set_preingestion_waittask(
         upgrade_type: *upgrade_type,
         power_drains_needed,
         firmware_number: Some(firmware_number),
+        failed_pushes,
     };
     set_preingestion(address, state, txn).await
 }
@@ -1580,6 +1593,7 @@ mod tests {
             upgrade_type: FirmwareComponentType::default(),
             power_drains_needed: None,
             firmware_number: None,
+            failed_pushes: 0,
         }
     }
 

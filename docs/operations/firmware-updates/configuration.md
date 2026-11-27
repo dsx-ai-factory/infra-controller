@@ -526,6 +526,7 @@ pre-ingestion manager:
 | `firmware_global.host_firmware_upgrade_retry_interval` | `60m` | Delay before the managed-host state machine retries a failed host firmware upgrade. |
 | `firmware_global.instance_updates_manual_tagging` | `true` if field omitted from a present merged table; `false` if table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other [scheduling gates](host-firmware.md#scheduling-gates) and [firmware-triggered reboot approval](host-firmware.md#assigned-hosts-need-reboot-approval) still apply. |
 | `firmware_global.no_reset_retries` | `false` | Disables the normal retry handling for BMC reset failures during pre-ingestion and managed-host firmware work. |
+| `firmware_global.max_firmware_upgrade_retries` | `5` | Number of retries after a failed firmware upgrade. It applies to an unassigned managed host in top-level `HostReprovision` and to each pre-ingestion endpoint. `0` means no retry. When the last retry fails, the managed host stays in `FailedFirmwareUpgrade` and the pre-ingestion endpoint moves to `Failed`. |
 | `firmware_global.hgx_bmc_gpu_reboot_delay` | `30s` | Delay after a GPU reboot before NICo accesses the HGX BMC again. |
 | `firmware_global.requires_manual_upgrade` | `false` | Adds a manually confirmed upgrade gate for MNNVL-capable hosts. |
 | `firmware_global.max_concurrent_bfb_copies` | `10` | Maximum concurrent BFB copies performed by the pre-ingestion manager. |
@@ -799,7 +800,8 @@ the partial file. Managed-host Redfish upgrades enter `FailedFirmwareUpgrade`
 and follow the [firmware execution retry policy](host-firmware.md#firmware-execution-failures),
 including `firmware_global.host_firmware_upgrade_retry_interval` and the
 applicable retry budget. Pre-ingestion logs a warning and retries on
-[later passes](pre-ingestion.md#failures-and-retries). Retries download from the
+[later passes](pre-ingestion.md#failures-and-retries); a download failure does
+not use the `firmware_global.max_firmware_upgrade_retries` budget. Retries download from the
 start rather than resume. The
 `carbide_firmware_download_duration_seconds_count` metric records finished
 attempts by `outcome`; HTTP deadlines appear as `fetch` or `transfer` failures.

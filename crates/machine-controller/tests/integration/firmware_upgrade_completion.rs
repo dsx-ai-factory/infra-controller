@@ -16,14 +16,13 @@
  */
 
 use carbide_instrument::testing::MetricsCapture;
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
 use carbide_test_harness::CarbideConfig;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use model::firmware::FirmwareComponentType;
-use model::machine::{
-    HostReprovisionState, MAX_FIRMWARE_UPGRADE_RETRIES, ManagedHostState, ScoutUpgradeResult,
-};
+use model::machine::{HostReprovisionState, ManagedHostState, ScoutUpgradeResult};
 use model::test_support::ManagedHostConfig;
 
 use crate::env::Env;
@@ -678,7 +677,7 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
     // the failure state and the counter does not move again.
     mh.put_in_failed_firmware_upgrade(
         chrono::Utc::now() - chrono::TimeDelta::minutes(20),
-        MAX_FIRMWARE_UPGRADE_RETRIES,
+        FirmwareGlobal::max_firmware_upgrade_retries_default(),
     )
     .await;
     env.run_single_iteration().await;
@@ -697,7 +696,10 @@ async fn failed_firmware_upgrade_retries_until_the_budget_is_exhausted(pool: PgP
         ),
         "expected to remain in FailedFirmwareUpgrade, got {reprovision_state:?}",
     );
-    assert_eq!(*retry_count, MAX_FIRMWARE_UPGRADE_RETRIES);
+    assert_eq!(
+        *retry_count,
+        FirmwareGlobal::max_firmware_upgrade_retries_default()
+    );
     assert_eq!(metrics.counter_delta(RETRIES_TOTAL, &[]), 1.0);
 }
 

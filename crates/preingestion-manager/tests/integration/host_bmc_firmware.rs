@@ -659,6 +659,148 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// A firmware push that fails every time is sent a limited number of times:
+/// the first push plus `max_firmware_upgrade_retries`. After that the endpoint
+/// goes to `Failed` and no more uploads happen. Each repeat is a full upload
+/// and a failed flash attempt on the BMC. The count is part of the persisted
+/// state, so a manager restart does not give the endpoint a new budget.
+#[sqlx_test]
+async fn test_preingestion_failed_firmware_push_stops_after_limit(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_firmware_task_fails(true);
+    redfish_sim.set_firmware_upload_delay(Duration::ZERO);
+    // One retry: the first push plus the retry are expected.
+    const MAX_RETRIES: u32 = 2;
+    const EXPECTED_UPLOADS: usize = MAX_RETRIES as usize + 1;
+    let new_manager = || {
+        let mut manager_config = config.preingestion_manager();
+        manager_config.max_firmware_upgrade_retries = MAX_RETRIES;
+        PreingestionManager::new(
+            pool.clone(),
+            manager_config,
+            redfish_sim.clone(),
+            env.test_meter.meter(),
+            None,
+            None,
+            None,
+            env.api().work_lock_manager_handle(),
+            config.ntp_servers.clone(),
+            env.api().instrumentation().clone(),
+        )
+    };
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    // A BMC version low enough to start a pre-ingestion upgrade.
+    let mut txn = pool.txn_begin().await.unwrap();
+    common::insert_endpoint_version(&mut txn, response.address.as_str(), "4.9", "1.13.2", false)
+        .await?;
+    txn.commit().await?;
+
+    // Runs one manager pass, then acts as site explorer: stores the same
+    // report again, which clears the "waiting for explorer refresh" flag. The
+    // firmware versions do not change. Returns the state after the pass.
+    async fn run_pass(
+        mgr: &PreingestionManager,
+        pool: &PgPool,
+    ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
+        mgr.run_single_iteration().await?;
+        let mut txn = pool.txn_begin().await?;
+        let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+        assert_eq!(endpoints.len(), 1);
+        let endpoint = endpoints.into_iter().next().unwrap();
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                endpoint.address,
+                endpoint.report_version,
+                &endpoint.report,
+                false,
+                &mut txn,
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+        Ok(endpoint.preingestion_state)
+    }
+
+    // The first push fails: the persisted state carries the count.
+    let mgr = new_manager();
+    let mut last_state = None;
+    for _ in 0..20 {
+        let state = run_pass(&mgr, &pool).await?;
+        let failed_once = matches!(state, PreingestionState::RecheckVersionsAfterFailure { .. });
+        last_state = Some(state);
+        if failed_once {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            last_state,
+            Some(PreingestionState::RecheckVersionsAfterFailure {
+                failed_pushes: 1,
+                ..
+            })
+        ),
+        "last state: {last_state:?}"
+    );
+    assert_eq!(redfish_sim.firmware_upload_count(), 1);
+
+    // A new manager, as after a restart, continues from the persisted count.
+    drop(mgr);
+    let mgr = new_manager();
+    for _ in 0..20 {
+        let state = run_pass(&mgr, &pool).await?;
+        let failed = matches!(state, PreingestionState::Failed { .. });
+        last_state = Some(state);
+        if failed {
+            break;
+        }
+    }
+    let Some(PreingestionState::Failed { reason }) = &last_state else {
+        panic!(
+            "endpoint did not reach Failed after {} uploads; last state: {last_state:?}",
+            redfish_sim.firmware_upload_count(),
+        );
+    };
+    assert!(
+        reason.contains(&format!("attempt {EXPECTED_UPLOADS} of {EXPECTED_UPLOADS}")),
+        "reason: {reason}"
+    );
+    assert!(reason.contains("BMC to 6.00.30.00"), "reason: {reason}");
+    assert!(reason.contains("ApplyFailed"), "reason: {reason}");
+    assert_eq!(redfish_sim.firmware_upload_count(), EXPECTED_UPLOADS);
+
+    // `Failed` is terminal: more passes send nothing to the BMC.
+    for _ in 0..3 {
+        let state = run_pass(&mgr, &pool).await?;
+        assert!(
+            matches!(state, PreingestionState::Failed { .. }),
+            "state: {state:?}"
+        );
+    }
+    assert_eq!(redfish_sim.firmware_upload_count(), EXPECTED_UPLOADS);
+
+    Ok(())
+}
+
 /// UEFI firmware activates on the next host boot. A host that pre-ingestion
 /// found powered off refuses `ForceRestart`, so activation powers it on
 /// instead; a running host, and a host whose power state cannot be read,

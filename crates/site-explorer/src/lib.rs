@@ -4776,6 +4776,7 @@ mod tests {
                         "10.0.0.3",
                         PreingestionState::RecheckVersionsAfterFailure {
                             reason: "job failed".to_string(),
+                            failed_pushes: 1,
                         },
                         true,
                         false,
@@ -4998,7 +4999,7 @@ mod tests {
                 version_at(micros),
             )
         };
-        let explored = [
+        let explored = vec![
             complete("10.0.0.1", 20),
             complete("10.0.0.2", 21),
             complete("10.0.0.3", 22),

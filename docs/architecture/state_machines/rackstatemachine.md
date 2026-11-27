@@ -475,7 +475,7 @@ See [Power Shelf State Diagram](power_shelf.md) for the power-shelf FSM.
 A compute machine that fails its host firmware upgrade lands in the
 `M_HostReprovision::FailedFirmwareUpgrade` substate. There are two ways out:
 
-1. **Automatic retry.** While `retry_count < MAX_FIRMWARE_UPGRADE_RETRIES` and the
+1. **Automatic retry.** While `retry_count < firmware_global.max_firmware_upgrade_retries` and the
    configured `host_firmware_upgrade_retry_interval` has elapsed since the
    failure, the machine state handler automatically transitions back to
    `CheckingFirmwareV2` and re-attempts the upgrade.

@@ -533,6 +533,7 @@ async fn one_endpoint(
             upgrade_type,
             power_drains_needed,
             firmware_number,
+            ..
         } => {
             static_info
                 .in_upgrade_firmware_wait(&InUpgradeFirmwareWaitArgs {
@@ -1147,17 +1148,41 @@ impl PreingestionManagerStatic {
                     ) => {
                         let task_message =
                             task_info.messages.last().map_or("", |m| m.message.as_str());
+                        let failed_pushes = endpoint
+                            .preingestion_state
+                            .failed_firmware_pushes()
+                            .saturating_add(1);
+                        // The first push, plus the configured retries.
+                        let max_attempts =
+                            self.config.max_firmware_upgrade_retries.saturating_add(1);
                         let msg = format!(
-                            "Failure in firmware upgrade for {}: {} {:?}",
-                            endpoint.address, state, task_message,
+                            "Failure in firmware upgrade for {} ({} to {}, attempt {} of {}): {} {:?}",
+                            endpoint.address,
+                            upgrade_type,
+                            final_version,
+                            failed_pushes,
+                            max_attempts,
+                            state,
+                            task_message,
                         );
 
                         self.with_txn(|txn| {
                             async move {
+                                if failed_pushes >= max_attempts {
+                                    // Terminal until an operator clears the
+                                    // error, which moves it back to `Initial`.
+                                    return db::explored_endpoints::set_preingestion_failed(
+                                        endpoint.address,
+                                        msg,
+                                        txn,
+                                    )
+                                    .await;
+                                }
                                 // Wait for site explorer to refresh it then try again after that.
                                 db::explored_endpoints::set_preingestion_recheck_versions_reason(
                                     endpoint.address,
                                     msg,
+                                    failed_pushes,
                                     txn,
                                 )
                                 .await?;
@@ -3951,6 +3976,8 @@ impl PreingestionManagerStatic {
                 firmware_type,
                 to_install.power_drains_needed,
                 firmware_number,
+                // A retry and a later chain step both keep the count.
+                endpoint_clone.preingestion_state.failed_firmware_pushes(),
                 txn,
             ))
         })

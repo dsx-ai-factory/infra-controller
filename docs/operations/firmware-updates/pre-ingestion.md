@@ -236,10 +236,16 @@ The following metrics provide site-wide visibility:
 
 NICo retries most transient conditions on later pre-ingestion passes. These
 include an unavailable BMC, a busy upload limit, artifact download still in
-progress, Redfish upload errors, and inventory that has not yet refreshed. A
-failed Redfish task causes NICo to refresh inventory and evaluate the component
-again. If an installed version is still not reported after 30 minutes, NICo can
+progress, Redfish upload errors, and inventory that has not yet refreshed. If an
+installed version is still not reported after 30 minutes, NICo can
 repeat the activation reset unless `firmware_global.no_reset_retries` is set.
+
+A Redfish firmware task that ends in `Exception`, `Interrupted`, `Killed`, or
+`Cancelled` is a failed push. NICo refreshes inventory, evaluates the component
+again, and repeats the upload if it is still needed. NICo allows
+`firmware_global.max_firmware_upgrade_retries` retries for each endpoint
+(default `5`). When the first push and all retries have failed, the endpoint
+moves to `Failed`.
 
 Rack compute pre-ingestion retries unavailable SOT downloads, BMC credentials,
 artifact-token credentials, RMS status reads, and submission failures that occur

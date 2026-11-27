@@ -4,11 +4,12 @@
 use std::collections::HashMap;
 
 use carbide_firmware::FirmwareConfig;
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_test_support::{Check, check_values};
 use carbide_uuid::rack::RackId;
 use config_version::{ConfigVersion, Versioned};
 use model::firmware::{Firmware, FirmwareComponent, FirmwareEntry, HostFirmwareConfig};
-use model::machine::{HostReprovisionRequest, MAX_FIRMWARE_UPGRADE_RETRIES, ScoutUpgradeResult};
+use model::machine::{HostReprovisionRequest, ScoutUpgradeResult};
 use model::metadata::Metadata;
 use model::power_shelf::{PowerShelfConfig, PowerShelfReprovisionRequest};
 use model::rack::{
@@ -200,11 +201,16 @@ fn host_rack_records_match_attached_aliases_only_without_node_identity() {
             let mut rack = rack.clone();
             rack.firmware_upgrade_job.as_mut().unwrap().machines[0].mac = mac.to_string();
 
-            machine(&host, Some(&rack), &aliases)
-                .current
-                .into_iter()
-                .map(|work| work.job_id)
-                .collect::<Vec<_>>()
+            machine(
+                &host,
+                Some(&rack),
+                &aliases,
+                FirmwareGlobal::max_firmware_upgrade_retries_default(),
+            )
+            .current
+            .into_iter()
+            .map(|work| work.job_id)
+            .collect::<Vec<_>>()
         },
     );
     rack.firmware_upgrade_job.as_mut().unwrap().machines[0].node_id =
@@ -215,7 +221,16 @@ fn host_rack_records_match_attached_aliases_only_without_node_identity() {
         )
         .to_string();
 
-    assert!(machine(&host, Some(&rack), &[alias]).current.is_empty());
+    assert!(
+        machine(
+            &host,
+            Some(&rack),
+            &[alias],
+            FirmwareGlobal::max_firmware_upgrade_retries_default()
+        )
+        .current
+        .is_empty()
+    );
 }
 
 /// This request has no admitted identity; cases may overwrite it or set reset
@@ -445,7 +460,12 @@ fn active_host_target_and_outstanding_request_remain_independent() {
                 ..host_request()
             });
 
-            let actions = machine(&host, None, &[]);
+            let actions = machine(
+                &host,
+                None,
+                &[],
+                FirmwareGlobal::max_firmware_upgrade_retries_default(),
+            );
 
             assert!(!format!("{actions:?}").contains("secret"));
             actions
@@ -509,7 +529,7 @@ fn controller_selection_preserves_uncertain_recovery_requests() {
             Check {
                 scenario: "ordinary started request survives exhausted failure",
                 input: Case {
-                    state: failed(MAX_FIRMWARE_UPGRADE_RETRIES),
+                    state: failed(FirmwareGlobal::max_firmware_upgrade_retries_default()),
                     request: Some(HostReprovisionRequest {
                         started_at: Some(accepted_at()),
                         request_reset: Some(false),
@@ -535,7 +555,12 @@ fn controller_selection_preserves_uncertain_recovery_requests() {
             host.state.value = case.state;
             host.host_reprovision_requested = case.request;
 
-            let actions = machine(&host, None, &[]);
+            let actions = machine(
+                &host,
+                None,
+                &[],
+                FirmwareGlobal::max_firmware_upgrade_retries_default(),
+            );
 
             assert!(!format!("{actions:?}").contains("diagnostic-secret"));
             actions
@@ -1207,7 +1232,12 @@ fn machine_entrypoint_preserves_rack_current_and_both_request_sources() {
         ..Default::default()
     });
 
-    let actions = machine(&host, Some(&rack), &[]);
+    let actions = machine(
+        &host,
+        Some(&rack),
+        &[],
+        FirmwareGlobal::max_firmware_upgrade_retries_default(),
+    );
 
     assert_eq!(
         actions,
@@ -1262,7 +1292,12 @@ fn assigned_unapproved_host_keeps_request_after_hardware_completion() {
         ..Default::default()
     });
 
-    let actions = machine(&host, Some(&rack), &[]);
+    let actions = machine(
+        &host,
+        Some(&rack),
+        &[],
+        FirmwareGlobal::max_firmware_upgrade_retries_default(),
+    );
 
     assert_eq!(
         actions,
@@ -1301,7 +1336,12 @@ fn host_rack_wait_does_not_associate_a_nonrack_replacement() {
         ended_at: None,
     });
 
-    let actions = machine(&host, None, &[]);
+    let actions = machine(
+        &host,
+        None,
+        &[],
+        FirmwareGlobal::max_firmware_upgrade_retries_default(),
+    );
 
     assert_eq!(
         actions,
@@ -1327,7 +1367,12 @@ fn host_rack_wait_does_not_associate_a_nonrack_replacement() {
         ..host_request()
     });
     assert_eq!(
-        machine(&host, None, &[]),
+        machine(
+            &host,
+            None,
+            &[],
+            FirmwareGlobal::max_firmware_upgrade_retries_default()
+        ),
         StoredFirmwareActions {
             current: vec![firmware_wait()],
             outstanding_requests: vec![FirmwareRequestEvidence {
