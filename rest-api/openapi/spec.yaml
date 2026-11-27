@@ -1250,6 +1250,8 @@ paths:
                     message: Deletion request was accepted
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       tags:
         - Site
       description: |-

@@ -2589,12 +2589,28 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 		fields              fields
 		args                args
 		wantErr             bool
+		wantStatus          int
 		remainSiteCnt       int
 		siteManagerErr      bool
 		siteManagerErrCode  *int
 		siteManagerDisabled bool
 		verifyChildSpanner  bool
 	}{
+		{
+			name: "Site deletion returns not found for an absent Site",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				org:  ipOrg,
+				id:   uuid.NewString(),
+				user: ipu,
+			},
+			wantErr:    true,
+			wantStatus: http.StatusNotFound,
+		},
 		{
 			name: "ok Site deletion API endpoint",
 			fields: fields{
@@ -2745,6 +2761,10 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 
 			err := dsh.Handle(ec)
 			assert.Nil(t, err)
+
+			if tt.wantStatus != 0 {
+				require.Equal(t, tt.wantStatus, rec.Code)
+			}
 
 			if !tt.wantErr {
 				require.Equal(t, http.StatusAccepted, rec.Code)
