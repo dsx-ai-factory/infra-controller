@@ -258,7 +258,7 @@ impl ControlState {
 /// Tray locations come from the rack model's RMS slot and type-specific
 /// tray index. Power shelves have no RMS tray location.
 ///
-////// The snapshot handed out is rebuilt only when a device's BMC or host
+/// The snapshot handed out is rebuilt only when a device's BMC or host
 /// address has changed since the last request (see `RmsSnapshot`); nothing
 /// else in it can change, so a cached snapshot is never stale.
 impl RmsInventory for ControlState {
