@@ -11792,12 +11792,15 @@ impl HostUpgradeState {
                     ));
                 }
 
-                let can_retry = retry_count
-                    < ctx
-                        .services
-                        .site_config
-                        .firmware_global
-                        .max_firmware_upgrade_retries;
+                // An assigned host has no stored retry count, so the limit
+                // cannot apply to it. It always retries.
+                let can_retry = matches!(scenario, HostFirmwareScenario::Instance)
+                    || retry_count
+                        < ctx
+                            .services
+                            .site_config
+                            .firmware_global
+                            .max_firmware_upgrade_retries;
                 let waited_enough = Utc::now()
                     .signed_duration_since(report_time.unwrap_or(Utc::now()))
                     >= ctx

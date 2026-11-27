@@ -936,3 +936,44 @@ async fn missing_firmware_config_keeps_lockdown_off_when_profile_disables_it(poo
         env.redfish_sim.lockdown_states()
     );
 }
+
+/// An assigned host has no stored retry count, so
+/// `max_firmware_upgrade_retries` does not apply to it. Even with the value 0
+/// it retries after the retry interval.
+#[sqlx_test]
+async fn assigned_host_failed_firmware_upgrade_retries_with_zero_retry_limit(pool: PgPool) {
+    let retry_interval = chrono::TimeDelta::minutes(15);
+    let TestContext { mut env, mh } = TestContext::init_with_runtime(pool, |config| {
+        config.firmware_global.host_firmware_upgrade_retry_interval = retry_interval;
+        config.firmware_global.max_firmware_upgrade_retries = 0;
+    })
+    .await;
+    // The controller handles `Assigned` states only for a host with an instance.
+    crate::rack_firmware_upgrade::create_instance(&env.test_harness, &mh).await;
+
+    mh.advance_state(ManagedHostState::Assigned {
+        instance_state: model::machine::InstanceState::HostReprovision {
+            reprovision_state: HostReprovisionState::FailedFirmwareUpgrade {
+                firmware_type: FirmwareComponentType::Bmc,
+                report_time: Some(chrono::Utc::now() - chrono::TimeDelta::minutes(20)),
+                reason: Some("scout upgrade failed".to_string()),
+            },
+        },
+    })
+    .await;
+    env.run_single_iteration().await;
+
+    let machine = mh.host.machine().await;
+    assert!(
+        matches!(
+            machine.current_state(),
+            ManagedHostState::Assigned {
+                instance_state: model::machine::InstanceState::HostReprovision {
+                    reprovision_state: HostReprovisionState::CheckingFirmwareV2 { .. },
+                },
+            }
+        ),
+        "expected a retry (CheckingFirmwareV2), got {:?}",
+        machine.current_state(),
+    );
+}

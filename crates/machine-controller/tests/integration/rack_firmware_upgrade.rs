@@ -49,7 +49,7 @@ async fn managed_host(env: &TestHarness) -> TestManagedHost {
         .0
 }
 
-async fn create_instance(env: &TestHarness, host: &TestManagedHost) -> InstanceId {
+pub(crate) async fn create_instance(env: &TestHarness, host: &TestManagedHost) -> InstanceId {
     let instance_id = InstanceId::new();
     let config = InstanceConfig {
         tenant: TenantConfig {
