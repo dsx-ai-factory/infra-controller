@@ -289,10 +289,12 @@ Each step has a result and a message. A failed NVMe cleanup moves the host to an
 ### NVMe Secure Erase
 
 Scout discovers NVMe controller devices and formats each namespace with secure
-erase:
+erase. It uses cryptographic erase (`-s2`) when the controller reports support
+for it in the Format NVM Attributes (`fna`) field of `nvme id-ctrl`, and user
+data erase (`-s1`) otherwise:
 
 ```bash
-nvme format <controller-device> -s2 -f -n <namespace-id>
+nvme format <controller-device> <-s2|-s1> -f -n <namespace-id>
 ```
 
 When namespace management is supported, Scout deletes existing namespaces after

@@ -101,6 +101,10 @@ struct NvmeParams {
     // Optional Admin Command Support (OACS)
     oacs: u64,
 
+    // Format NVM Attributes (FNA); bit 2 means cryptographic erase is supported
+    #[serde(default)]
+    fna: u64,
+
     // serial number
     sn: String,
 
@@ -141,6 +145,12 @@ async fn get_nvme_params(nvmename: &str) -> Result<NvmeParams, CarbideClientErro
         }
     };
     Ok(nvme_drive_params)
+}
+
+/// Secure Erase Settings flag for `nvme format`: cryptographic erase when the
+/// controller reports it in FNA bit 2, otherwise user data erase.
+fn nvme_format_secure_erase_flag(fna: u64) -> &'static str {
+    if fna & 0x4 == 0x4 { "-s2" } else { "-s1" }
 }
 
 /// Select the best LBA format with the given data size (ds).
@@ -247,6 +257,7 @@ async fn clean_this_nvme(nvmename: &String) -> Result<(), CarbideClientError> {
     let nvme_drive_params = get_nvme_params(nvmename).await?;
 
     let namespaces_supported = nvme_drive_params.oacs & 0x8 == 0x8;
+    let secure_erase_flag = nvme_format_secure_erase_flag(nvme_drive_params.fna);
 
     tracing::debug!(
         device = %nvmename,
@@ -254,6 +265,8 @@ async fn clean_this_nvme(nvmename: &String) -> Result<(), CarbideClientError> {
         controller_id = nvme_drive_params.cntlid,
         optional_admin_commands = nvme_drive_params.oacs,
         namespaces_supported,
+        format_attributes = nvme_drive_params.fna,
+        secure_erase_flag,
         serial_number = %nvme_drive_params.sn,
         model_number = %nvme_drive_params.mn,
         firmware_revision = %nvme_drive_params.fr,
@@ -332,9 +345,12 @@ async fn clean_this_nvme(nvmename: &String) -> Result<(), CarbideClientError> {
             let nsid = caps.get(1).map_or("", |m| m.as_str());
             tracing::debug!(namespace_id = nsid, "Found NVMe namespace");
 
-            // format with "-s2" is secure erase
-            match cmdrun::run_prog(NVME_CLI_PROG, ["format", nvmename, "-s2", "-f", "-n", nsid])
-                .await
+            // secure erase: cryptographic when the controller supports it, else user data erase
+            match cmdrun::run_prog(
+                NVME_CLI_PROG,
+                ["format", nvmename, secure_erase_flag, "-f", "-n", nsid],
+            )
+            .await
             {
                 Ok(_) => (),
                 Err(e) => {
@@ -1194,6 +1210,7 @@ mod tests {
     use std::io;
     use std::os::unix::fs::PermissionsExt;
 
+    use carbide_test_support::{Check, check_values};
     use libmlx::firmware::operation::has_unresolved_firmware_claim;
 
     use super::*;
@@ -1384,6 +1401,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nvme_format_secure_erase_flag_follows_crypto_erase_support() {
+        check_values(
+            [
+                Check {
+                    scenario: "crypto erase supported",
+                    input: r#""fna": 4,"#,
+                    expect: "-s2",
+                },
+                Check {
+                    scenario: "only other format attributes set",
+                    input: r#""fna": 3,"#,
+                    expect: "-s1",
+                },
+                Check {
+                    scenario: "fna missing from id-ctrl output",
+                    input: "",
+                    expect: "-s1",
+                },
+            ],
+            |fna_field| {
+                let json = format!(
+                    r#"{{{fna_field} "tnvmcap": 1024, "cntlid": 1, "oacs": 0, "sn": "S1", "mn": "M1", "fr": "F1"}}"#
+                );
+                let params: NvmeParams = serde_json::from_str(&json).unwrap();
+                nvme_format_secure_erase_flag(params.fna)
+            },
+        );
     }
 
     #[test]
