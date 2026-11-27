@@ -713,6 +713,9 @@ GET /v2/org/{org}/nico/vpc/{vpcId} removed the enum value `NetworkSecurityGroup`
 GET /v2/org/{org}/nico/vpc/{vpcId} removed the enum value `Site` from the `query` request parameter `includeRelation`
 GET /v2/org/{org}/nico/vpc/{vpcId} removed the enum value `Tenant` from the `query` request parameter `includeRelation`
 
+# Subnet deletion already returns 202 with a message, not the documented 204.
+API DELETE /v2/org/{org}/nico/subnet/{subnetId} removed the success response with the status `204`
+
 # Host firmware config: an ordering entry is a bare component type, as before, or a {type, driveModel} object that can name a drive model. Existing requests still validate and responses keep bare types for every component without a drive model; oasdiff reports the enum moving into the oneOf as removed and the item type as changed.
 API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `BMC` of the request property `ordering/items/`
 API PUT /v2/org/{org}/nico/firmware-config/host removed the enum value `CEC` of the request property `ordering/items/`
