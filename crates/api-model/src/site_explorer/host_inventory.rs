@@ -21,11 +21,11 @@ use carbide_hw_identification::host_bluefield::{DpuProduct, HostBlueFieldRules, 
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use itertools::Itertools;
 use mac_address::MacAddress;
-use model::expected_machine::ExpectedMachineData;
-use model::site_explorer::{Chassis, EndpointExplorationReport};
 
-/// Inventory operations used for host/DPU matching and interface ownership.
-pub(super) trait EndpointExplorationReportExt {
+use super::{Chassis, EndpointExplorationReport};
+use crate::expected_machine::ExpectedMachineData;
+
+impl EndpointExplorationReport {
     /// Returns host MACs used to predict interfaces for a zero-DPU host.
     ///
     /// System EthernetInterfaces remain Host candidates. Adapter Ports are broader
@@ -34,28 +34,7 @@ pub(super) trait EndpointExplorationReportExt {
     /// Host interfaces. When no usable System MAC exists, discovered Ports preserve
     /// the existing hardware fallback alongside any System MACs. ExpectedMachine
     /// supplies MACs by itself only when Redfish reports neither collection.
-    fn host_mac_addresses_for_predicted_machine(
-        &self,
-        machine_data: Option<&ExpectedMachineData>,
-    ) -> Vec<MacAddress>;
-
-    /// Returns the first reported system interface MAC whose ID contains `oob`,
-    /// ignoring ASCII case.
-    fn dpu_oob_mac_address(&self) -> Option<MacAddress>;
-
-    /// Returns part and serial numbers from PCIe and chassis inventory,
-    /// deduplicated by trimmed, nonempty serial number.
-    ///
-    /// Devices are included regardless of their type or part number. When copies of a
-    /// serial disagree, prefer the first record with a BlueField part number;
-    /// otherwise keep the first record. PCIe records precede chassis records,
-    /// so PCIe wins when both sources supply conflicting BlueField part numbers.
-    fn devices_with_unique_serials(&self, rules: &HostBlueFieldRules)
-    -> Vec<DeviceIdentifiers<'_>>;
-}
-
-impl EndpointExplorationReportExt for EndpointExplorationReport {
-    fn host_mac_addresses_for_predicted_machine(
+    pub fn host_mac_addresses_for_predicted_machine(
         &self,
         machine_data: Option<&ExpectedMachineData>,
     ) -> Vec<MacAddress> {
@@ -130,7 +109,8 @@ impl EndpointExplorationReportExt for EndpointExplorationReport {
             .unwrap_or_default()
     }
 
-    fn dpu_oob_mac_address(&self) -> Option<MacAddress> {
+    /// Returns the first reported system interface MAC whose ID contains `oob`, ignoring ASCII case.
+    pub fn dpu_oob_mac_address(&self) -> Option<MacAddress> {
         self.systems.iter().find_map(|system| {
             system.ethernet_interfaces.iter().find_map(|interface| {
                 if interface.id.as_ref().is_some_and(|id| {
@@ -146,7 +126,15 @@ impl EndpointExplorationReportExt for EndpointExplorationReport {
         })
     }
 
-    fn devices_with_unique_serials(
+    /// Returns part and serial numbers from PCIe and chassis inventory,
+    /// deduplicated by trimmed, nonempty serial number.
+    ///
+    /// Devices are included regardless of their type or part number. When copies of a
+    /// serial disagree, prefer the first record with a BlueField part number;
+    /// otherwise keep the first record. PCIe records precede chassis records,
+    /// so PCIe wins when both sources supply conflicting BlueField part numbers.
+    /// Site rules run before built-in rules at each inventory source.
+    pub fn devices_with_unique_serials(
         &self,
         rules: &HostBlueFieldRules,
     ) -> Vec<DeviceIdentifiers<'_>> {
@@ -175,24 +163,28 @@ impl EndpointExplorationReportExt for EndpointExplorationReport {
 
 /// Part and serial numbers read from a host inventory device.
 #[derive(Clone, Copy)]
-pub(super) struct DeviceIdentifiers<'a> {
-    pub(super) part_number: Option<&'a str>,
-    pub(super) bluefield_product: Option<DpuProduct>,
-    pub(super) serial_number: Option<&'a str>,
+pub struct DeviceIdentifiers<'a> {
+    /// Part number used to recognize BlueField records during deduplication.
+    pub part_number: Option<&'a str>,
+    /// BlueField product identified at this inventory source by site or built-in rules.
+    pub bluefield_product: Option<DpuProduct>,
+    /// Raw serial number trimmed by the pairing lookup.
+    pub serial_number: Option<&'a str>,
 }
 
 impl<'a> DeviceIdentifiers<'a> {
     /// Returns the trimmed serial number, or `None` when it is missing or blank.
-    pub(super) fn serial_number(&self) -> Option<&'a str> {
+    pub fn serial_number(&self) -> Option<&'a str> {
         self.serial_number.map(str::trim).none_if_empty()
     }
 
-    /// Whether a rule recognized the reported part number as a BlueField.
-    pub(super) fn is_bluefield(&self) -> bool {
+    /// Identifies rule-recognized BlueField parts so duplicate inventory keeps its DPU evidence.
+    pub fn is_bluefield(&self) -> bool {
         self.bluefield_product.is_some()
     }
 }
 
+/// Keeps inventory encounter order while preferring BlueField evidence for repeated serials.
 fn deduplicate_devices_by_serial<'a>(
     inventory: impl Iterator<Item = DeviceIdentifiers<'a>>,
 ) -> Vec<DeviceIdentifiers<'a>> {
@@ -223,6 +215,7 @@ pub(super) fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<DeviceIdentif
     chassis_records_with_rules(chassis, &HostBlueFieldRules::default())
 }
 
+/// Keeps source-specific product evidence while selecting a chassis identity or its adapters for pairing.
 fn chassis_records_with_rules<'a>(
     chassis: &'a Chassis,
     rules: &HostBlueFieldRules,
@@ -257,10 +250,10 @@ fn chassis_records_with_rules<'a>(
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
-    use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
-    use model::site_explorer::{ComputerSystem, EthernetInterface, NetworkAdapter, PCIeDevice};
 
     use super::*;
+    use crate::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
+    use crate::site_explorer::{ComputerSystem, EthernetInterface, NetworkAdapter, PCIeDevice};
 
     const BLUEFIELD: &str = "900-9D3B6-00CV-AA0";
 
@@ -473,7 +466,6 @@ mod tests {
             assert_eq!(serials, case.serials, "{}: serials", case.name);
         }
     }
-
     /// Redfish inventory stays authoritative, ExpectedMachine narrows
     /// supplemental Ports, and the zero-DPU fallback uses only Host
     /// declarations from a host ExpectedMachine.

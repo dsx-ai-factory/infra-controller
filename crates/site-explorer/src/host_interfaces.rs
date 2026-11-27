@@ -22,6 +22,7 @@ use db::ObjectColumnFilter;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine::MachineInterfaceSnapshot;
+use model::machine_boot_interface::InterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
@@ -235,15 +236,33 @@ pub(super) async fn reconcile(
     macs: &[MacAddress],
     boot_ids: &[(MacAddress, &str)],
     primary_mac: Option<MacAddress>,
+    source: InterfaceSelectionSource,
 ) -> SiteExplorerResult<()> {
     let interfaces = HostInterfaces::load(txn, macs).await?;
     let tasks = interfaces.plan(machine_id, macs, boot_ids, primary_mac)?;
-    apply(txn, machine_id, tasks).await
+    apply(txn, machine_id, tasks).await?;
+    // Publish networking provenance only when a leased NIC actually becomes primary.
+    if primary_mac
+        .filter(|mac| macs.contains(mac))
+        .and_then(|mac| interfaces.interfaces.get(&mac))
+        .filter(|row| {
+            row.interface_type != InterfaceType::Bmc
+                && row.machine_id.is_none_or(|owner| owner == *machine_id)
+                && (row.machine_id.is_none() || !row.primary_interface)
+        })
+        .is_some()
+    {
+        db::machine_interface::set_primary_interface_selection(txn, machine_id, source, true)
+            .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use carbide_test_harness::prelude::sqlx_testing;
 
     use super::*;
 
@@ -348,5 +367,156 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Persists the report's networking source when adopting a leased primary and retains its decision time on repeated reconciliation, preventing ordinary exploration from rewriting selection history.
+    #[carbide_test_harness::prelude::sqlx_test]
+    async fn reconcile_persists_primary_selection_without_refreshing_repeated_decision(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::{MachineIdSource, MachineType};
+        use model::address_selection_strategy::AddressSelectionStrategy;
+        use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+        use model::machine_interface_address::MachineInterfaceAssociation;
+        use model::network_prefix::NewNetworkPrefix;
+        use model::network_segment::{
+            AllocationStrategy, NetworkSegmentControllerState, NewNetworkSegment,
+        };
+
+        // An unowned leased primary isolates adoption from flag promotion; the old owned primary supplies the handoff.
+        let host_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x86; 32],
+            MachineType::PredictedHost,
+        );
+        let previous_mac = MacAddress::new([2, 0, 0, 0, 0x86, 1]);
+        let selected_mac = MacAddress::new([2, 0, 0, 0, 0x86, 2]);
+        let mut setup = pool.begin().await?;
+        db::machine::create(
+            &mut setup,
+            None,
+            &host_id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        let segment = db::network_segment::persist(
+            NewNetworkSegment {
+                id: uuid::Uuid::new_v4().into(),
+                name: "host-primary-selection".to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                prefixes: vec![NewNetworkPrefix {
+                    prefix: "192.0.2.0/24".parse()?,
+                    gateway: Some("192.0.2.1".parse()?),
+                    dhcpv6_link_address: None,
+                    num_reserved: 3,
+                }],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::HostInband,
+                can_stretch: None,
+                allocation_strategy: AllocationStrategy::Dynamic,
+                infer_slaac_eui64_addresses: false,
+            },
+            &mut setup,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let previous = db::machine_interface::create(
+            &mut setup,
+            std::slice::from_ref(&segment),
+            &previous_mac,
+            true,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        db::machine_interface::associate_interface_with_machine(
+            &previous.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            &mut setup,
+        )
+        .await?;
+        let selected = db::machine_interface::create(
+            &mut setup,
+            std::slice::from_ref(&segment),
+            &selected_mac,
+            true, // Adoption must record the source even though this leased row is already primary.
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        setup.commit().await?;
+
+        // Apply the report's selected MAC and source through the full load, plan and persistence operation.
+        let mut discovery = pool.begin().await?;
+        reconcile(
+            &mut discovery,
+            &host_id,
+            &[previous_mac, selected_mac],
+            &[],
+            Some(selected_mac),
+            InterfaceSelectionSource::ExpectedMachine,
+        )
+        .await?;
+        discovery.commit().await?;
+
+        // Reload the host and both interfaces to prove attribution belongs to the newly adopted networking primary.
+        let host = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("reconciled host");
+        let selection = host
+            .config
+            .primary_interface_selection
+            .expect("networking source");
+        assert_eq!(selection.source, InterfaceSelectionSource::ExpectedMachine);
+        assert!(selection.updated_at.is_some());
+        let primary = db::machine_interface::find_one(&pool, selected.id).await?;
+        assert_eq!(primary.machine_id, Some(host_id));
+        assert!(primary.primary_interface);
+        assert!(
+            !db::machine_interface::find_one(&pool, previous.id)
+                .await?
+                .primary_interface
+        );
+
+        // Give the persisted decision a fixed earlier time so any repeat write is observable without sleeping.
+        let decision_time: chrono::DateTime<chrono::Utc> = "2020-01-02T03:04:05Z".parse()?;
+        sqlx::query(
+            "UPDATE machine_interfaces SET primary_selection_updated_at = $2 WHERE id = $1",
+        )
+        .bind(selected.id)
+        .bind(decision_time)
+        .execute(&pool)
+        .await?;
+
+        // Reconcile the same report after its association and primary flags have already settled.
+        let mut repeated = pool.begin().await?;
+        reconcile(
+            &mut repeated,
+            &host_id,
+            &[previous_mac, selected_mac],
+            &[],
+            Some(selected_mac),
+            InterfaceSelectionSource::ExpectedMachine,
+        )
+        .await?;
+        repeated.commit().await?;
+
+        // A fresh host read must retain the recorded source and original decision time.
+        let repeated = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("host after repeated reconciliation");
+        assert_eq!(
+            repeated.config.primary_interface_selection,
+            Some(model::machine_boot_interface::InterfaceSelection {
+                source: InterfaceSelectionSource::ExpectedMachine,
+                updated_at: Some(decision_time),
+            })
+        );
+        Ok(())
     }
 }

@@ -22,6 +22,8 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
+        primary_interface.primary_selection_source AS primary_interface_selection_source,
+        primary_interface.primary_selection_updated_at AS primary_interface_selection_updated_at,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,
@@ -35,6 +37,10 @@ SELECT m.* FROM (
         '[]'::json AS topology,
         COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info
         FROM machines m2
+        LEFT JOIN machine_interfaces primary_interface
+            ON primary_interface.machine_id = m2.id
+            AND primary_interface.primary_interface
+            AND primary_interface.interface_type != 'Bmc'
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
 
@@ -101,6 +107,8 @@ SELECT m.* FROM (
         SELECT
         mi_parent.machine_id AS managed_host_id,
         m2.*,
+        primary_interface.primary_selection_source AS primary_interface_selection_source,
+        primary_interface.primary_selection_updated_at AS primary_interface_selection_updated_at,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,
@@ -115,6 +123,10 @@ SELECT m.* FROM (
         FROM machine_interfaces mi_parent
         INNER JOIN machines m2
         ON (m2.id = mi_parent.attached_dpu_machine_id)
+        LEFT JOIN machine_interfaces primary_interface
+            ON primary_interface.machine_id = m2.id
+            AND primary_interface.primary_interface
+            AND primary_interface.interface_type != 'Bmc'
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
         WHERE mi_parent.machine_id = m.id

@@ -104,8 +104,8 @@
 #                          version baked into the carbide-api binary at build time
 #                          (CARBIDE_BUILD_HELM_VERSION). Set this when testing a
 #                          dev/PR image whose chart version was never published to
-#                          the registry — point it at the latest published version
-#                          (e.g. the most recent main build tag).
+#                          the registry. Choose the latest published chart version
+#                          compatible with the image (docs/manuals/dpf.md).
 #   NICO_DPF_FMDS_CHART_VERSION
 #                          Same override for the nico-fmds chart.
 #   NICO_DPF_DHCP_SERVER_CHART_VERSION
@@ -494,7 +494,7 @@ NICO_RMS_NGC_API_KEY="${NICO_RMS_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
 _RMS_NS="rack-manager"
 # Optional chart-version overrides for NICo-owned DPF services. Useful when
 # testing a dev/PR image whose baked-in version was never published to the
-# chart registry — point at the latest published version instead.
+# chart registry. Choose the latest published chart version compatible with the image.
 NICO_DPF_DPU_AGENT_CHART_VERSION="${NICO_DPF_DPU_AGENT_CHART_VERSION:-}"
 NICO_DPF_FMDS_CHART_VERSION="${NICO_DPF_FMDS_CHART_VERSION:-}"
 NICO_DPF_DHCP_SERVER_CHART_VERSION="${NICO_DPF_DHCP_SERVER_CHART_VERSION:-}"

@@ -4218,10 +4218,14 @@ async fn fetch_exploration_report(api: &Api) -> rpc::site_explorer::SiteExplorat
         .into_inner()
 }
 
+/// Verifies that a remaining matched PF retains PCI selection when Redfish omits another paired PF.
+/// This prevents unintended fallback without weakening refusal for matched PFs without a PCI key.
+/// Resolved declarations retain precedence over automatic PCI ordering.
 #[sqlx_test]
 async fn test_select_host_primary_interface(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Keep both PFs paired while report rows, PCI keys, and declarations vary independently.
     let mut mock_dpus = (0..NUM_DPUS).map(|_| DpuConfig::default()).collect_vec();
 
     // Make the second DPU have the lower-numbered UEFI device path... we will assert later that
@@ -4235,6 +4239,7 @@ async fn test_select_host_primary_interface(
             .unwrap(),
     );
 
+    // Build complete host Redfish inventory before varying its selection evidence.
     let host_report: EndpointExplorationReport = ManagedHostConfig::default()
         .with_dpus(mock_dpus.clone())
         .into();
@@ -4245,6 +4250,7 @@ async fn test_select_host_primary_interface(
     let mut oob_interfaces = Vec::new();
     let mut explored_dpus = Vec::new();
 
+    // Resolve each BMC lease before retaining its stored interface and paired DPU report.
     for (i, mock_dpu) in mock_dpus.iter().enumerate() {
         let oob_mac = mock_dpu.bmc_mac_address;
         let mut dpu_bmc = FakeMachine {
@@ -4255,11 +4261,13 @@ async fn test_select_host_primary_interface(
         };
         dpu_bmc.discover_dhcp(env.api()).await?;
 
+        // Check the persisted BMC interface before adding this DPU to the pairing fixture.
         assert!(!dpu_bmc.ip.is_empty());
         let oob_interface = db::machine_interface::find_by_mac_address(&env.pool, oob_mac).await?;
         assert!(oob_interface[0].primary_interface);
         oob_interfaces.push(oob_interface[0].clone());
 
+        // Derive the DPU report's machine identity before pairing its host PF.
         let mut dpu_report: EndpointExplorationReport = mock_dpu.clone().into();
         dpu_report.generate_machine_id(false)?;
         let dpu_report = Arc::new(dpu_report);
@@ -4297,6 +4305,20 @@ async fn test_select_host_primary_interface(
     assert_eq!(
         incomplete_pci_report.select_host_primary_interface(&explored_dpus, None),
         None,
+    );
+
+    // Omit the original PCI winner's Redfish row while retaining both paired PFs.
+    let mut partial_pci_report = host_report.clone();
+    partial_pci_report.systems[0]
+        .ethernet_interfaces
+        .retain(|interface| interface.mac_address != Some(expected_mac));
+    // Preserve PCI provenance for the remaining match so partial Redfish coverage does not force fallback.
+    assert_eq!(
+        partial_pci_report.select_host_primary_interface(&explored_dpus, None),
+        Some(model::site_explorer::HostPrimaryInterfaceSelection {
+            mac_address: mock_dpus[0].host_mac_address,
+            source: BootInterfaceSelectionSource::RedfishUefiPci,
+        }),
     );
 
     // A declared primary on a DPU host-PF wins over the automatic pick -- here
@@ -5602,10 +5624,12 @@ async fn assert_chassis_pairing(
 /// A host can report one BlueField in PCIe, a network adapter, and a separate
 /// chassis, including copies without part numbers. Refresh must replace a
 /// persisted duplicate list and ingest each distinct DPU once.
+/// Preserves site-selected BF3 products in provisional hardware despite conflicting records or BF4-prefixed parts, to avoid imposing BF4 PF acquisition on a legacy agent.
 #[sqlx_test]
 async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted_host(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Provide Admin networking so the creation transaction can attach both DPUs.
     let env = Env::new(pool).await;
     let domain = env
         .test_harness
@@ -5615,11 +5639,14 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         .network_controller()
         .create_admin_segment(&domain)
         .await;
+    // Vary host part evidence below; default card fields supply ordinary BF3 reports and networking.
     let dpus = [
+        // A recognized OEM PCIe part must win over a conflicting BF4 chassis for this serial.
         DpuConfig {
             serial: "DPU-SERIAL-B".to_string(),
             ..DpuConfig::default()
         },
+        // An explicit adapter product override must win even when its part has a BF4 prefix.
         DpuConfig {
             serial: "DPU-SERIAL-A".to_string(),
             ..DpuConfig::default()
@@ -5630,6 +5657,8 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
     let mock_host = ManagedHostConfig::default().with_dpus(vec![dpus[0].clone()]);
     let host_bmc_mac = mock_host.bmc_mac_address;
     let mut host_report: EndpointExplorationReport = mock_host.clone().into();
+    // Report an OEM PCIe part before a conflicting BF4 chassis with the same serial.
+    host_report.systems[0].pcie_devices[0].part_number = Some("OEM-BF3-A".to_string());
     host_report.chassis = vec![
         Chassis {
             id: "1".to_string(),
@@ -5638,7 +5667,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
                 .enumerate()
                 .map(|(index, dpu)| NetworkAdapter {
                     id: (index + 1).to_string(),
-                    part_number: (index != 0).then(|| "900-9D3B6-00CV-AA0".to_string()),
+                    part_number: (index != 0).then(|| "900-9D4B4-CWAA-TSA".to_string()), // Site rules classify this adapter as BF3.
                     serial_number: Some(dpu.serial.clone()),
                     ..Default::default()
                 })
@@ -5647,7 +5676,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         },
         Chassis {
             id: "SmartNIC_1".to_string(),
-            part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+            part_number: Some("900-9D4B4-CWAA-TSA".to_string()), // Keep the duplicate recognized as BF4 at the chassis source.
             serial_number: Some(dpus[0].serial.clone()),
             ..Default::default()
         },
@@ -5662,6 +5691,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         },
     ];
 
+    // Lease BMC addresses before pairing and machine creation use their reports.
     let mut host_bmc = env.new_machine(&host_bmc_mac.to_string(), "SomeVendor");
     host_bmc.discover_dhcp(env.api()).await?;
     let host_bmc_ip: IpAddr = host_bmc.ip.parse()?;
@@ -5671,6 +5701,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         .collect_vec();
     dpu_bmcs.discover_dhcp(env.api()).await?;
 
+    // Declare the host and its expected DPU serials before creation can use their reports.
     let mut txn = env.pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
@@ -5690,6 +5721,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
     .await?;
     txn.commit().await?;
 
+    // Keep product recognition source-specific so both record selection and product overrides are exercised.
     let explorer = env.test_site_explorer(SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
@@ -5697,10 +5729,23 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         concurrent_explorations: 1,
         run_interval: Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
+        host_bluefield_rules: serde_json::from_value(serde_json::json!([
+            // The first recognized PCIe record must suppress the later built-in BF4 chassis.
+            {
+                "id": "site-oem-bf3", "sources": ["system_pcie_device"],
+                "part_numbers": [{"exact": "OEM-BF3-A"}], "product": "bluefield3_dpu"
+            },
+            // The selected adapter's configured product must override its built-in BF4 prefix.
+            {
+                "id": "site-bf3-adapter", "sources": ["chassis_network_adapter"],
+                "part_numbers": [{"exact": "900-9D4B4-CWAA-TSA"}], "product": "bluefield3_dpu"
+            }
+        ]))?,
         ..Default::default()
     });
     let mut endpoint_results = vec![(host_bmc_ip, Ok(host_report))];
     let mut explored_dpus = Vec::new();
+    // Derive each DPU identity from its own BF3 report before introducing the stale pairing list.
     for (dpu, bmc) in dpus.iter().zip(&dpu_bmcs) {
         let bmc_ip: IpAddr = bmc.ip.parse()?;
         let mut report: EndpointExplorationReport = dpu.clone().into();
@@ -5713,9 +5758,11 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
             report: Arc::new(report),
         });
     }
+    // Explore all endpoints before completing preingestion and permitting creation.
     explorer.insert_endpoint_results(endpoint_results);
     explorer.run_single_iteration().await?;
 
+    // Complete preingestion for the already-explored endpoints.
     let mut txn = env.pool.txn_begin().await?;
     for ip in [
         host_bmc_ip,
@@ -5736,8 +5783,10 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
     };
     db::explored_managed_host::update(&mut txn, &[&stale_host]).await?;
     txn.commit().await?;
+    // Reconcile the duplicate list and create machines before checking committed hardware.
     explorer.run_single_iteration().await?;
 
+    // Reload pairing to prove each discovered DPU is persisted exactly once.
     let hosts = db::explored_managed_host::find_all(&env.pool).await?;
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].host_bmc_ip, host_bmc_ip);
@@ -5785,6 +5834,25 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
                 .any(|id| MachineId::from(*id) == machine.id),
             "each distinct DPU must be attached to the host"
         );
+        // Reload topology to detect false BF4 hardware even when creation and attachment succeeded.
+        let persisted_topology =
+            db::machine_topology::find_latest_by_machine_ids(&env.pool, &[machine.id])
+                .await?
+                .remove(&machine.id)
+                .expect("persisted DPU topology");
+        assert_eq!(
+            persisted_topology
+                .topology
+                .discovery_data
+                .info
+                .dpu_info
+                .as_ref()
+                .expect("DPU hardware")
+                .part_number,
+            "900-9D3B6-00CV-AA0"
+        );
+        assert!(!persisted_topology.topology.discovery_data.info.is_bf4_dpu());
+        assert!(persisted_topology.dpu_host_pf_inventory.is_none());
     }
 
     Ok(())

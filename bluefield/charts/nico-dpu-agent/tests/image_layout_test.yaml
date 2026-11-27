@@ -65,25 +65,96 @@ tests:
               path: /opt/forge
               type: DirectoryOrCreate
 
-  - it: should accept a custom certsDir value
+  # Preserve custom certificate mounts when a shared prefix is outside the reserved sysfs subtree.
+  - it: accepts a custom certificate directory with a disjoint sysfs prefix
     set:
       image:
         repository: test
         tag: test
-      certsDir: /custom/cert/dir
+      certsDir: /host-sys-certs # Share the name prefix without entering /host-sys/.
+    # Preserve the requested host and container paths after validation accepts the value.
     asserts:
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: nico-certs
-            mountPath: /custom/cert/dir
+            mountPath: /host-sys-certs
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /host-sys-certs
       - contains:
           path: spec.template.spec.volumes
           content:
             name: nico-certs
             hostPath:
-              path: /custom/cert/dir
+              path: /host-sys-certs
               type: DirectoryOrCreate
+
+  # Preserve a trailing space so an accepted certificate path cannot decode as the reserved sysfs mount.
+  - it: preserves a trailing space in certificate mount paths
+    # Select legacy mode because mounted mode requires the exact default certificate directory.
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: "/host-sys " # Keep this literal distinct from /host-sys.
+      bootstrapCa:
+        source: legacy_download
+    # Compare decoded YAML values so unquoted interpolation cannot silently discard the space.
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: "/host-sys "
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: "/host-sys "
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: "/host-sys "
+              type: DirectoryOrCreate
+
+  # Reject the reserved sysfs path before rendering duplicate mounts in the agent container.
+  - it: rejects a certificate directory that overlaps the agent's host sysfs mount
+    set:
+      certsDir: /host-sys
+      bootstrapCa:
+        source: legacy_download
+    asserts:
+      - failedTemplate:
+          errorMessage: certsDir=/host-sys conflicts with the agent's host sysfs mount
+
+  # Reject a child certificate directory to keep its mount outside the live sysfs subtree.
+  - it: rejects a certificate directory under the host sysfs mount
+    # Select legacy download because mounted mode already requires /opt/forge.
+    set:
+      certsDir: /host-sys/class/net
+      bootstrapCa:
+        source: legacy_download
+    # Report the supplied path before overlapping mount destinations can be emitted.
+    asserts:
+      - failedTemplate:
+          errorMessage: certsDir=/host-sys/class/net conflicts with the agent's host sysfs mount
+
+  # Reject lexical aliases of the reserved root so dot components cannot bypass validation.
+  - it: rejects a certificate directory that normalizes to the host sysfs mount
+    # Use a leading dot component that does not match the uncleaned /host-sys prefix.
+    set:
+      certsDir: /./host-sys/
+      bootstrapCa:
+        source: legacy_download
+    # Keep the original spelling in the diagnostic while comparing the cleaned path.
+    asserts:
+      - failedTemplate:
+          errorMessage: certsDir=/./host-sys/ conflicts with the agent's host sysfs mount
 
   - it: should run the LLDP snapshot sidecar with read-only host runtime access
     set:
@@ -168,10 +239,17 @@ tests:
           content:
             name: host-lib
           any: true
-      - notContains:
+      # Live PF acquisition uses host sysfs without replacing the pod's own sysfs.
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: sys
+            mountPath: /host-sys
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            mountPath: /sys
           any: true
       - contains:
           path: spec.template.spec.containers[0].env

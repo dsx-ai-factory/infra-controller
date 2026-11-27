@@ -189,7 +189,9 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
     assert!(boot_interface_section.contains("<dt>Source</dt><dd>LegacyUnknown</dd>"));
     assert!(boot_interface_section.contains("<dt>Updated At</dt><dd>-</dd>"));
     assert!(boot_interface_section.contains(&host.host.primary_mac().to_string()));
-    assert!(boot_interface_section.contains("<span class=\"bubble success\">Current</span>"));
+    assert!(
+        boot_interface_section.contains("<span class=\"bubble success\">Owned selection</span>")
+    );
     assert!(boot_interface_section.contains("<span class=\"bubble\">System default</span>"));
     assert!(boot_interface_section.contains("Set as desired"));
     assert!(boot_interface_section.contains("Request reconciliation"));

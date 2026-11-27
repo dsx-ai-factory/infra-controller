@@ -19,9 +19,10 @@
 //! it. This is a read-only troubleshooting projection: it reports the four
 //! places a host's boot interface can live -- owned `machine_interfaces` rows,
 //! `predicted_machine_interfaces`, the `explored_endpoints` default, and the
-//! post-deletion `retained_boot_interfaces` pairs -- alongside the effective
-//! boot interface the system would select via `pick_boot_interface`, and a
-//! divergence flag for when the stores disagree about which NIC boots. The
+//! post-deletion `retained_boot_interfaces` pairs -- alongside the owned candidate
+//! selected by `pick_boot_interface`. Default lifecycle resolution prefers the
+//! persisted desired target. The divergence flag compares only the MACs from
+//! the owned candidate, explored defaults, and primary predictions. The
 //! same response also reports whether the machine controller has converged the
 //! persisted desired target.
 
@@ -47,9 +48,9 @@ use crate::handlers::utils::convert_and_log_machine_id;
 /// Gather the boot-interface view for one machine across all four stores.
 ///
 /// All four stores are read within a single read transaction. The effective
-/// boot interface is the same
-/// `pick_boot_interface` selection every other flow acts on, applied to the
-/// owned `machine_interfaces` rows. Reconciliation is derived from the
+/// owned candidate uses `pick_boot_interface` over `machine_interfaces`;
+/// default lifecycle resolution uses it when no desired target exists.
+/// Reconciliation is derived from the
 /// persisted desired target, its latest observation, and `ManagedHostState`.
 pub(crate) async fn get_machine_boot_interfaces(
     api: &Api,
@@ -124,8 +125,8 @@ pub(crate) async fn get_machine_boot_interfaces(
     txn.commit().await?;
 
     // The effective boot interface: `pick_boot_interface` over the owned rows
-    // (primary wins, else the lowest-MAC non-underlay NIC). This is what the
-    // controller and admin actions resolve.
+    // (primary wins, else the lowest-MAC non-underlay NIC). Default lifecycle
+    // resolution uses this candidate only when no desired target is stored.
     let effective = interfaces.boot_interface();
     let effective_mac = effective.map(|i| i.mac_address);
     let effective_boot_interface = effective.and_then(|i| i.boot_interface());
@@ -155,7 +156,7 @@ pub(crate) async fn get_machine_boot_interfaces(
     // flagged primary -- and flag a disagreement when more than one distinct
     // MAC turns up. (Retained rows are post-deletion history, shown for context
     // but not part of the agreement check.) A single signal, or none, is not a
-    // divergence.
+    // divergence. Desired intent is also excluded from this check.
     let mut boot_macs: BTreeSet<MacAddress> = BTreeSet::new();
     if let Some(mac) = effective_mac {
         boot_macs.insert(mac);

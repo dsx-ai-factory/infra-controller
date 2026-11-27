@@ -50,6 +50,12 @@ pub struct MachineStateHandlerSiteConfig {
     /// host ingestion skips enabling Astra on declared CX9 NICs.
     pub astra_enabled: bool,
     pub dpf_enabled: bool,
+    /// Startup-resolved BF4 host PF 0 controller, shared with DPF forwarding.
+    pub dpu_host_pf_pci_controller_id: u8,
+    /// Site Explorer part-number rules shared with initial host PF pairing and BF3 classification after DMI metadata loss.
+    pub host_bluefield_rules: carbide_hw_identification::host_bluefield::HostBlueFieldRules,
+    /// Bounds restored boot IDs during PF repair with the same site retention policy used by discovery.
+    pub retained_boot_interface_window: Option<chrono::Duration>,
     /// Site-wide enable for releasing DPF maintenance holds so changed DPUDeployment-owned
     /// DPUService revisions roll out. Direct, detached DPUService objects do not use this setting.
     /// When `false`, a host parked in the NodeEffect phase keeps its hold and pending marker.
@@ -99,6 +105,9 @@ impl MachineStateHandlerSiteConfig {
             ewethers_enabled: true,
             astra_enabled: false,
             dpf_enabled: false,
+            dpu_host_pf_pci_controller_id: carbide_dpf::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID,
+            host_bluefield_rules: Default::default(),
+            retained_boot_interface_window: None,
             dpu_service_sync_enabled: true,
             spdm_enabled: false,
             bmc_rotation_enabled: false,

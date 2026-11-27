@@ -20,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 use carbide_hw_identification::host_bluefield::{DpuProduct, HostBlueFieldRules, InventorySource};
 use itertools::Itertools;
 use model::expected_machine::{ExpectedMachine, HostDpuPolicy};
+use model::site_explorer::host_inventory::DeviceIdentifiers;
 use model::site_explorer::{BlueFieldOperatingMode, ExploredEndpoint};
 
-use crate::endpoint_exploration_report_ext::{DeviceIdentifiers, EndpointExplorationReportExt};
 use crate::errors::SiteExplorerError;
 
 /// Expected DPU count and unique host/BMC matches collected before configuration.

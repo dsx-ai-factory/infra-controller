@@ -292,6 +292,7 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
             switches_created_per_run: config.switches_created_per_run,
             admin_fnn_enabled: config.admin_fnn_enabled,
             dpu_policy: config.dpu_policy,
+            host_bluefield_rules: config.host_bluefield_rules.clone(),
             retained_boot_interface_window: config.retained_boot_interface_window,
         }
     }

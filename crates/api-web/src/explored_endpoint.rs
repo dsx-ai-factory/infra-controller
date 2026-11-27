@@ -1368,12 +1368,16 @@ pub(super) async fn set_dpu_first_boot_order(
 /// Requests another pass for the host's resolved boot interface.
 ///
 /// This takes no MAC from the operator: it reuses `set_dpu_first_boot_order`
-/// with `boot_interface_mac: None`, which makes the backend resolve the boot
-/// interface the same way every other flow does -- the owning machine's
-/// designated interface (`primary_interface` + its captured Redfish interface
-/// id) once a machine owns this endpoint, or site-explorer's automatic default
-/// for a not-yet-managed endpoint. Managed hosts persist a fresh generation
-/// for machine-controller; unowned endpoints still apply it directly.
+/// with `boot_interface_mac: None`. For a resolved managed host, the backend
+/// prefers stored desired boot intent, then owned-interface and prediction
+/// fallbacks. For a resolved managed host with pending BF4 host PF initialization,
+/// the backend requires stored desired intent selected by `Operator` or
+/// `ExpectedMachine`, returning `FailedPrecondition` otherwise.
+///
+/// Successful requests for managed hosts persist a fresh generation for
+/// machine-controller. Endpoints that do not resolve to a managed host apply
+/// site-explorer's stored default directly when available, including before
+/// BMC association.
 pub(super) async fn restore_boot_interface(
     AxumState(state): AxumState<Arc<Api>>,
     AxumPath(endpoint_ip): AxumPath<String>,

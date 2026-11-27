@@ -33655,9 +33655,12 @@ type MachineSetupRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	BmcEndpointRequest *BmcEndpointRequest    `protobuf:"bytes,1,opt,name=bmc_endpoint_request,json=bmcEndpointRequest,proto3,oneof" json:"bmc_endpoint_request,omitempty"`
 	MachineId          *string                `protobuf:"bytes,2,opt,name=machine_id,json=machineId,proto3,oneof" json:"machine_id,omitempty"`
-	BootInterfaceMac   *string                `protobuf:"bytes,3,opt,name=boot_interface_mac,json=bootInterfaceMac,proto3,oneof" json:"boot_interface_mac,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Explicit boot MAC. A supplied MAC can establish Operator desired intent for
+	// a managed host while BF4 host PF initialization is pending. Whitespace-only
+	// input is treated as omitted.
+	BootInterfaceMac *string `protobuf:"bytes,3,opt,name=boot_interface_mac,json=bootInterfaceMac,proto3,oneof" json:"boot_interface_mac,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *MachineSetupRequest) Reset() {
@@ -33751,9 +33754,12 @@ type SetDpuFirstBootOrderRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	BmcEndpointRequest *BmcEndpointRequest    `protobuf:"bytes,1,opt,name=bmc_endpoint_request,json=bmcEndpointRequest,proto3,oneof" json:"bmc_endpoint_request,omitempty"`
 	MachineId          *string                `protobuf:"bytes,2,opt,name=machine_id,json=machineId,proto3,oneof" json:"machine_id,omitempty"`
-	BootInterfaceMac   *string                `protobuf:"bytes,3,opt,name=boot_interface_mac,json=bootInterfaceMac,proto3,oneof" json:"boot_interface_mac,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Explicit boot MAC. A supplied MAC can establish Operator desired intent for
+	// a managed host while BF4 host PF initialization is pending. Whitespace-only
+	// input is treated as omitted.
+	BootInterfaceMac *string `protobuf:"bytes,3,opt,name=boot_interface_mac,json=bootInterfaceMac,proto3,oneof" json:"boot_interface_mac,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *SetDpuFirstBootOrderRequest) Reset() {
@@ -60640,13 +60646,19 @@ func (x *RemediationApplicationStatus) GetMetadata() *Metadata {
 type SetPrimaryDpuRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostMachineId *MachineId             `protobuf:"bytes,1,opt,name=host_machine_id,json=hostMachineId,proto3" json:"host_machine_id,omitempty"`
-	DpuMachineId  *MachineId             `protobuf:"bytes,2,opt,name=dpu_machine_id,json=dpuMachineId,proto3" json:"dpu_machine_id,omitempty"`
+	// DPU whose current host interface becomes the networking primary and desired boot target.
+	// The resolved interface must pass the same BF4 PF checks as
+	// SetPrimaryInterfaceRequest.interface_id. During pending BF4 initialization,
+	// its MAC must match that DPU's protected PF 0 on dpu_host_pf_pci_controller_id,
+	// or the request returns FailedPrecondition. Retry after PF finalization;
+	// later network acknowledgment or health waits do not block selection.
+	DpuMachineId *MachineId `protobuf:"bytes,2,opt,name=dpu_machine_id,json=dpuMachineId,proto3" json:"dpu_machine_id,omitempty"`
 	// Deprecated compatibility alias for `force_reconcile`.
 	//
 	// Deprecated: Marked as deprecated in nico_nico.proto.
 	Reboot bool `protobuf:"varint,3,opt,name=reboot,proto3" json:"reboot,omitempty"`
 	// Request another controller reconciliation even when the selected DPU is
-	// already the desired boot interface.
+	// already the desired boot interface. Does not bypass BF4 PF eligibility.
 	ForceReconcile bool `protobuf:"varint,4,opt,name=force_reconcile,json=forceReconcile,proto3" json:"force_reconcile,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -60714,13 +60726,24 @@ func (x *SetPrimaryDpuRequest) GetForceReconcile() bool {
 type SetPrimaryInterfaceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostMachineId *MachineId             `protobuf:"bytes,1,opt,name=host_machine_id,json=hostMachineId,proto3" json:"host_machine_id,omitempty"`
-	InterfaceId   *MachineInterfaceId    `protobuf:"bytes,2,opt,name=interface_id,json=interfaceId,proto3" json:"interface_id,omitempty"`
+	// Owned interface that becomes the networking primary and desired boot target.
+	// During pending BF4 initialization, an interface attached to a recognized
+	// BF4 DPU must match that DPU's protected PF 0 MAC on dpu_host_pf_pci_controller_id.
+	// A known factory alias is also ineligible: an unattached Admin row whose MAC
+	// matches an attached BF4 DPU's currently reported factory MAC when that DPU
+	// has a different protected configured PF 0 whose MAC matches an Admin row
+	// attached to that DPU on this host. Both refusals return FailedPrecondition.
+	// The factory-alias refusal also applies after PF finalization. Other-MAC
+	// standalone Admin rows retain ordinary eligibility. Explicit boot-only MAC
+	// requests through MachineSetup or SetDpuFirstBootOrder retain their behavior.
+	InterfaceId *MachineInterfaceId `protobuf:"bytes,2,opt,name=interface_id,json=interfaceId,proto3" json:"interface_id,omitempty"`
 	// Deprecated compatibility alias for `force_reconcile`.
 	//
 	// Deprecated: Marked as deprecated in nico_nico.proto.
 	Reboot bool `protobuf:"varint,3,opt,name=reboot,proto3" json:"reboot,omitempty"`
 	// Request another controller reconciliation even when the selected
-	// interface is already the desired boot interface.
+	// interface is already the desired boot interface. Does not bypass BF4 PF
+	// eligibility.
 	ForceReconcile bool `protobuf:"varint,4,opt,name=force_reconcile,json=forceReconcile,proto3" json:"force_reconcile,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -70206,17 +70229,19 @@ type GetMachineBootInterfacesResponse struct {
 	PredictedInterfaces []*PredictedBootInterface        `protobuf:"bytes,3,rep,name=predicted_interfaces,json=predictedInterfaces,proto3" json:"predicted_interfaces,omitempty"`
 	ExploredEndpoints   []*ExploredBootInterface         `protobuf:"bytes,4,rep,name=explored_endpoints,json=exploredEndpoints,proto3" json:"explored_endpoints,omitempty"`
 	RetainedInterfaces  []*RetainedBootInterface         `protobuf:"bytes,5,rep,name=retained_interfaces,json=retainedInterfaces,proto3" json:"retained_interfaces,omitempty"`
-	// The boot interface MAC the system would select for this machine right now,
-	// applying `pick_boot_interface` to the owned `machine_interfaces` rows.
-	// Absent when there is no owned candidate yet.
+	// The owned candidate MAC selected by `pick_boot_interface` over
+	// `machine_interfaces`. Default lifecycle resolution uses this candidate when
+	// no desired target is stored. Absent when there is no owned candidate yet.
 	EffectiveBootInterfaceMac *string `protobuf:"bytes,6,opt,name=effective_boot_interface_mac,json=effectiveBootInterfaceMac,proto3,oneof" json:"effective_boot_interface_mac,omitempty"`
-	// The fully-populated effective boot interface id (MAC + Redfish id), when
-	// the selected row has its interface id captured. Absent otherwise.
+	// The Redfish interface ID of the same owned candidate, when captured.
+	// Absent when no owned candidate exists or its ID has not been captured.
 	EffectiveBootInterfaceId *string `protobuf:"bytes,7,opt,name=effective_boot_interface_id,json=effectiveBootInterfaceId,proto3,oneof" json:"effective_boot_interface_id,omitempty"`
-	// True when the stores do not all agree on the boot MAC -- a signal worth a
-	// closer look during troubleshooting (e.g. the explored default points at a
-	// different NIC than the effective owned pick, or a predicted primary
-	// disagrees). See the handler for the exact comparison.
+	// True when the compared stores do not all agree on the boot MAC -- a signal
+	// worth a closer look during troubleshooting (e.g. the explored default points
+	// at a different NIC than the effective owned pick, or a predicted primary
+	// disagrees). Only the owned candidate, explored defaults, and primary
+	// predictions participate; desired intent and retained history are excluded.
+	// See the handler for the exact comparison.
 	Divergent bool `protobuf:"varint,8,opt,name=divergent,proto3" json:"divergent,omitempty"`
 	// What the automatic selection would choose if no row were flagged primary
 	// -- `pick_boot_interface`'s fallback of the lowest-MAC non-underlay row.

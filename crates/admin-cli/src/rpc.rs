@@ -262,7 +262,7 @@ impl ApiClient {
 
     /// Gather one machine's boot-interface view across all four stores -- the
     /// owned interface rows, predictions, the explored endpoint default, and
-    /// the retained post-deletion pairs -- plus the effective boot interface
+    /// the retained post-deletion pairs -- plus the effective owned candidate
     /// and a divergence flag. Read-only.
     pub(crate) async fn get_machine_boot_interfaces(
         &self,
