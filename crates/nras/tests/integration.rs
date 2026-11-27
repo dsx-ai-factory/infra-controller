@@ -182,6 +182,12 @@ async fn malformed_collections_fail_before_http() {
             "Bmc",
         ),
         ("reserved profile label", vec![device("__cmwc_t")], "Bmc"),
+        ("reserved nonce label", vec![device("nonce")], "Bmc"),
+        (
+            "reserved appraisal settings label",
+            vec![device("appraisal-settings")],
+            "Bmc",
+        ),
         ("malformed evidence", changed("evidence", "!"), "Bmc"),
         ("malformed certificate", changed("certificate", "!"), "Bmc"),
         ("odd hex length", changed("nonce", "a"), "Serde"),

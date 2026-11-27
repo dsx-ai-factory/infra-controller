@@ -372,7 +372,40 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
             .await?;
         }
         db::machine::update_state(&mut txn, &mh.host.id, &poll_state).await?;
+        db::machine::clear_failure_details(&machine_id, &mut txn).await?;
         txn.commit().await?;
+
+        if matches!(case.expected, Expected::Failed) {
+            // Reject the lifecycle write after the handler has saved the failure record.
+            sqlx::raw_sql(
+                "CREATE SEQUENCE spdm_failed_state_writes;
+                 CREATE FUNCTION reject_spdm_failed_state() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM nextval('spdm_failed_state_writes');
+                     RAISE EXCEPTION 'forced SPDM failed state persistence failure';
+                 END $$;
+                 CREATE TRIGGER reject_spdm_failed_state
+                     BEFORE UPDATE OF controller_state ON machines
+                     FOR EACH ROW
+                     WHEN (NEW.controller_state->>'state' = 'failed')
+                     EXECUTE FUNCTION reject_spdm_failed_state();",
+            )
+            .execute(&pool)
+            .await?;
+            env.run_single_iteration_without_requeue().await;
+            let attempted: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(pg_sequence_last_value('spdm_failed_state_writes'), 0)",
+            )
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(attempted, 1);
+            let machine = mh.host.machine().await;
+            assert_eq!(machine.current_state(), &poll_state);
+            assert_eq!(machine.status.failure_details.cause, FailureCause::NoError);
+            sqlx::query("DROP TRIGGER reject_spdm_failed_state ON machines")
+                .execute(&pool)
+                .await?;
+        }
 
         env.run_single_iteration().await;
         // Reload the state and persisted outcome to distinguish waiting from a handler error.
@@ -412,7 +445,7 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
             Expected::Failed => {
                 let ManagedHostState::Failed {
                     details:
-                        FailureDetails {
+                        details @ FailureDetails {
                             cause: FailureCause::SpdmAttestationFailed { err },
                             source,
                             ..
@@ -434,6 +467,64 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
                 );
                 assert_eq!(*retry_count, 0);
                 assert_eq!(*failed_machine_id, machine_id);
+                assert_eq!(
+                    &machine.status.failure_details, details,
+                    "{}: persist the same reason, source and timestamp in both records",
+                    case.scenario
+                );
+
+                // A Scout report during BMC access must remain the first recorded failure.
+                let mut txn = env.test_harness.db_txn().await;
+                db::machine::update_state(&mut txn, &mh.host.id, &poll_state).await?;
+                db::machine::clear_failure_details(&machine_id, &mut txn).await?;
+                txn.commit().await?;
+                let before_race = mh.host.machine().await;
+                let scout_failure = FailureDetails {
+                    cause: FailureCause::NVMECleanFailed {
+                        err: "Scout reported a disk cleanup failure".to_string(),
+                    },
+                    failed_at: Utc::now(),
+                    source: FailureSource::Scout,
+                };
+                let (selecting, resume) = env.redfish_sim.pause_next_client_creation();
+                let report_failure = async {
+                    selecting.await?;
+                    let mut scout_txn = pool.begin().await?;
+                    db::machine::update_failure_details_by_machine_id(
+                        &machine_id,
+                        &mut scout_txn,
+                        scout_failure.clone(),
+                    )
+                    .await?;
+                    scout_txn.commit().await?;
+                    resume
+                        .send(())
+                        .expect("resume BMC selection after the Scout report");
+                    Ok::<(), eyre::Report>(())
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    let (_, reported) =
+                        tokio::join!(env.run_single_iteration_without_requeue(), report_failure);
+                    reported
+                })
+                .await??;
+
+                // Polling yields to a fresh snapshot, which handles the Scout failure normally.
+                let machine = mh.host.machine().await;
+                assert_eq!(machine.current_state(), &poll_state);
+                assert_eq!(machine.state.version, before_race.state.version);
+                assert_eq!(machine.status.failure_details, scout_failure);
+                env.run_single_iteration_without_requeue().await;
+                let machine = mh.host.machine().await;
+                assert_eq!(
+                    machine.current_state(),
+                    &ManagedHostState::Failed {
+                        details: scout_failure.clone(),
+                        retry_count: 0,
+                        machine_id,
+                    },
+                );
+                assert_eq!(machine.status.failure_details, scout_failure);
             }
         }
     }
@@ -935,6 +1026,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         expected: Option<ManagedHostState>,
         selection_mode: AttesterSelectionMode,
         requests: &'static [model::attestation::spdm::SpdmCancellationTarget],
+        recorded_cause: FailureCause,
     }
     let passed_case = || Case {
         scenario: "a stale failed device absent from the BMC does not block selected passes",
@@ -945,6 +1037,9 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         }),
         selection_mode: AttesterSelectionMode::Allowlist,
         requests: &[],
+        recorded_cause: FailureCause::SpdmAttestationFailed {
+            err: "previous failure".to_string(),
+        },
     };
     let (mut env, mh) = setup_spdm_host(pool.clone(), true).await;
     let machine_id: MachineId = mh.host.id.into();
@@ -1025,6 +1120,24 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             ..passed_case()
         },
         Case {
+            scenario: "an existing lifecycle failure populates an empty failure record",
+            states: [
+                Some(SpdmAttestationState::Passed),
+                Some(SpdmAttestationState::Failed("verification failed".into())),
+                Some(SpdmAttestationState::Passed),
+            ],
+            recorded_cause: FailureCause::NoError,
+            expected: None,
+            ..passed_case()
+        },
+        Case {
+            scenario: "SPDM recovery preserves a different recorded failure",
+            recorded_cause: FailureCause::Discovery {
+                err: "new discovery failure".into(),
+            },
+            ..passed_case()
+        },
+        Case {
             scenario: "an empty selection advances without BMC access or results",
             states: [None, None, None],
             selection_mode: AttesterSelectionMode::None,
@@ -1102,6 +1215,18 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             }
         }
         db::machine::update_state(&mut txn, &mh.host.id, &failed_state).await?;
+        let ManagedHostState::Failed { details, .. } = &failed_state else {
+            unreachable!("the recovery fixture starts in Failed")
+        };
+        db::machine::update_failure_details_by_machine_id(
+            &machine_id,
+            &mut txn,
+            FailureDetails {
+                cause: case.recorded_cause.clone(),
+                ..details.clone()
+            },
+        )
+        .await?;
         txn.commit().await?;
         if skip_bmc {
             env.redfish_sim
@@ -1109,7 +1234,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         }
 
         let collections_before = env.redfish_sim.evidence_collection_requests().len();
-        env.run_single_iteration().await;
+        env.run_single_iteration_without_requeue().await;
         assert_eq!(
             env.redfish_sim.evidence_collection_requests().len(),
             collections_before,
@@ -1125,6 +1250,11 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             case.scenario
         );
         if case.expected.is_none() {
+            assert_eq!(
+                &machine.status.failure_details, details,
+                "{}: retain or populate the SPDM failure while recovery waits",
+                case.scenario
+            );
             // Failed states have a zero SLA, so a successful no-op records an SLA error.
             let expected_error = StateHandlerError::TimeInStateAboveSla {
                 handler_outcome: "DoNothing".to_string(),
@@ -1138,6 +1268,16 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
                 "{}: {:?}",
                 case.scenario,
                 machine.controller_state_outcome
+            );
+        } else {
+            let expected_cause = match case.recorded_cause {
+                FailureCause::SpdmAttestationFailed { .. } => FailureCause::NoError,
+                cause => cause,
+            };
+            assert_eq!(
+                machine.status.failure_details.cause, expected_cause,
+                "{}: clear only the recovered SPDM failure",
+                case.scenario
             );
         }
         // Recovery consumes existing results without inserting rows into this or another job.
@@ -1170,17 +1310,20 @@ async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<
         .bind(machine_id)
         .execute(&mut *txn)
         .await?;
+    let details = FailureDetails {
+        cause: FailureCause::SpdmAttestationFailed {
+            err: "previous failure".to_string(),
+        },
+        failed_at: Utc::now(),
+        source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
+    };
+    db::machine::update_failure_details_by_machine_id(&machine_id, &mut txn, details.clone())
+        .await?;
     db::machine::update_state(
         &mut txn,
         &mh.host.id,
         &ManagedHostState::Failed {
-            details: FailureDetails {
-                cause: FailureCause::SpdmAttestationFailed {
-                    err: "previous failure".to_string(),
-                },
-                failed_at: Utc::now(),
-                source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
-            },
+            details,
             retry_count: 7,
             machine_id,
         },
@@ -1190,9 +1333,44 @@ async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<
     env.redfish_sim
         .set_create_client_error("the BMC cannot be reached");
 
+    // A failed recovery transition must retain the explanation with the failed state.
+    sqlx::raw_sql(
+        "CREATE SEQUENCE spdm_recovery_state_writes;
+         CREATE FUNCTION reject_spdm_recovery_state() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM nextval('spdm_recovery_state_writes');
+             RAISE EXCEPTION 'forced SPDM recovery state persistence failure';
+         END $$;
+         CREATE TRIGGER reject_spdm_recovery_state
+             BEFORE UPDATE OF controller_state ON machines
+             FOR EACH ROW
+             WHEN (NEW.controller_state #>> '{machine_state,state}' = 'waitingfordiscovery')
+             EXECUTE FUNCTION reject_spdm_recovery_state();",
+    )
+    .execute(&pool)
+    .await?;
+    let failed_machine = mh.host.machine().await;
+    env.run_single_iteration_without_requeue().await;
+    let attempted: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(pg_sequence_last_value('spdm_recovery_state_writes'), 0)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(attempted, 1);
+    let machine = mh.host.machine().await;
+    assert_eq!(machine.current_state(), failed_machine.current_state());
+    assert_eq!(
+        machine.status.failure_details,
+        failed_machine.status.failure_details
+    );
+    sqlx::query("DROP TRIGGER reject_spdm_recovery_state ON machines")
+        .execute(&pool)
+        .await?;
+
     env.run_single_iteration().await;
     // Reload the persisted destination to prove recovery skipped scheduling entirely.
     let machine = mh.host.machine().await;
+    assert_eq!(machine.status.failure_details.cause, FailureCause::NoError);
     assert_eq!(
         machine.current_state(),
         &ManagedHostState::HostInit {

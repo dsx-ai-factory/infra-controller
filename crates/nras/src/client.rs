@@ -80,7 +80,12 @@ impl VerifierClient for NrasVerifierClient {
         // every attester in the message has a unique entry that must be populated in turn
         for attestation_value in attestation_values {
             let label = &attestation_value.device_id;
-            // check for duplicate
+            // Evidence labels must leave collection metadata available to the verifier.
+            if matches!(label.as_str(), "__cmwc_t" | "nonce" | "appraisal-settings") {
+                return Err(NrasError::Bmc(format!(
+                    "device id {label} is reserved for collection metadata"
+                )));
+            }
             if cmw_msg.get(label).is_some() {
                 return Err(NrasError::Bmc(format!(
                     "device id {label} cannot be repeated"

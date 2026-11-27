@@ -116,7 +116,7 @@ pub(in crate::tests) mod tests {
             let response = env
                 .api
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                    machine_id: Some(machine_id.into()),
+                    machine_id: Some(machine_id),
                     redfish_timeout_secs: u32::MAX,
                     attester_id_regex: None,
                 }))

@@ -690,7 +690,10 @@ fn machine_instance_network_restrictions(
 mod test {
     use carbide_test_support::{Check, check_values};
     use model::bmc_info::BmcInfo;
-    use model::machine::{ManagedHostStateSnapshot, slas, state_sla};
+    use model::machine::{
+        FailureCause, FailureDetails, FailureSource, ManagedHostState, ManagedHostStateSnapshot,
+        slas, state_sla,
+    };
     use model::test_support::machine_snapshot;
 
     use crate as rpc;
@@ -837,6 +840,54 @@ mod test {
                         .bmc_status
                         .expect("BMC status is populated"),
                 )
+            },
+        );
+    }
+
+    #[test]
+    fn machine_failure_details_use_the_stored_record() {
+        let nras_failure = concat!(
+            "NRAS verification failed for gpu_0: overall=Warning, device=Warning; ",
+            "details={\"reason\":\"measurement mismatch\"}; result=token-123"
+        );
+        let cause = FailureCause::SpdmAttestationFailed {
+            err: nras_failure.to_string(),
+        };
+
+        // The API reads the stored record even when the lifecycle also holds a failure.
+        check_values(
+            [
+                Check {
+                    scenario: "stored SPDM failure includes the NRAS explanation",
+                    input: cause.clone(),
+                    expect: Some(format!(
+                        "StateMachine/SpdmAttestationFailed: {nras_failure}"
+                    )),
+                },
+                Check {
+                    scenario: "an empty record produces no failure details",
+                    input: FailureCause::NoError,
+                    expect: None,
+                },
+            ],
+            |recorded_cause| {
+                let mut machine = machine_snapshot::host_machine();
+                machine.state.value = ManagedHostState::Failed {
+                    details: FailureDetails {
+                        cause: cause.clone(),
+                        source: FailureSource::StateMachine,
+                        ..machine.status.failure_details.clone()
+                    },
+                    retry_count: 0,
+                    machine_id: machine.id.into(),
+                };
+                machine.status.failure_details.cause = recorded_cause;
+                machine.status.failure_details.source = FailureSource::StateMachine;
+
+                rpc::Machine::from(machine)
+                    .status
+                    .expect("machine status is populated")
+                    .failure_details
             },
         );
     }

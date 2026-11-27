@@ -3168,7 +3168,12 @@ impl Display for FailureCause {
 
 impl Display for FailureDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.source, self.cause)
+        write!(f, "{}/{}", self.source, self.cause)?;
+        // Failure details carry the explanation; lifecycle labels use the cause alone.
+        if let FailureCause::SpdmAttestationFailed { err } = &self.cause {
+            write!(f, ": {err}")?;
+        }
+        Ok(())
     }
 }
 
@@ -6704,23 +6709,45 @@ mod tests {
     }
 
     #[test]
-    fn dpf_error_deserialization() {
+    fn failure_details_preserve_lifecycle_labels() {
         let machine_id =
             MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
                 .unwrap();
-        let state = ManagedHostState::Failed {
-            details: FailureDetails {
-                cause: FailureCause::DpfProvisioning {
-                    err: "This should be in display".to_string(),
-                },
-                failed_at: chrono::Utc::now(),
-                source: FailureSource::NoError,
-            },
-            machine_id,
-            retry_count: 1,
-        };
 
-        let output = state.to_string();
-        assert!(output.contains("This should be in display"));
+        // Detailed errors can expand without changing the labels used to identify states.
+        value_scenarios!(
+            run = |cause| {
+                let details = FailureDetails {
+                    cause,
+                    failed_at: Utc::now(),
+                    source: FailureSource::StateMachine,
+                };
+                let description = details.to_string();
+                let state = ManagedHostState::Failed {
+                    details,
+                    machine_id,
+                    retry_count: 1,
+                };
+                (description, state.to_string())
+            };
+            "DPF keeps its existing detailed state label" {
+                FailureCause::DpfProvisioning { err: "provisioning failed".into() } => (
+                    "StateMachine/DpfProvisioning provisioning failed".to_string(),
+                    "Failed/DpfProvisioning provisioning failed".to_string(),
+                ),
+            }
+            "SPDM details include the explanation while its state label stays short" {
+                FailureCause::SpdmAttestationFailed { err: "NRAS measurement mismatch".into() } => (
+                    "StateMachine/SpdmAttestationFailed: NRAS measurement mismatch".to_string(),
+                    "Failed/SpdmAttestationFailed".to_string(),
+                ),
+            }
+            "other failures keep their existing formatting" {
+                FailureCause::Discovery { err: "discovery failed".into() } => (
+                    "StateMachine/Discovery".to_string(),
+                    "Failed/Discovery".to_string(),
+                ),
+            }
+        );
     }
 }

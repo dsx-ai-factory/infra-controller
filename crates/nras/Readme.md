@@ -12,6 +12,13 @@ the device label, overall and device verdicts, any appraisal error details, and
 the result identifier (`jti`). If the response omits error details, the message
 states that no appraisal details were provided.
 
+If the appraisal causes the machine's lifecycle to fail, the machine API's
+failure details include the full stored reason. The controller saves that reason
+with the failed lifecycle state and clears the stored SPDM failure on recovery.
+For hosts already in the failed state, it fills an empty failure record on the
+next successful recovery check while attestation remains unsatisfied. Other
+recorded failures are preserved during polling and recovery.
+
 `Config::nras_url` is the service base URL, without `/v1/verify`.
 `nras_jwks_url` is the full signing-key URL, normally
 `<service-base>/.well-known/jwks.json`. `validate_jwt_expiry` controls expiry
