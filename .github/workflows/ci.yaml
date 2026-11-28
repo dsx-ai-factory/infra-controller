@@ -3523,6 +3523,8 @@ jobs:
       - build-release-container-aarch64
       - merge-manifests-nvmetal-carbide
       - build-machine-a-tron
+      - build-machine-a-tron-aarch64
+      - merge-manifests-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
       - build-scale-test-acceptance

@@ -316,6 +316,7 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
     "publish_images": frozenset(
         {
             "merge-manifests-nvmetal-carbide",
+            "merge-manifests-machine-a-tron",
             "merge-manifests-forge-cli",
             "merge-manifests-machine-validation",
             "merge-manifests-machine-validation-basic-plugin",
@@ -334,6 +335,7 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
     "source_files_changed": frozenset(
         {
             "build-machine-a-tron",
+            "build-machine-a-tron-aarch64",
             "build-mat-k8s-controller",
             "build-site-health-probe",
             "build-scale-test-acceptance",
@@ -435,6 +437,10 @@ def _core_jobs_allowed_to_skip(
     # propagate even when `publish_images` selects the manifest job itself.
     if not _read_boolean_output("prepare", prepare, "machine_lifecycle_changed"):
         allowed.add("merge-manifests-machine-lifecycle-test")
+    # Likewise the machine-a-tron manifest needs both per-arch builds, which
+    # skip when no source files changed.
+    if not _read_boolean_output("prepare", prepare, "source_files_changed"):
+        allowed.add("merge-manifests-machine-a-tron")
 
     if not (is_pull_request or is_merge_group_event):
         allowed.update(CORE_PR_ONLY_JOBS)
