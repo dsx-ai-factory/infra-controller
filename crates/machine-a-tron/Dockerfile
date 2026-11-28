@@ -21,35 +21,40 @@
 #     -f crates/machine-a-tron/Dockerfile \
 #     --build-arg VERSION=0.1.0 -t machine-a-tron:latest .
 #
+# Use --platform linux/arm64 for an aarch64 image.
+#
 # NOTE: Cross-compilation architecture
 # The BUILDER stage always runs NATIVE on the build host ($BUILDPLATFORM) and
-# cross-compiles to x86_64-unknown-linux-gnu. This avoids QEMU emulation when
-# building on Apple Silicon hosts, which would otherwise SEGFAULT while
-# assembling aws-lc-sys's hand-written x86-64 assembly code.
+# cross-compiles to the target platform ($TARGETARCH). This avoids QEMU
+# emulation when building on a host of the other architecture, which would
+# otherwise SEGFAULT while assembling aws-lc-sys's hand-written assembly code.
+# The runtime stage runs apt-get for the target platform, so build each
+# architecture on a native runner (or a host with binfmt emulation).
 #
 ARG RUST_VERSION=1.100.0
 
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
 
+ARG TARGETARCH
 ARG VERSION
 ARG CI_COMMIT_SHORT_SHA
 ENV VERSION=${VERSION}
 ENV CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    pkg-config \
-    protobuf-compiler \
-    libprotobuf-dev \
-    && if [ "$(uname -m)" != "x86_64" ]; then \
-         apt-get install -y --no-install-recommends \
-           gcc-x86-64-linux-gnu libc6-dev-amd64-cross; \
-       else \
-         apt-get install -y --no-install-recommends gcc libc6-dev; \
-       fi \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN rustup target add x86_64-unknown-linux-gnu
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu; cross_pkgs="gcc-x86-64-linux-gnu libc6-dev-amd64-cross" ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; cross_pkgs="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;; \
+      *) echo "unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git pkg-config protobuf-compiler libprotobuf-dev gcc libc6-dev; \
+    if [ "$(dpkg --print-architecture)" != "$TARGETARCH" ]; then \
+      apt-get install -y --no-install-recommends $cross_pkgs; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add "$triple"; \
+    echo "$triple" > /target-triple
 
 ENV CARGO_HOME=/cargo-home
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -62,17 +67,20 @@ COPY . .
 # Build release binary with cross-compilation
 RUN --mount=type=cache,id=nico-mat-cross-cargo-home,target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-mat-cross-cargo-target,target=/cargo-target,sharing=locked \
-    if [ "$(uname -m)" != "x86_64" ]; then \
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
-             CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc; \
-    fi && \
+    set -eu; \
+    triple=$(cat /target-triple); \
+    if [ "$(dpkg --print-architecture)" != "$TARGETARCH" ]; then \
+      gcc="${triple%%-unknown-*}-linux-gnu-gcc"; \
+      export "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER=$gcc" \
+             "CC_$(echo "$triple" | tr '-' '_')=$gcc"; \
+    fi; \
     cargo build -p carbide-machine-a-tron --bin machine-a-tron --locked --release \
-      --target x86_64-unknown-linux-gnu && \
-    mkdir -p /artifacts && \
-    cp /cargo-target/x86_64-unknown-linux-gnu/release/machine-a-tron /artifacts/machine-a-tron
+      --target "$triple"; \
+    mkdir -p /artifacts; \
+    cp "/cargo-target/$triple/release/machine-a-tron" /artifacts/machine-a-tron
 
 # Runtime image
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM debian:bookworm-slim
 
 ARG VERSION
 ARG CI_COMMIT_SHORT_SHA

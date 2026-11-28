@@ -1113,6 +1113,90 @@ jobs:
       timeout_minutes: 60
     secrets: inherit
 
+  # arm64 Machine-A-Tron, built natively: the runtime stage runs apt-get for
+  # the target platform. The Dockerfile cross-compiles from $BUILDPLATFORM, so
+  # the same file builds both architectures.
+  build-machine-a-tron-aarch64:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: crates/machine-a-tron/Dockerfile
+      context_path: .
+      # No layer cache, same reasoning as build-machine-a-tron.
+      cache: false
+      build_args: >-
+        ${{ format('{{"VERSION":"{0}","CI_COMMIT_SHORT_SHA":"{1}"}}',
+          needs.prepare.outputs.version,
+          needs.prepare.outputs.short_sha) }}
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-a-tron-aarch64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine-a-tron-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/arm64
+      runner: linux-arm64-cpu32
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      tag_latest: false
+      timeout_minutes: 60
+    secrets: inherit
+
+  # One multi-arch machine-a-tron tag, as merge-manifests-nvmetal-carbide does,
+  # so the chart's default image runs on amd64 and arm64 nodes. Sources by
+  # digest, so re-runs are idempotent.
+  merge-manifests-machine-a-tron:
+    needs:
+      - prepare
+      - build-machine-a-tron
+      - build-machine-a-tron-aarch64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' && needs.build-machine-a-tron.result == 'success' && needs.build-machine-a-tron-aarch64.result == 'success' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
+          X86_DIGEST: ${{ needs.build-machine-a-tron.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-machine-a-tron-aarch64.outputs.image_digest }}
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+            tags=("${VERSION}")
+            # Shared alias on release builds only, so PR images cannot replace it.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then tags+=("${MAJOR_MINOR_VERSION}-latest"); fi
+            for tag in "${tags[@]}"; do
+              docker buildx imagetools create -t "${IMAGE_REGISTRY}/machine-a-tron:${tag}" \
+                "${IMAGE_REGISTRY}/machine-a-tron@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/machine-a-tron-aarch64@${ARM_DIGEST}"
+            done
+
   build-mat-k8s-controller:
     if: >-
       ${{
@@ -3439,6 +3523,8 @@ jobs:
       - build-release-container-aarch64
       - merge-manifests-nvmetal-carbide
       - build-machine-a-tron
+      - build-machine-a-tron-aarch64
+      - merge-manifests-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
       - build-scale-test-acceptance
